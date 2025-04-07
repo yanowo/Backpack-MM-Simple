@@ -1,0 +1,8 @@
+{
+    "base_spread_percentage": 0.1,
+    "order_quantity": 0.01,
+    "max_orders": 5,
+    "duration": 9999999999999999999999999999999999,
+    "interval": 60,
+    "default_symbol": null
+}

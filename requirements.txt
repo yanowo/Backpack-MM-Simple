@@ -1,0 +1,6 @@
+PyNaCl==1.5.0
+requests==2.28.2
+websocket-client==1.6.0
+numpy==1.24.3
+python-dotenv==1.0.0
+rich>=10.11.0
