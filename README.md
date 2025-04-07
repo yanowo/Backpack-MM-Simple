@@ -4,6 +4,8 @@
 
 Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.exchange/refer/yan)
 
+Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
+
 ## 功能特點
 
 - 自動化做市策略
