@@ -15,7 +15,7 @@ from logger import setup_logger
 logger = setup_logger("backpack_ws")
 
 class BackpackWebSocket:
-    def __init__(self, api_key, secret_key, symbol, on_message_callback=None, auto_reconnect=True):
+    def __init__(self, api_key, secret_key, symbol, on_message_callback=None, auto_reconnect=True, proxy=None):
         """
         初始化WebSocket客户端
         
@@ -25,6 +25,8 @@ class BackpackWebSocket:
             symbol: 交易對符號
             on_message_callback: 消息回調函數
             auto_reconnect: 是否自動重連
+            proxy:  wss代理 支持格式为 http://user:pass@host:port/ 或者 http://host:port
+
         """
         self.api_key = api_key
         self.secret_key = secret_key
@@ -59,7 +61,10 @@ class BackpackWebSocket:
         self.last_heartbeat = time.time()
         self.heartbeat_interval = 30
         self.heartbeat_thread = None
-    
+
+        # 添加代理参数
+        self.proxy = proxy
+
     def initialize_orderbook(self):
         """通過REST API獲取訂單簿初始快照"""
         try:
@@ -153,9 +158,25 @@ class BackpackWebSocket:
             if hasattr(self.ws, 'sock') and self.ws.sock and self.ws.sock.connected:
                 logger.debug("發現socket已經打開，跳過run_forever")
                 return
-                
+
+            proxy_type=None
+            http_proxy_auth=None
+            http_proxy_host=None
+            http_proxy_port=None
+            if self.proxy and 3<=len(self.proxy.split(":"))<=4:
+                arrs=self.proxy.split(":")
+                proxy_type = arrs[0]
+                arrs[1]=arrs[1][2:] #去掉 //
+                if len(arrs)==3:
+                    http_proxy_host = arrs[1]
+                else:
+                    password,http_proxy_host = arrs[2].split("@")
+                    http_proxy_auth=(arrs[1],password)
+                http_proxy_port = arrs[-1]
+
             # 添加ping_interval和ping_timeout參數
-            self.ws.run_forever(ping_interval=self.heartbeat_interval, ping_timeout=10)
+            self.ws.run_forever(ping_interval=self.heartbeat_interval, ping_timeout=10, http_proxy_auth=http_proxy_auth, http_proxy_host=http_proxy_host, http_proxy_port=http_proxy_port, proxy_type=proxy_type)
+
         except Exception as e:
             logger.error(f"WebSocket運行時出錯: {e}")
         finally:

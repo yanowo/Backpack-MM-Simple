@@ -123,6 +123,7 @@ python main.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --i
 
 - `--api-key`: API 密鑰 (可選，默認使用環境變數)
 - `--secret-key`: API 密鑰 (可選，默認使用環境變數)
+- `--ws-proxy`: Websocket 代理 (可選，默認使用環境變數)
 - `--cli`: 啟動命令行界面
 - `--panel`: 啟動交互式面板
 

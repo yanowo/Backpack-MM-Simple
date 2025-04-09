@@ -28,7 +28,8 @@ class MarketMaker:
         base_spread_percentage=0.2, 
         order_quantity=None, 
         max_orders=3, 
-        rebalance_threshold=15.0
+        rebalance_threshold=15.0,
+        ws_proxy=None
     ):
         self.api_key = api_key
         self.secret_key = secret_key
@@ -37,7 +38,7 @@ class MarketMaker:
         self.order_quantity = order_quantity
         self.max_orders = max_orders
         self.rebalance_threshold = rebalance_threshold
-        
+
         # 初始化數據庫
         self.db = db_instance if db_instance else Database()
         
@@ -69,9 +70,11 @@ class MarketMaker:
         self.taker_buy_volume = 0
         self.taker_sell_volume = 0
         self.total_fees = 0
-        
+
+        # 添加代理参数
+        self.ws_proxy = ws_proxy
         # 建立WebSocket連接
-        self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+        self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True, proxy=self.ws_proxy)
         self.ws.connect()
         
         # 跟蹤活躍訂單
@@ -309,7 +312,8 @@ class MarketMaker:
                     self.secret_key, 
                     self.symbol, 
                     self.on_ws_message, 
-                    auto_reconnect=True
+                    auto_reconnect=True,
+                    proxy=self.ws_proxy
                 )
                 self.ws.connect()
                 

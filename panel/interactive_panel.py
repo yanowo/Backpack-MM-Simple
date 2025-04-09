@@ -430,13 +430,15 @@ class InteractivePanel:
             
             # 導入或獲取API密鑰
             try:
-                from config import API_KEY as CONFIG_API_KEY, SECRET_KEY as CONFIG_SECRET_KEY
+                from config import API_KEY as CONFIG_API_KEY, SECRET_KEY as CONFIG_SECRET_KEY, WS_PROXY as CONFIG_WS_PROXY
             except ImportError:
                 CONFIG_API_KEY = os.getenv('API_KEY')
                 CONFIG_SECRET_KEY = os.getenv('SECRET_KEY')
-            
+                CONFIG_WS_PROXY = os.getenv('PROXY_WEBSOCKET')
+                
             api_key = CONFIG_API_KEY
             secret_key = CONFIG_SECRET_KEY
+            ws_proxy = CONFIG_WS_PROXY
             
             if not api_key or not secret_key:
                 self.add_log("缺少API密鑰，請檢查config.py或環境變量", "ERROR")
@@ -478,7 +480,8 @@ class InteractivePanel:
                 db_instance=db,
                 base_spread_percentage=params['base_spread_percentage'],
                 order_quantity=params['order_quantity'],  # 使用設定的訂單數量
-                max_orders=params['max_orders']
+                max_orders=params['max_orders'],
+                ws_proxy=ws_proxy
             )
             
             # 標記策略為運行狀態

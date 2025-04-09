@@ -10,6 +10,7 @@ load_dotenv()
 # API配置
 API_KEY = os.getenv('API_KEY')
 SECRET_KEY = os.getenv('SECRET_KEY')
+WS_PROXY = os.getenv('PROXY_WEBSOCKET')
 API_URL = "https://api.backpack.exchange"
 WS_URL = "wss://ws.backpack.exchange"
 API_VERSION = "v1"

@@ -55,12 +55,12 @@ def get_markets_command():
         market_type = market.get('marketType')
         print(f"{i+1}. {symbol} ({base}/{quote}) - {market_type}")
 
-def get_orderbook_command(api_key, secret_key):
+def get_orderbook_command(api_key, secret_key, ws_proxy=None):
     """獲取市場深度命令"""
     symbol = input("請輸入交易對 (例如: SOL_USDC): ")
     try:
         print("連接WebSocket獲取實時訂單簿...")
-        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True)
+        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True, proxy=ws_proxy)
         ws.connect()
         
         # 等待連接建立
@@ -151,7 +151,7 @@ def get_orderbook_command(api_key, secret_key):
         except Exception as e:
             print(f"使用REST API獲取訂單簿也失敗: {str(e)}")
 
-def run_market_maker_command(api_key, secret_key):
+def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     """執行做市策略命令"""
     symbol = input("請輸入要做市的交易對 (例如: SOL_USDC): ")
     markets_info = get_markets()
@@ -186,7 +186,8 @@ def run_market_maker_command(api_key, secret_key):
             db_instance=db,
             base_spread_percentage=spread_percentage,
             order_quantity=quantity,
-            max_orders=max_orders
+            max_orders=max_orders,
+            ws_proxy=ws_proxy
         )
         
         # 執行做市策略
@@ -291,14 +292,14 @@ def trading_stats_command(api_key, secret_key):
         import traceback
         traceback.print_exc()
 
-def market_analysis_command(api_key, secret_key):
+def market_analysis_command(api_key, secret_key, ws_proxy=None):
     """市場分析命令"""
     symbol = input("請輸入要分析的交易對 (例如: SOL_USDC): ")
     try:
         print("\n執行市場分析...")
         
         # 創建臨時WebSocket連接
-        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True)
+        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True, proxy=ws_proxy)
         ws.connect()
         
         # 等待連接建立
@@ -451,7 +452,7 @@ def market_analysis_command(api_key, secret_key):
         import traceback
         traceback.print_exc()
 
-def main_cli(api_key=API_KEY, secret_key=SECRET_KEY):
+def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None):
     """主CLI函數"""
     while True:
         print("\n===== Backpack Exchange 交易程序 =====")
@@ -473,13 +474,13 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY):
         elif operation == '3':
             get_markets_command()
         elif operation == '4':
-            get_orderbook_command(api_key, secret_key)
+            get_orderbook_command(api_key, secret_key, ws_proxy=ws_proxy)
         elif operation == '5':
-            run_market_maker_command(api_key, secret_key)
+            run_market_maker_command(api_key, secret_key, ws_proxy=ws_proxy)
         elif operation == '6':
             trading_stats_command(api_key, secret_key)
         elif operation == '7':
-            market_analysis_command(api_key, secret_key)
+            market_analysis_command(api_key, secret_key, ws_proxy=ws_proxy)
         elif operation == '8':
             print("退出程序。")
             break

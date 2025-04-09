@@ -10,10 +10,11 @@ import os
 # 嘗試導入需要的模塊
 try:
     from logger import setup_logger
-    from config import API_KEY, SECRET_KEY
+    from config import API_KEY, SECRET_KEY, WS_PROXY
 except ImportError:
     API_KEY = os.getenv('API_KEY')
     SECRET_KEY = os.getenv('SECRET_KEY')
+    WS_PROXY = os.getenv('PROXY_WEBSOCKET')
     
     def setup_logger(name):
         import logging
@@ -38,6 +39,7 @@ def parse_arguments():
     # 基本參數
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
+    parser.add_argument('--ws-proxy', type=str, help='WebSocket Proxy (可選，默認使用環境變數或配置文件)')
     
     # 做市參數
     parser.add_argument('--symbol', type=str, help='交易對 (例如: SOL_USDC)')
@@ -56,6 +58,9 @@ def main():
     # 優先使用命令行參數中的API密鑰
     api_key = args.api_key or API_KEY
     secret_key = args.secret_key or SECRET_KEY
+
+    # 读取wss代理
+    ws_proxy = args.ws_proxy or WS_PROXY
     
     # 檢查API密鑰
     if not api_key or not secret_key:
@@ -76,7 +81,7 @@ def main():
         # 啟動命令行界面
         try:
             from cli.commands import main_cli
-            main_cli(api_key, secret_key)
+            main_cli(api_key, secret_key, ws_proxy=ws_proxy)
         except ImportError as e:
             logger.error(f"啟動命令行界面時出錯: {str(e)}")
             sys.exit(1)
@@ -92,7 +97,8 @@ def main():
                 symbol=args.symbol,
                 base_spread_percentage=args.spread,
                 order_quantity=args.quantity,
-                max_orders=args.max_orders
+                max_orders=args.max_orders,
+                ws_proxy=ws_proxy
             )
             
             # 執行做市策略
