@@ -765,21 +765,54 @@ class MarketMaker:
         """判斷是否需要重平衡倉位"""
         if self.total_bought == 0 and self.total_sold == 0:
             return False
-        if self.total_bought == 0 or self.total_sold == 0:
-            return True
-        
-        # 計算不平衡程度
-        imbalance_percentage = abs(self.total_bought - self.total_sold) / max(self.total_bought, self.total_sold) * 100
-        
-        # 獲取淨倉位和方向
+            
+        # 計算淨部位
         net_position = self.total_bought - self.total_sold
-        position_direction = 1 if net_position > 0 else -1 if net_position < 0 else 0
+        if net_position == 0:
+            return False
+            
+        # 獲取當前賬戶餘額
+        balances = get_balance(self.api_key, self.secret_key)
+        if isinstance(balances, dict) and "error" in balances:
+            logger.error(f"獲取餘額失敗: {balances['error']}")
+            # 如果無法獲取餘額，則使用舊方法
+            imbalance_percentage = abs(net_position) / max(self.total_bought, self.total_sold) * 100
+            return imbalance_percentage > self.rebalance_threshold
+            
+        # 計算總資產價值（以報價貨幣計算）
+        total_assets = 0
         
-        logger.info(f"當前倉位: 買入 {self.total_bought} {self.base_asset}, 賣出 {self.total_sold} {self.base_asset}")
-        logger.info(f"不平衡百分比: {imbalance_percentage:.2f}%")
+        # 獲取當前價格，用於轉換基礎貨幣到報價貨幣
+        current_price = self.get_current_price()
+        if not current_price:
+            logger.warning("無法獲取當前價格，使用舊方法計算不平衡度")
+            imbalance_percentage = abs(net_position) / max(self.total_bought, self.total_sold) * 100
+            return imbalance_percentage > self.rebalance_threshold
         
-        # 使用固定閾值
-        return imbalance_percentage > self.rebalance_threshold
+        # 累加所有資產價值
+        for asset, details in balances.items():
+            available = float(details.get('available', 0))
+            locked = float(details.get('locked', 0))
+            total = available + locked
+            
+            if asset == self.quote_asset:
+                # 報價貨幣直接加入
+                total_assets += total
+            elif asset == self.base_asset:
+                # 基礎貨幣轉換為報價貨幣的價值
+                total_assets += total * current_price
+        
+        # 計算淨部位價值（以報價貨幣計）
+        net_position_value = abs(net_position) * current_price
+        
+        # 計算風險暴露比例
+        risk_exposure = (net_position_value / total_assets) * 100 if total_assets > 0 else 0
+        
+        logger.info(f"當前淨部位: {net_position} {self.base_asset} (價值: {net_position_value:.2f} {self.quote_asset})")
+        logger.info(f"總資產價值: {total_assets:.2f} {self.quote_asset}")
+        logger.info(f"風險暴露比例: {risk_exposure:.2f}%")
+        
+        return risk_exposure > self.rebalance_threshold
     
     def rebalance_position(self):
         """重平衡倉位"""
@@ -1196,7 +1229,7 @@ class MarketMaker:
         self.active_buy_orders = active_buy_orders
         self.active_sell_orders = active_sell_orders
         
-        # 輸出訂單數量變化，方便追踪
+        # 輸出訂單數量變化，方便追蹤
         if prev_buy_orders != len(active_buy_orders) or prev_sell_orders != len(active_sell_orders):
             logger.info(f"訂單數量變更: 買單 {prev_buy_orders} -> {len(active_buy_orders)}, 賣單 {prev_sell_orders} -> {len(active_sell_orders)}")
         
