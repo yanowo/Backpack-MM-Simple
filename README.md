@@ -88,6 +88,7 @@ pip install -r requirements.txt
 ```
 API_KEY=your_api_key
 SECRET_KEY=your_secret_key
+PROXY_WEBSOCKET=http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
 ```
 
 ## 使用方法
