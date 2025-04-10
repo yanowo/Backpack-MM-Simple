@@ -1467,6 +1467,11 @@ class MarketMaker:
                     self.subscribe_order_updates()
             
             while time.time() - start_time < duration_seconds:
+                # 檢查WebSocket是否已被手動關閉
+                if not self.ws or not self.ws.running:
+                    logger.info("WebSocket連接已被手動關閉，終止做市策略")
+                    break
+
                 iteration += 1
                 current_time = time.time()
                 logger.info(f"\n=== 第 {iteration} 次迭代 ===")
@@ -1597,7 +1602,7 @@ class MarketMaker:
             
             # 關閉 WebSocket
             if self.ws:
-                self.ws.close()
+                self.ws.close(manual_close=True)
             
             # 關閉數據庫連接
             if self.db:
