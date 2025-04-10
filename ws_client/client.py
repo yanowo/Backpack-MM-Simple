@@ -49,7 +49,6 @@ class BackpackWebSocket:
         self.max_reconnect_delay = 30
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 10
-        self.reconnect_timeout = 15  # 添加重連總超時時間
         self.running = False
         self.ws_thread = None
         
@@ -76,10 +75,11 @@ class BackpackWebSocket:
     def _setup_signal_handlers(self):
         """設置信號處理器以便正確響應中斷"""
         try:
-            # 僅在主線程中設置信號處理
-            if threading.current_thread() is threading.main_thread():
+            # 僅在主線程中設置信號處理，且只設置一次
+            if threading.current_thread() is threading.main_thread() and not hasattr(self, '_signal_handlers_set'):
                 signal.signal(signal.SIGINT, self._handle_signal)
                 signal.signal(signal.SIGTERM, self._handle_signal)
+                self._signal_handlers_set = True
                 logger.debug("信號處理器已設置")
         except Exception as e:
             logger.error(f"設置信號處理器失敗: {e}")
@@ -87,9 +87,7 @@ class BackpackWebSocket:
     def _handle_signal(self, sig, frame):
         """處理終止信號"""
         logger.info(f"收到信號 {sig}，正在關閉連接...")
-        self.running = False
-        self.auto_reconnect = False
-        self.close()
+        self.close(manual_close=True)  # 明確指定這是手動關閉
 
     def initialize_orderbook(self):
         """通過REST API獲取訂單簿初始快照"""
@@ -189,7 +187,7 @@ class BackpackWebSocket:
             with self.ws_lock:
                 if self.connected or self.ws is not None:
                     logger.info("已存在連接，先關閉舊連接")
-                    self.close()
+                    self.close(manual_close=False)
                 
                 self.running = True
                 self.reconnect_attempts = 0
@@ -219,7 +217,7 @@ class BackpackWebSocket:
                 # 檢查是否連接成功
                 if not self.connected:
                     logger.error(f"WebSocket連接超時 (超過 {self.connect_timeout} 秒)")
-                    self.close()  # 關閉未成功的連接
+                    self.close(manual_close=False)  # 關閉未成功的連接
                     return False
                 
                 # 啟動心跳檢測
@@ -227,7 +225,7 @@ class BackpackWebSocket:
                 return True
         except Exception as e:
             logger.error(f"建立WebSocket連接時出錯: {e}")
-            self.close()  # 確保資源被清理
+            self.close(manual_close=False)  # 確保資源被清理
             return False
     
     def ws_run_forever(self):
@@ -315,7 +313,7 @@ class BackpackWebSocket:
             # 完全斷開並清理之前的WebSocket連接
             if self.ws:
                 try:
-                    # 標記為主動關閉以避免觸發重連
+                    # 標記為自動關閉以避免觸發重連
                     if not hasattr(self.ws, '_closed_by_me'):
                         self.ws._closed_by_me = True
                     else:
@@ -630,8 +628,10 @@ class BackpackWebSocket:
             except Exception as e:
                 logger.debug(f"關閉socket時出錯: {e}")
         
-        # 檢查是否為正常關閉或是否應該重連
-        if close_status_code == 1000 or getattr(ws, '_closed_by_me', False):
+        # 判斷是否為手動關閉
+        is_manual_close = close_status_code == 1000 or getattr(ws, '_closed_by_me', False)
+        
+        if is_manual_close:
             logger.info("WebSocket正常關閉，不進行重連")
         elif previous_connected and self.running and self.auto_reconnect and self.reconnect_attempts < self.max_reconnect_attempts:
             logger.info("WebSocket非正常關閉，將自動重連")
@@ -642,28 +642,33 @@ class BackpackWebSocket:
         elif self.reconnect_attempts >= self.max_reconnect_attempts:
             logger.warning(f"已達到最大重連嘗試次數 ({self.max_reconnect_attempts})，不再重連")
     
-    def close(self):
-        """完全關閉WebSocket連接"""
+    def close(self, manual_close=True):
+        """完全關閉WebSocket連接
+        
+        Args:
+            manual_close: 是否為手動關閉，如果是則禁用自動重連，否則保持重連設置不變
+        """
+        # 首先設置標誌，防止重複調用
+        if hasattr(self, '_closing') and self._closing:
+            return
+        self._closing = True
+        
         try:
-            # 嘗試獲取鎖，但有超時限制
-            lock_acquired = self.ws_lock.acquire(timeout=5)
-            if not lock_acquired:
-                logger.warning("無法獲取鎖進行關閉操作，強制關閉")
-                # 即使無法獲得鎖也繼續關閉
-        except Exception as lock_error:
-            logger.error(f"獲取鎖時出錯: {lock_error}")
+            logger.info("關閉WebSocket連接..." + ("(手動關閉)" if manual_close else "(意外斷線)"))
             
-        try:
-            logger.info("主動關閉WebSocket連接...")
-            self.running = False
+            # 只有在手動關閉時才完全停止運行並禁用自動重連
+            if manual_close:
+                self.running = False
+                self.auto_reconnect = False
+                
             self.connected = False
             
             # 停止心跳檢測線程
             if self.heartbeat_thread and self.heartbeat_thread.is_alive():
                 try:
                     self.heartbeat_thread.join(timeout=1)
-                except Exception as e:
-                    logger.debug(f"等待心跳線程終止時出錯: {e}")
+                except Exception:
+                    pass
             self.heartbeat_thread = None
             
             # 安全關閉WebSocket
@@ -671,9 +676,7 @@ class BackpackWebSocket:
                 # 標記為主動關閉
                 if not hasattr(self.ws, '_closed_by_me'):
                     self.ws._closed_by_me = True
-                else:
-                    self.ws._closed_by_me = True
-                    
+                
                 try:
                     # 關閉WebSocket
                     self.ws.keep_running = False  # 設置停止運行標記
@@ -691,34 +694,34 @@ class BackpackWebSocket:
                     # 無論如何都確保清理
                     self.ws = None
             
-            # 確保等待WebSocket線程終止
+            # 處理線程終止
             if self.ws_thread and self.ws_thread.is_alive():
-                start_time = time.time()
-                max_wait = 2  # 最多等待2秒
-                
-                # 使用循環檢查，以便能快速響應線程結束
-                while self.ws_thread.is_alive() and time.time() - start_time < max_wait:
-                    time.sleep(0.1)
-                
-                # 如果線程仍然存活，記錄但不再等待
-                if self.ws_thread.is_alive():
-                    logger.warning(f"WebSocket線程未在 {max_wait} 秒內終止")
+                if manual_close:
+                    # 手動關閉時不等待太久
+                    try:
+                        self.ws_thread.join(timeout=1)
+                    except Exception:
+                        pass
+                    # 不管是否成功終止，直接設為None
+                    self.ws_thread = None
+                else:
+                    # 非手動關閉時給更多時間終止
+                    try:
+                        self.ws_thread.join(timeout=2)
+                    except Exception:
+                        pass
             
             self.ws_thread = None
             
             # 重置訂閲狀態
             self.subscriptions = []
             
-            logger.info("WebSocket連接已完全關閉")
+            logger.info("WebSocket連接已完全關閉" + (" - 已禁用自動重連" if manual_close else ""))
+            logger.info(f"等待保存資料庫並關閉...")
         except Exception as e:
             logger.error(f"關閉WebSocket過程中發生錯誤: {e}")
         finally:
-            # 如果成功獲取了鎖，確保釋放
-            if 'lock_acquired' in locals() and lock_acquired:
-                try:
-                    self.ws_lock.release()
-                except Exception as release_error:
-                    logger.error(f"釋放鎖時出錯: {release_error}")
+            self._closing = False
     
     def get_current_price(self):
         """獲取當前價格"""
