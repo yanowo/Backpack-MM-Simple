@@ -284,62 +284,67 @@ class MarketMaker:
     
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
-        ws_connected = self.ws and self.ws.is_connected()
-        
-        if not ws_connected:
-            logger.warning("WebSocket連接已斷開或不可用，嘗試重新連接...")
+        if not self.ws:
+            logger.warning("WebSocket對象不存在，嘗試重新創建...")
+            return self._recreate_websocket()
             
-            # 嘗試關閉現有連接
+        ws_connected = self.ws.is_connected()
+        
+        if not ws_connected and not getattr(self.ws, 'reconnecting', False):
+            logger.warning("WebSocket連接已斷開，觸發重連...")
+            # 使用 WebSocket 自己的重連機制
+            self.ws.check_and_reconnect_if_needed()
+        
+        return self.ws.is_connected() if self.ws else False
+    
+    def _recreate_websocket(self):
+        """重新創建WebSocket連接"""
+        try:
+            logger.info("重新創建WebSocket連接...")
+            
+            # 安全關閉現有連接
             if self.ws:
                 try:
-                    if hasattr(self.ws, 'running') and self.ws.running:
-                        self.ws.running = False
-                    if hasattr(self.ws, 'ws') and self.ws.ws:
-                        try:
-                            self.ws.ws.close()
-                        except:
-                            pass
+                    self.ws.running = False
                     self.ws.close()
                     time.sleep(0.5)
                 except Exception as e:
-                    logger.error(f"關閉現有WebSocket時出錯: {e}")
+                    logger.debug(f"關閉現有WebSocket時的預期錯誤: {e}")
             
             # 創建新的連接
-            try:
-                logger.info("創建新的WebSocket連接...")
-                self.ws = BackpackWebSocket(
-                    self.api_key, 
-                    self.secret_key, 
-                    self.symbol, 
-                    self.on_ws_message, 
-                    auto_reconnect=True,
-                    proxy=self.ws_proxy
-                )
-                self.ws.connect()
+            self.ws = BackpackWebSocket(
+                self.api_key, 
+                self.secret_key, 
+                self.symbol, 
+                self.on_ws_message, 
+                auto_reconnect=True,
+                proxy=self.ws_proxy
+            )
+            self.ws.connect()
+            
+            # 等待連接建立，但不要等太久
+            wait_time = 0
+            max_wait_time = 3  # 減少等待時間
+            while not self.ws.is_connected() and wait_time < max_wait_time:
+                time.sleep(0.5)
+                wait_time += 0.5
                 
-                # 等待連接建立
-                wait_time = 0
-                max_wait_time = 5
-                while not self.ws.is_connected() and wait_time < max_wait_time:
-                    time.sleep(0.5)
-                    wait_time += 0.5
-                    
-                if self.ws.is_connected():
-                    logger.info("WebSocket重新連接成功")
-                    
-                    # 重新初始化
-                    self.ws.initialize_orderbook()
-                    self.ws.subscribe_depth()
-                    self.ws.subscribe_bookTicker()
-                    self.subscribe_order_updates()
-                else:
-                    logger.warning("WebSocket重新連接嘗試中，將在下次迭代再次檢查")
-                    
-            except Exception as e:
-                logger.error(f"創建新WebSocket連接時出錯: {e}")
+            if self.ws.is_connected():
+                logger.info("WebSocket重新創建成功")
+                
+                # 重新初始化
+                self.ws.initialize_orderbook()
+                self.ws.subscribe_depth()
+                self.ws.subscribe_bookTicker()
+                self.subscribe_order_updates()
+                return True
+            else:
+                logger.warning("WebSocket重新創建後仍未連接，但繼續運行")
                 return False
-        
-        return self.ws and self.ws.is_connected()
+                
+        except Exception as e:
+            logger.error(f"重新創建WebSocket連接時出錯: {e}")
+            return False
     
     def on_ws_message(self, stream, data):
         """處理WebSocket消息回調"""
