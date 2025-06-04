@@ -699,7 +699,7 @@ class MarketMaker:
             if not bids or not asks:
                 return None, None
             
-            highest_bid = float(bids[0][0]) if bids else None
+            highest_bid = float(bids[-1][0]) if bids else None
             lowest_ask = float(asks[0][0]) if asks else None
             
             return highest_bid, lowest_ask
