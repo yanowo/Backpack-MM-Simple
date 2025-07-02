@@ -31,8 +31,9 @@ def round_to_tick_size(price: float, tick_size: float) -> float:
         調整後的價格
     """
     tick_size_float = float(tick_size)
+    tick_size_str = format(tick_size_float, 'f').rstrip('0')
+    precision = len(tick_size_str.split('.')[-1]) if '.' in tick_size_str else 0
     rounded_price = round(price / tick_size_float) * tick_size_float
-    precision = len(str(tick_size_float).split('.')[-1]) if '.' in str(tick_size_float) else 0
     return round(rounded_price, precision)
 
 def calculate_volatility(prices: List[float], window: int = 20) -> float:
