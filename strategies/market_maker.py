@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from api.client import (
     get_balance, execute_order, get_open_orders, cancel_all_orders, 
-    cancel_order, get_market_limits, get_klines, get_ticker, get_order_book
+    cancel_order, get_market_limits, get_klines, get_ticker, get_order_book,
+    get_borrow_lend_positions
 )
 from ws_client.client import BackpackWebSocket
 from database.db import Database
@@ -635,6 +636,79 @@ class MarketMaker:
         
         return bid_price, ask_price
     
+    def get_comprehensive_balance(self):
+        """獲取包含借貸倉位的綜合餘額信息"""
+        try:
+            # 獲取普通餘額
+            balances = get_balance(self.api_key, self.secret_key)
+            if isinstance(balances, dict) and "error" in balances:
+                logger.error(f"獲取普通餘額失敗: {balances['error']}")
+                return None
+            
+            # 獲取借貸倉位
+            borrow_lend_positions = get_borrow_lend_positions(self.api_key, self.secret_key)
+            if isinstance(borrow_lend_positions, dict) and "error" in borrow_lend_positions:
+                logger.warning(f"獲取借貸倉位失敗: {borrow_lend_positions['error']}，將只使用普通餘額")
+                borrow_lend_positions = []
+            
+            # 創建綜合餘額字典
+            comprehensive_balances = {}
+            
+            # 先添加普通餘額
+            for asset, balance_info in balances.items():
+                comprehensive_balances[asset] = {
+                    'available': float(balance_info.get('available', 0)),
+                    'locked': float(balance_info.get('locked', 0)),
+                    'borrowed': 0.0,
+                    'lent': 0.0
+                }
+            
+            # 如果有借貸倉位數據，則整合進來
+            if isinstance(borrow_lend_positions, list):
+                for position in borrow_lend_positions:
+                    asset = position.get('symbol')  # API使用'symbol'字段而不是'asset'
+                    if not asset:
+                        continue
+                    
+                    # 確保資產在綜合餘額中存在
+                    if asset not in comprehensive_balances:
+                        comprehensive_balances[asset] = {
+                            'available': 0.0,
+                            'locked': 0.0,
+                            'borrowed': 0.0,
+                            'lent': 0.0
+                        }
+                    
+                    # 根據實際API數據結構處理借貸信息
+                    net_quantity = float(position.get('netQuantity', 0))
+                    
+                    # 如果net_quantity為正，表示有借出或持有
+                    # 如果net_quantity為負，表示有借入
+                    if net_quantity >= 0:
+                        comprehensive_balances[asset]['lent'] = net_quantity
+                        comprehensive_balances[asset]['borrowed'] = 0.0
+                    else:
+                        comprehensive_balances[asset]['borrowed'] = abs(net_quantity)
+                        comprehensive_balances[asset]['lent'] = 0.0
+            
+            # 計算每個資產的凈餘額（考慮借貸）
+            for asset, balance_info in comprehensive_balances.items():
+                net_balance = (balance_info['available'] + balance_info['locked'] + 
+                              balance_info['lent'] - balance_info['borrowed'])
+                balance_info['net_balance'] = net_balance
+                
+                logger.debug(f"資產 {asset}: 可用={balance_info['available']}, "
+                           f"鎖定={balance_info['locked']}, 借入={balance_info['borrowed']}, "
+                           f"借出={balance_info['lent']}, 凈餘額={net_balance}")
+            
+            return comprehensive_balances
+            
+        except Exception as e:
+            logger.error(f"獲取綜合餘額時出錯: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def calculate_dynamic_spread(self):
         """計算動態價差基於市場情況"""
         base_spread = self.base_spread_percentage
@@ -700,14 +774,13 @@ class MarketMaker:
             return None, None
     
     def need_rebalance(self):
-        """判斷是否需要重平衡倉位（純餘額導向）"""
+        """判斷是否需要重平衡倉位（純餘額導向，包含借貸倉位）"""
         logger.info("檢查是否需要重平衡倉位...")
         
-        # 獲取當前賬戶餘額
-        balances = get_balance(self.api_key, self.secret_key)
-        if isinstance(balances, dict) and "error" in balances:
-            logger.error(f"獲取餘額失敗: {balances['error']}")
-            logger.info("無法獲取餘額，跳過重平衡檢查")
+        # 獲取包含借貸倉位的綜合餘額
+        comprehensive_balances = self.get_comprehensive_balance()
+        if not comprehensive_balances:
+            logger.error("無法獲取綜合餘額，跳過重平衡檢查")
             return False
             
         # 獲取當前價格
@@ -716,21 +789,17 @@ class MarketMaker:
             logger.warning("無法獲取當前價格，跳過重平衡檢查")
             return False
         
-        # 獲取基礎資產和報價資產的實際餘額
+        # 獲取基礎資產和報價資產的綜合餘額（包含借貸）
         base_balance = 0
         quote_balance = 0
         
-        if self.base_asset in balances:
-            base_details = balances[self.base_asset]
-            base_available = float(base_details.get('available', 0))
-            base_locked = float(base_details.get('locked', 0))
-            base_balance = base_available + base_locked
+        if self.base_asset in comprehensive_balances:
+            base_info = comprehensive_balances[self.base_asset]
+            base_balance = base_info['net_balance']  # 使用凈餘額
         
-        if self.quote_asset in balances:
-            quote_details = balances[self.quote_asset]
-            quote_available = float(quote_details.get('available', 0))
-            quote_locked = float(quote_details.get('locked', 0))
-            quote_balance = quote_available + quote_locked
+        if self.quote_asset in comprehensive_balances:
+            quote_info = comprehensive_balances[self.quote_asset]
+            quote_balance = quote_info['net_balance']  # 使用凈餘額
         
         # 計算總資產價值（以報價貨幣計算）
         total_assets = quote_balance + (base_balance * current_price)
@@ -749,8 +818,20 @@ class MarketMaker:
         deviation_value = abs(actual_base_value - ideal_base_value)
         risk_exposure = (deviation_value / total_assets) * 100 if total_assets > 0 else 0
         
-        logger.info(f"當前基礎資產餘額: {base_balance} {self.base_asset}")
-        logger.info(f"當前報價資產餘額: {quote_balance} {self.quote_asset}")
+        logger.info(f"當前基礎資產凈餘額: {base_balance} {self.base_asset}")
+        logger.info(f"當前報價資產凈餘額: {quote_balance} {self.quote_asset}")
+        
+        # 顯示詳細的借貸信息
+        if self.base_asset in comprehensive_balances:
+            base_info = comprehensive_balances[self.base_asset]
+            logger.info(f"基礎資產詳情: 可用={base_info['available']}, 鎖定={base_info['locked']}, "
+                       f"借入={base_info['borrowed']}, 借出={base_info['lent']}")
+        
+        if self.quote_asset in comprehensive_balances:
+            quote_info = comprehensive_balances[self.quote_asset]
+            logger.info(f"報價資產詳情: 可用={quote_info['available']}, 鎖定={quote_info['locked']}, "
+                       f"借入={quote_info['borrowed']}, 借出={quote_info['lent']}")
+        
         logger.info(f"總資產價值: {total_assets:.2f} {self.quote_asset}")
         logger.info(f"理想基礎資產價值: {ideal_base_value:.2f} {self.quote_asset}")
         logger.info(f"實際基礎資產價值: {actual_base_value:.2f} {self.quote_asset}")
@@ -763,14 +844,14 @@ class MarketMaker:
         return need_rebalance
     
     def rebalance_position(self):
-        """重平衡倉位"""
+        """重平衡倉位（考慮借貸倉位）"""
         logger.info("開始重新平衡倉位...")
         self.check_ws_connection()
         
-        # 獲取實際餘額而不是累計交易記錄
-        balances = get_balance(self.api_key, self.secret_key)
-        if isinstance(balances, dict) and "error" in balances:
-            logger.error(f"獲取餘額失敗: {balances['error']}")
+        # 獲取包含借貸倉位的綜合餘額
+        comprehensive_balances = self.get_comprehensive_balance()
+        if not comprehensive_balances:
+            logger.error("無法獲取綜合餘額，無法進行重平衡")
             return
             
         # 獲取當前價格
@@ -785,26 +866,35 @@ class MarketMaker:
             bid_price = current_price * 0.998
             ask_price = current_price * 1.002
         
-        # 獲取可用餘額
+        # 獲取綜合餘額信息
         base_available = 0
         quote_available = 0
         base_total = 0
         quote_total = 0
         
-        if self.base_asset in balances:
-            base_details = balances[self.base_asset]
-            base_available = float(base_details.get('available', 0))
-            base_locked = float(base_details.get('locked', 0))
-            base_total = base_available + base_locked
+        if self.base_asset in comprehensive_balances:
+            base_info = comprehensive_balances[self.base_asset]
+            base_available = base_info['available']  # 只有可用餘額才能用於交易
+            base_total = base_info['net_balance']    # 凈餘額用於總計算
         
-        if self.quote_asset in balances:
-            quote_details = balances[self.quote_asset]
-            quote_available = float(quote_details.get('available', 0))
-            quote_locked = float(quote_details.get('locked', 0))
-            quote_total = quote_available + quote_locked
+        if self.quote_asset in comprehensive_balances:
+            quote_info = comprehensive_balances[self.quote_asset]
+            quote_available = quote_info['available']  # 只有可用餘額才能用於交易
+            quote_total = quote_info['net_balance']    # 凈餘額用於總計算
         
-        logger.info(f"基礎資產: 可用 {base_available}, 總計 {base_total} {self.base_asset}")
-        logger.info(f"報價資產: 可用 {quote_available}, 總計 {quote_total} {self.quote_asset}")
+        logger.info(f"基礎資產: 可用 {base_available}, 凈總計 {base_total} {self.base_asset}")
+        logger.info(f"報價資產: 可用 {quote_available}, 凈總計 {quote_total} {self.quote_asset}")
+        
+        # 顯示詳細的借貸信息
+        if self.base_asset in comprehensive_balances:
+            base_info = comprehensive_balances[self.base_asset]
+            logger.info(f"基礎資產詳情: 可用={base_info['available']}, 鎖定={base_info['locked']}, "
+                       f"借入={base_info['borrowed']}, 借出={base_info['lent']}")
+        
+        if self.quote_asset in comprehensive_balances:
+            quote_info = comprehensive_balances[self.quote_asset]
+            logger.info(f"報價資產詳情: 可用={quote_info['available']}, 鎖定={quote_info['locked']}, "
+                       f"借入={quote_info['borrowed']}, 借出={quote_info['lent']}")
         
         # 計算總資產價值
         total_assets = quote_total + (base_total * current_price)
@@ -941,20 +1031,45 @@ class MarketMaker:
         
         # 處理訂單數量
         if self.order_quantity is None:
-            balances = get_balance(self.api_key, self.secret_key)
-            if isinstance(balances, dict) and "error" in balances:
-                logger.error(f"獲取餘額失敗: {balances['error']}")
+            comprehensive_balances = self.get_comprehensive_balance()
+            if not comprehensive_balances:
+                logger.error("無法獲取綜合餘額，跳過下單")
                 return
             
             base_balance = 0
             quote_balance = 0
-            for asset, balance in balances.items():
-                if asset == self.base_asset:
-                    base_balance = float(balance.get('available', 0))
-                elif asset == self.quote_asset:
-                    quote_balance = float(balance.get('available', 0))
             
-            logger.info(f"當前餘額: {base_balance} {self.base_asset}, {quote_balance} {self.quote_asset}")
+            if self.base_asset in comprehensive_balances:
+                base_info = comprehensive_balances[self.base_asset]
+                # 使用净余额，因为借出的资产也可以用于交易
+                base_balance = base_info['net_balance']
+            
+            if self.quote_asset in comprehensive_balances:
+                quote_info = comprehensive_balances[self.quote_asset]
+                # 使用净余额，因为借出的资产也可以用于交易
+                quote_balance = quote_info['net_balance']
+            
+            logger.info(f"當前淨餘額: {base_balance} {self.base_asset}, {quote_balance} {self.quote_asset}")
+            
+            # 顯示詳細的借貸信息
+            if self.base_asset in comprehensive_balances:
+                base_info = comprehensive_balances[self.base_asset]
+                logger.info(f"基礎資產詳情: 可用={base_info['available']}, 鎖定={base_info['locked']}, "
+                           f"借入={base_info['borrowed']}, 借出={base_info['lent']}, 凈餘額={base_info['net_balance']}")
+            
+            if self.quote_asset in comprehensive_balances:
+                quote_info = comprehensive_balances[self.quote_asset]
+                logger.info(f"報價資產詳情: 可用={quote_info['available']}, 鎖定={quote_info['locked']}, "
+                           f"借入={quote_info['borrowed']}, 借出={quote_info['lent']}, 凈餘額={quote_info['net_balance']}")
+            
+            # 檢查是否有足夠的净余額進行做市
+            if base_balance <= 0 and quote_balance <= 0:
+                logger.error("警告：基礎資產和報價資產的淨餘額都≤0，無法進行雙向做市！")
+                return  # 跳過下單
+            elif quote_balance <= 0:
+                logger.warning(f"警告：{self.quote_asset} 淨餘額≤0，只能下賣單，無法下買單")
+            elif base_balance <= 0:
+                logger.warning(f"警告：{self.base_asset} 淨餘額≤0，只能下買單，無法下賣單")
             
             # 計算每個訂單的數量
             avg_price = sum(buy_prices) / len(buy_prices)

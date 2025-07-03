@@ -265,3 +265,9 @@ def get_market_limits(symbol):
     else:
         logger.error(f"無法獲取交易對信息: {markets_info}")
         return None
+
+def get_borrow_lend_positions(api_key, secret_key):
+    """獲取借貸倉位信息"""
+    endpoint = f"/api/{API_VERSION}/borrowLend/positions"
+    instruction = "borrowLendPositionQuery"
+    return make_request("GET", endpoint, api_key, secret_key, instruction)
