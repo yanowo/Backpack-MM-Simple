@@ -5,8 +5,8 @@ import time
 from datetime import datetime
 
 from api.client import (
-    get_deposit_address, get_balance, get_markets, get_order_book, 
-    get_ticker, get_fill_history, get_klines
+    get_deposit_address, get_balance, get_markets, get_order_book,
+    get_ticker, get_fill_history, get_klines, get_collateral
 )
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
@@ -26,6 +26,7 @@ def get_address_command(api_key, secret_key):
 def get_balance_command(api_key, secret_key):
     """獲取餘額命令"""
     balances = get_balance(api_key, secret_key)
+    collateral = get_collateral(api_key, secret_key)
     if isinstance(balances, dict) and "error" in balances and balances["error"]:
         print(f"獲取餘額失敗: {balances['error']}")
     else:
@@ -36,6 +37,20 @@ def get_balance_command(api_key, secret_key):
                     print(f"{coin}: 可用 {details.get('available', 0)}, 凍結 {details.get('locked', 0)}")
         else:
             print(f"獲取餘額失敗: 無法識別返回格式 {type(balances)}")
+
+    if isinstance(collateral, dict) and "error" in collateral:
+        print(f"獲取抵押品失敗: {collateral['error']}")
+    elif isinstance(collateral, dict):
+        assets = collateral.get('assets') or collateral.get('collateral', [])
+        if assets:
+            print("\n抵押品資產:")
+            for item in assets:
+                symbol = item.get('symbol', '')
+                total = item.get('totalQuantity', '')
+                available = item.get('availableQuantity', '')
+                lend = item.get('lendQuantity', '')
+                collateral_value = item.get('collateralValue', '')
+                print(f"{symbol}: 總量 {total}, 可用 {available}, 出借中 {lend}, 抵押價值 {collateral_value}")
 
 def get_markets_command():
     """獲取市場信息命令"""
@@ -151,6 +166,72 @@ def get_orderbook_command(api_key, secret_key, ws_proxy=None):
         except Exception as e:
             print(f"使用REST API獲取訂單簿也失敗: {str(e)}")
 
+def configure_rebalance_settings():
+    """配置重平設置"""
+    print("\n=== 重平設置配置 ===")
+    
+    # 是否開啟重平功能
+    while True:
+        enable_input = input("是否開啟重平功能? (y/n，默認: y): ").strip().lower()
+        if enable_input in ['', 'y', 'yes']:
+            enable_rebalance = True
+            break
+        elif enable_input in ['n', 'no']:
+            enable_rebalance = False
+            break
+        else:
+            print("請輸入 y 或 n")
+    
+    base_asset_target_percentage = 30.0  # 默認值
+    rebalance_threshold = 15.0  # 默認值
+    
+    if enable_rebalance:
+        # 設置基礎資產目標比例
+        while True:
+            try:
+                percentage_input = input("請輸入基礎資產目標比例 (0-100，默認: 30): ").strip()
+                if percentage_input == '':
+                    base_asset_target_percentage = 30.0
+                    break
+                else:
+                    percentage = float(percentage_input)
+                    if 0 <= percentage <= 100:
+                        base_asset_target_percentage = percentage
+                        break
+                    else:
+                        print("比例必須在 0-100 之間")
+            except ValueError:
+                print("請輸入有效的數字")
+        
+        # 設置重平觸發閾值
+        while True:
+            try:
+                threshold_input = input("請輸入重平觸發閾值 (>0，默認: 15): ").strip()
+                if threshold_input == '':
+                    rebalance_threshold = 15.0
+                    break
+                else:
+                    threshold = float(threshold_input)
+                    if threshold > 0:
+                        rebalance_threshold = threshold
+                        break
+                    else:
+                        print("閾值必須大於 0")
+            except ValueError:
+                print("請輸入有效的數字")
+        
+        quote_asset_target_percentage = 100.0 - base_asset_target_percentage
+        
+        print(f"\n重平設置:")
+        print(f"重平功能: 開啟")
+        print(f"目標比例: {base_asset_target_percentage}% 基礎資產 / {quote_asset_target_percentage}% 報價資產")
+        print(f"觸發閾值: {rebalance_threshold}%")
+    else:
+        print(f"\n重平設置:")
+        print(f"重平功能: 關閉")
+    
+    return enable_rebalance, base_asset_target_percentage, rebalance_threshold
+
 def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     """執行做市策略命令"""
     symbol = input("請輸入要做市的交易對 (例如: SOL_USDC): ")
@@ -171,6 +252,9 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     quantity = float(quantity_input) if quantity_input.strip() else None
     max_orders = int(input("請輸入每側(買/賣)最大訂單數 (例如: 3): "))
     
+    # 配置重平設置
+    enable_rebalance, base_asset_target_percentage, rebalance_threshold = configure_rebalance_settings()
+    
     duration = int(input("請輸入運行時間(秒) (例如: 3600 表示1小時): "))
     interval = int(input("請輸入更新間隔(秒) (例如: 60 表示1分鐘): "))
     
@@ -187,6 +271,9 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
             base_spread_percentage=spread_percentage,
             order_quantity=quantity,
             max_orders=max_orders,
+            enable_rebalance=enable_rebalance,
+            base_asset_target_percentage=base_asset_target_percentage,
+            rebalance_threshold=rebalance_threshold,
             ws_proxy=ws_proxy
         )
         
@@ -197,6 +284,62 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
         print(f"做市過程中發生錯誤: {str(e)}")
         import traceback
         traceback.print_exc()
+
+def rebalance_settings_command():
+    """重平設置管理命令"""
+    print("\n=== 重平設置管理 ===")
+    print("1 - 查看重平設置說明")
+    print("2 - 測試重平設置")
+    print("3 - 返回主菜單")
+    
+    choice = input("請選擇操作: ")
+    
+    if choice == '1':
+        print("\n=== 重平設置說明 ===")
+        print("重平功能用於保持資產配置的平衡，避免因市場波動導致的資產比例失衡。")
+        print("\n主要參數:")
+        print("1. 重平功能開關: 控制是否啟用自動重平衡")
+        print("2. 基礎資產目標比例: 基礎資產應佔總資產的百分比 (0-100%)")
+        print("3. 重平觸發閾值: 當實際比例偏離目標比例超過此閾值時觸發重平衡")
+        print("\n範例:")
+        print("- 目標比例 30%: 假設總資產價值 1000 USDC，則理想基礎資產價值為 300 USDC")
+        print("- 觸發閾值 15%: 當偏差超過總資產的 15% 時觸發重平衡")
+        print("- 如果基礎資產價值變為 450 USDC，偏差為 150 USDC (15%)，將觸發重平衡")
+        print("\n注意事項:")
+        print("- 重平衡會產生交易手續費")
+        print("- 過低的閾值可能導致頻繁重平衡")
+        print("- 過高的閾值可能無法及時控制風險")
+        
+    elif choice == '2':
+        print("\n=== 測試重平設置 ===")
+        enable_rebalance, base_asset_target_percentage, rebalance_threshold = configure_rebalance_settings()
+        
+        # 模擬計算示例
+        if enable_rebalance:
+            print(f"\n=== 模擬計算示例 ===")
+            total_assets = 1000  # 假設總資產 1000 USDC
+            ideal_base_value = total_assets * (base_asset_target_percentage / 100)
+            quote_asset_target_percentage = 100 - base_asset_target_percentage
+            
+            print(f"假設總資產: {total_assets} USDC")
+            print(f"理想基礎資產價值: {ideal_base_value} USDC ({base_asset_target_percentage}%)")
+            print(f"理想報價資產價值: {total_assets - ideal_base_value} USDC ({quote_asset_target_percentage}%)")
+            print(f"重平觸發閾值: {rebalance_threshold}% = {total_assets * (rebalance_threshold / 100)} USDC")
+            
+            # 示例偏差情況
+            print(f"\n觸發重平衡的情況示例:")
+            trigger_amount = total_assets * (rebalance_threshold / 100)
+            high_threshold = ideal_base_value + trigger_amount
+            low_threshold = ideal_base_value - trigger_amount
+            
+            print(f"- 當基礎資產價值 > {high_threshold:.2f} USDC 時，將賣出基礎資產")
+            print(f"- 當基礎資產價值 < {low_threshold:.2f} USDC 時，將買入基礎資產")
+            print(f"- 在 {low_threshold:.2f} - {high_threshold:.2f} USDC 範圍內不會觸發重平衡")
+        
+    elif choice == '3':
+        return
+    else:
+        print("無效選擇")
 
 def trading_stats_command(api_key, secret_key):
     """查看交易統計命令"""
@@ -436,6 +579,21 @@ def market_analysis_command(api_key, secret_key, ws_proxy=None):
                             else:
                                 mode = "standard"
                                 print("建議執行模式: 標準模式")
+                            
+                            # 建議重平設置
+                            print("\n建議重平設置:")
+                            if volatility > 5:
+                                print("高波動率市場，建議:")
+                                print("- 基礎資產比例: 20-25% (降低風險暴露)")
+                                print("- 重平閾值: 10-12% (更頻繁重平衡)")
+                            elif volatility > 2:
+                                print("中等波動率市場，建議:")
+                                print("- 基礎資產比例: 25-35% (標準配置)")
+                                print("- 重平閾值: 12-18% (適中頻率)")
+                            else:
+                                print("低波動率市場，建議:")
+                                print("- 基礎資產比例: 30-40% (可承受更高暴露)")
+                                print("- 重平閾值: 15-25% (較少重平衡)")
                     except Exception as e:
                         print(f"處理K線數據時出錯: {e}")
                         import traceback
@@ -463,7 +621,8 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None):
         print("5 - 執行做市策略")
         print("6 - 交易統計報表")
         print("7 - 市場分析")
-        print("8 - 退出")
+        print("8 - 重平設置管理")
+        print("9 - 退出")
         
         operation = input("請輸入操作類型: ")
         
@@ -482,6 +641,8 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None):
         elif operation == '7':
             market_analysis_command(api_key, secret_key, ws_proxy=ws_proxy)
         elif operation == '8':
+            rebalance_settings_command()
+        elif operation == '9':
             print("退出程序。")
             break
         else:

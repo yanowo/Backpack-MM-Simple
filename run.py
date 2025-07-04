@@ -48,12 +48,37 @@ def parse_arguments():
     parser.add_argument('--max-orders', type=int, default=3, help='每側最大訂單數量 (默認: 3)')
     parser.add_argument('--duration', type=int, default=3600, help='運行時間（秒）(默認: 3600)')
     parser.add_argument('--interval', type=int, default=60, help='更新間隔（秒）(默認: 60)')
+    
+    # 重平設置參數
+    parser.add_argument('--enable-rebalance', action='store_true', help='開啟重平功能')
+    parser.add_argument('--disable-rebalance', action='store_true', help='關閉重平功能')
+    parser.add_argument('--base-asset-target', type=float, help='基礎資產目標比例 (0-100, 默認: 30)')
+    parser.add_argument('--rebalance-threshold', type=float, help='重平觸發閾值 (>0, 默認: 15)')
 
     return parser.parse_args()
+
+def validate_rebalance_args(args):
+    """驗證重平設置參數"""
+    if args.enable_rebalance and args.disable_rebalance:
+        logger.error("不能同時設置 --enable-rebalance 和 --disable-rebalance")
+        sys.exit(1)
+    
+    if args.base_asset_target is not None:
+        if not 0 <= args.base_asset_target <= 100:
+            logger.error("基礎資產目標比例必須在 0-100 之間")
+            sys.exit(1)
+    
+    if args.rebalance_threshold is not None:
+        if args.rebalance_threshold <= 0:
+            logger.error("重平觸發閾值必須大於 0")
+            sys.exit(1)
 
 def main():
     """主函數"""
     args = parse_arguments()
+    
+    # 驗證重平參數
+    validate_rebalance_args(args)
     
     # 優先使用命令行參數中的API密鑰
     api_key = args.api_key or API_KEY
@@ -90,6 +115,30 @@ def main():
         try:
             from strategies.market_maker import MarketMaker
             
+            # 處理重平設置
+            enable_rebalance = True  # 默認開啟
+            base_asset_target_percentage = 30.0  # 默認30%
+            rebalance_threshold = 15.0  # 默認15%
+            
+            if args.disable_rebalance:
+                enable_rebalance = False
+            elif args.enable_rebalance:
+                enable_rebalance = True
+            
+            if args.base_asset_target is not None:
+                base_asset_target_percentage = args.base_asset_target
+            
+            if args.rebalance_threshold is not None:
+                rebalance_threshold = args.rebalance_threshold
+            
+            # 打印重平設置
+            logger.info(f"重平設置:")
+            logger.info(f"  重平功能: {'開啟' if enable_rebalance else '關閉'}")
+            if enable_rebalance:
+                quote_asset_target_percentage = 100.0 - base_asset_target_percentage
+                logger.info(f"  目標比例: {base_asset_target_percentage}% 基礎資產 / {quote_asset_target_percentage}% 報價資產")
+                logger.info(f"  觸發閾值: {rebalance_threshold}%")
+            
             # 初始化做市商
             market_maker = MarketMaker(
                 api_key=api_key,
@@ -98,6 +147,9 @@ def main():
                 base_spread_percentage=args.spread,
                 order_quantity=args.quantity,
                 max_orders=args.max_orders,
+                enable_rebalance=enable_rebalance,
+                base_asset_target_percentage=base_asset_target_percentage,
+                rebalance_threshold=rebalance_threshold,
                 ws_proxy=ws_proxy
             )
             
@@ -116,7 +168,15 @@ def main():
         print("  --panel   啟動圖形界面面板")
         print("  --cli     啟動命令行界面")
         print("  直接指定  --symbol 和 --spread 參數運行做市策略")
+        print("\n重平設置參數：")
+        print("  --enable-rebalance        開啟重平功能")
+        print("  --disable-rebalance       關閉重平功能")
+        print("  --base-asset-target 30    設置基礎資產目標比例為30%")
+        print("  --rebalance-threshold 15  設置重平觸發閾值為15%")
+        print("\n範例：")
+        print("  python run.py --symbol SOL_USDC --spread 0.5 --enable-rebalance --base-asset-target 25 --rebalance-threshold 12")
+        print("  python run.py --symbol SOL_USDC --spread 0.5 --disable-rebalance")
         print("\n使用 --help 查看完整幫助")
 
 if __name__ == "__main__":
-    main() 
+    main()

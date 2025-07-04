@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from api.client import (
     get_balance, execute_order, get_open_orders, cancel_all_orders, 
-    cancel_order, get_market_limits, get_klines, get_ticker, get_order_book
+    cancel_order, get_market_limits, get_klines, get_ticker, get_order_book,
+    get_collateral
 )
 from ws_client.client import BackpackWebSocket
 from database.db import Database
@@ -17,6 +18,19 @@ from utils.helpers import round_to_precision, round_to_tick_size, calculate_vola
 from logger import setup_logger
 
 logger = setup_logger("market_maker")
+
+def format_balance(value, decimals=8, threshold=1e-8):
+    """
+    格式化餘額顯示，避免科學記號
+    
+    Args:
+        value: 數值
+        decimals: 小數位數
+        threshold: 閾值，小於此值顯示為0
+    """
+    if abs(value) < threshold:
+        return "0.00000000"
+    return f"{value:.{decimals}f}"
 
 class MarketMaker:
     def __init__(
@@ -29,6 +43,8 @@ class MarketMaker:
         order_quantity=None, 
         max_orders=3, 
         rebalance_threshold=15.0,
+        enable_rebalance=True,
+        base_asset_target_percentage=30.0,
         ws_proxy=None
     ):
         self.api_key = api_key
@@ -38,6 +54,11 @@ class MarketMaker:
         self.order_quantity = order_quantity
         self.max_orders = max_orders
         self.rebalance_threshold = rebalance_threshold
+        
+        # 新增重平設置參數
+        self.enable_rebalance = enable_rebalance
+        self.base_asset_target_percentage = base_asset_target_percentage
+        self.quote_asset_target_percentage = 100.0 - base_asset_target_percentage
 
         # 初始化數據庫
         self.db = db_instance if db_instance else Database()
@@ -110,6 +131,149 @@ class MarketMaker:
         logger.info(f"基礎精度: {self.base_precision}, 報價精度: {self.quote_precision}")
         logger.info(f"最小訂單大小: {self.min_order_size}, 價格步長: {self.tick_size}")
         logger.info(f"基礎價差百分比: {self.base_spread_percentage}%, 最大訂單數: {self.max_orders}")
+        logger.info(f"重平功能: {'開啟' if self.enable_rebalance else '關閉'}")
+        if self.enable_rebalance:
+            logger.info(f"重平目標比例: {self.base_asset_target_percentage}% {self.base_asset} / {self.quote_asset_target_percentage}% {self.quote_asset}")
+            logger.info(f"重平觸發閾值: {self.rebalance_threshold}%")
+    
+    def set_rebalance_settings(self, enable_rebalance=None, base_asset_target_percentage=None, rebalance_threshold=None):
+        """
+        設置重平參數
+        
+        Args:
+            enable_rebalance: 是否開啟重平功能
+            base_asset_target_percentage: 基礎資產目標比例 (0-100)
+            rebalance_threshold: 重平觸發閾值
+        """
+        if enable_rebalance is not None:
+            self.enable_rebalance = enable_rebalance
+            logger.info(f"重平功能設置為: {'開啟' if enable_rebalance else '關閉'}")
+        
+        if base_asset_target_percentage is not None:
+            if not 0 <= base_asset_target_percentage <= 100:
+                raise ValueError("基礎資產目標比例必須在0-100之間")
+            
+            self.base_asset_target_percentage = base_asset_target_percentage
+            self.quote_asset_target_percentage = 100.0 - base_asset_target_percentage
+            logger.info(f"重平目標比例設置為: {self.base_asset_target_percentage}% {self.base_asset} / {self.quote_asset_target_percentage}% {self.quote_asset}")
+        
+        if rebalance_threshold is not None:
+            if rebalance_threshold <= 0:
+                raise ValueError("重平觸發閾值必須大於0")
+            
+            self.rebalance_threshold = rebalance_threshold
+            logger.info(f"重平觸發閾值設置為: {self.rebalance_threshold}%")
+    
+    def get_rebalance_settings(self):
+        """
+        獲取當前重平設置
+        
+        Returns:
+            dict: 重平設置信息
+        """
+        return {
+            'enable_rebalance': self.enable_rebalance,
+            'base_asset_target_percentage': self.base_asset_target_percentage,
+            'quote_asset_target_percentage': self.quote_asset_target_percentage,
+            'rebalance_threshold': self.rebalance_threshold
+        }
+    
+    def get_total_balance(self):
+        """獲取總餘額，包含普通餘額和抵押品餘額"""
+        try:
+            # 獲取普通餘額
+            balances = get_balance(self.api_key, self.secret_key)
+            if isinstance(balances, dict) and "error" in balances:
+                logger.error(f"獲取普通餘額失敗: {balances['error']}")
+                return None
+            
+            # 獲取抵押品餘額
+            collateral = get_collateral(self.api_key, self.secret_key)
+            if isinstance(collateral, dict) and "error" in collateral:
+                logger.warning(f"獲取抵押品餘額失敗: {collateral['error']}")
+                collateral_assets = []
+            else:
+                collateral_assets = collateral.get('assets') or collateral.get('collateral', [])
+            
+            # 初始化總餘額字典
+            total_balances = {}
+            
+            # 處理普通餘額
+            if isinstance(balances, dict):
+                for asset, details in balances.items():
+                    available = float(details.get('available', 0))
+                    locked = float(details.get('locked', 0))
+                    total_balances[asset] = {
+                        'available': available,
+                        'locked': locked,
+                        'total': available + locked,
+                        'collateral_available': 0,
+                        'collateral_total': 0
+                    }
+            
+            # 添加抵押品餘額
+            for item in collateral_assets:
+                symbol = item.get('symbol', '')
+                if symbol:
+                    total_quantity = float(item.get('totalQuantity', 0))
+                    available_quantity = float(item.get('availableQuantity', 0))
+                    
+                    if symbol not in total_balances:
+                        total_balances[symbol] = {
+                            'available': 0,
+                            'locked': 0,
+                            'total': 0,
+                            'collateral_available': available_quantity,
+                            'collateral_total': total_quantity
+                        }
+                    else:
+                        total_balances[symbol]['collateral_available'] = available_quantity
+                        total_balances[symbol]['collateral_total'] = total_quantity
+                    
+                    # 更新總可用量和總量
+                    total_balances[symbol]['total_available'] = (
+                        total_balances[symbol]['available'] + 
+                        total_balances[symbol]['collateral_available']
+                    )
+                    total_balances[symbol]['total_all'] = (
+                        total_balances[symbol]['total'] + 
+                        total_balances[symbol]['collateral_total']
+                    )
+            
+            # 確保所有資產都有total_available和total_all字段
+            for asset in total_balances:
+                if 'total_available' not in total_balances[asset]:
+                    total_balances[asset]['total_available'] = total_balances[asset]['available']
+                if 'total_all' not in total_balances[asset]:
+                    total_balances[asset]['total_all'] = total_balances[asset]['total']
+            
+            return total_balances
+            
+        except Exception as e:
+            logger.error(f"獲取總餘額時出錯: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def get_asset_balance(self, asset):
+        """獲取指定資產的總可用餘額"""
+        total_balances = self.get_total_balance()
+        if not total_balances or asset not in total_balances:
+            return 0, 0  # 返回 (可用餘額, 總餘額)
+        
+        balance_info = total_balances[asset]
+        available = balance_info.get('total_available', 0)
+        total = balance_info.get('total_all', 0)
+        
+        # 格式化顯示餘額，避免科學記號
+        normal_available = balance_info.get('available', 0)
+        collateral_available = balance_info.get('collateral_available', 0)
+        
+        logger.debug(f"{asset} 餘額詳情: 普通可用={format_balance(normal_available)}, "
+                    f"抵押品可用={format_balance(collateral_available)}, "
+                    f"總可用={format_balance(available)}, 總量={format_balance(total)}")
+        
+        return available, total
     
     def _initialize_websocket(self):
         """等待WebSocket連接建立並進行初始化訂閲"""
@@ -700,40 +864,29 @@ class MarketMaker:
             return None, None
     
     def need_rebalance(self):
-        """判斷是否需要重平衡倉位（純餘額導向）"""
-        logger.info("檢查是否需要重平衡倉位...")
-        
-        # 獲取當前賬戶餘額
-        balances = get_balance(self.api_key, self.secret_key)
-        if isinstance(balances, dict) and "error" in balances:
-            logger.error(f"獲取餘額失敗: {balances['error']}")
-            logger.info("無法獲取餘額，跳過重平衡檢查")
+        """判斷是否需要重平衡倉位（基於總餘額包含抵押品）"""
+        # 檢查重平功能是否開啟
+        if not self.enable_rebalance:
+            logger.debug("重平功能已關閉，跳過重平衡檢查")
             return False
             
+        logger.info("檢查是否需要重平衡倉位...")
+        
         # 獲取當前價格
         current_price = self.get_current_price()
         if not current_price:
             logger.warning("無法獲取當前價格，跳過重平衡檢查")
             return False
         
-        # 獲取基礎資產和報價資產的實際餘額
-        base_balance = 0
-        quote_balance = 0
+        # 獲取基礎資產和報價資產的總可用餘額（包含抵押品）
+        base_available, base_total = self.get_asset_balance(self.base_asset)
+        quote_available, quote_total = self.get_asset_balance(self.quote_asset)
         
-        if self.base_asset in balances:
-            base_details = balances[self.base_asset]
-            base_available = float(base_details.get('available', 0))
-            base_locked = float(base_details.get('locked', 0))
-            base_balance = base_available + base_locked
-        
-        if self.quote_asset in balances:
-            quote_details = balances[self.quote_asset]
-            quote_available = float(quote_details.get('available', 0))
-            quote_locked = float(quote_details.get('locked', 0))
-            quote_balance = quote_available + quote_locked
+        logger.info(f"當前基礎資產餘額: 可用 {format_balance(base_available)} {self.base_asset}, 總計 {format_balance(base_total)} {self.base_asset}")
+        logger.info(f"當前報價資產餘額: 可用 {format_balance(quote_available)} {self.quote_asset}, 總計 {format_balance(quote_total)} {self.quote_asset}")
         
         # 計算總資產價值（以報價貨幣計算）
-        total_assets = quote_balance + (base_balance * current_price)
+        total_assets = quote_total + (base_total * current_price)
         
         # 檢查是否有足夠資產進行重平衡
         min_asset_value = self.min_order_size * current_price * 10  # 最小資產要求
@@ -741,17 +894,16 @@ class MarketMaker:
             logger.info(f"總資產價值 {total_assets:.2f} {self.quote_asset} 過小，跳過重平衡檢查")
             return False
         
-        # 理想情況：50:50分配
-        ideal_base_value = total_assets * 0.3
-        actual_base_value = base_balance * current_price
+        # 使用用戶設定的目標比例
+        ideal_base_value = total_assets * (self.base_asset_target_percentage / 100)
+        actual_base_value = base_total * current_price
         
         # 計算偏差
         deviation_value = abs(actual_base_value - ideal_base_value)
         risk_exposure = (deviation_value / total_assets) * 100 if total_assets > 0 else 0
         
-        logger.info(f"當前基礎資產餘額: {base_balance} {self.base_asset}")
-        logger.info(f"當前報價資產餘額: {quote_balance} {self.quote_asset}")
         logger.info(f"總資產價值: {total_assets:.2f} {self.quote_asset}")
+        logger.info(f"目標配置比例: {self.base_asset_target_percentage}% {self.base_asset} / {self.quote_asset_target_percentage}% {self.quote_asset}")
         logger.info(f"理想基礎資產價值: {ideal_base_value:.2f} {self.quote_asset}")
         logger.info(f"實際基礎資產價值: {actual_base_value:.2f} {self.quote_asset}")
         logger.info(f"偏差: {deviation_value:.2f} {self.quote_asset}")
@@ -763,16 +915,15 @@ class MarketMaker:
         return need_rebalance
     
     def rebalance_position(self):
-        """重平衡倉位"""
+        """重平衡倉位（使用總餘額包含抵押品）"""
+        # 檢查重平功能是否開啟
+        if not self.enable_rebalance:
+            logger.warning("重平功能已關閉，取消重平衡操作")
+            return
+            
         logger.info("開始重新平衡倉位...")
         self.check_ws_connection()
         
-        # 獲取實際餘額而不是累計交易記錄
-        balances = get_balance(self.api_key, self.secret_key)
-        if isinstance(balances, dict) and "error" in balances:
-            logger.error(f"獲取餘額失敗: {balances['error']}")
-            return
-            
         # 獲取當前價格
         current_price = self.get_current_price()
         if not current_price:
@@ -785,31 +936,19 @@ class MarketMaker:
             bid_price = current_price * 0.998
             ask_price = current_price * 1.002
         
-        # 獲取可用餘額
-        base_available = 0
-        quote_available = 0
-        base_total = 0
-        quote_total = 0
+        # 獲取總可用餘額（包含抵押品）
+        base_available, base_total = self.get_asset_balance(self.base_asset)
+        quote_available, quote_total = self.get_asset_balance(self.quote_asset)
         
-        if self.base_asset in balances:
-            base_details = balances[self.base_asset]
-            base_available = float(base_details.get('available', 0))
-            base_locked = float(base_details.get('locked', 0))
-            base_total = base_available + base_locked
-        
-        if self.quote_asset in balances:
-            quote_details = balances[self.quote_asset]
-            quote_available = float(quote_details.get('available', 0))
-            quote_locked = float(quote_details.get('locked', 0))
-            quote_total = quote_available + quote_locked
-        
-        logger.info(f"基礎資產: 可用 {base_available}, 總計 {base_total} {self.base_asset}")
-        logger.info(f"報價資產: 可用 {quote_available}, 總計 {quote_total} {self.quote_asset}")
+        logger.info(f"基礎資產: 可用 {format_balance(base_available)}, 總計 {format_balance(base_total)} {self.base_asset}")
+        logger.info(f"報價資產: 可用 {format_balance(quote_available)}, 總計 {format_balance(quote_total)} {self.quote_asset}")
         
         # 計算總資產價值
         total_assets = quote_total + (base_total * current_price)
-        ideal_base_value = total_assets * 0.3
+        ideal_base_value = total_assets * (self.base_asset_target_percentage / 100)
         actual_base_value = base_total * current_price
+        
+        logger.info(f"使用目標配置比例: {self.base_asset_target_percentage}% {self.base_asset} / {self.quote_asset_target_percentage}% {self.quote_asset}")
         
         # 判斷需要買入還是賣出
         if actual_base_value > ideal_base_value:
@@ -817,22 +956,27 @@ class MarketMaker:
             excess_value = actual_base_value - ideal_base_value
             quantity_to_sell = excess_value / current_price
             
-            # 確保不超過可用餘額，並保留一些緩衝
-            max_sellable = base_available * 0.95  # 保留5%作為緩衝
+            
+            max_sellable = base_total * 0.95  # 保留5%作為緩衝，基於總餘額
             quantity_to_sell = min(quantity_to_sell, max_sellable)
             quantity_to_sell = round_to_precision(quantity_to_sell, self.base_precision)
             
             if quantity_to_sell < self.min_order_size:
-                logger.info(f"需要賣出的數量 {quantity_to_sell} 低於最小訂單大小 {self.min_order_size}，不進行重新平衡")
+                logger.info(f"需要賣出的數量 {format_balance(quantity_to_sell)} 低於最小訂單大小 {format_balance(self.min_order_size)}，不進行重新平衡")
                 return
                 
-            if quantity_to_sell > base_available:
-                logger.warning(f"需要賣出 {quantity_to_sell} 但只有 {base_available} 可用，調整為可用數量")
-                quantity_to_sell = round_to_precision(base_available * 0.9, self.base_precision)
+            
+            if quantity_to_sell > base_total:
+                logger.warning(f"需要賣出 {format_balance(quantity_to_sell)} 但總餘額只有 {format_balance(base_total)}，調整為總餘額的90%")
+                quantity_to_sell = round_to_precision(base_total * 0.9, self.base_precision)
+            
+            # 檢查可用餘額，如果為0則依靠自動贖回
+            if base_available < quantity_to_sell:
+                logger.info(f"可用餘額 {format_balance(base_available)} 不足，需要賣出 {format_balance(quantity_to_sell)}，將依靠自動贖回功能")
             
             # 使用略低於當前買價的價格來快速成交
             sell_price = round_to_tick_size(bid_price * 0.999, self.tick_size)
-            logger.info(f"執行重新平衡: 賣出 {quantity_to_sell} {self.base_asset} @ {sell_price}")
+            logger.info(f"執行重新平衡: 賣出 {format_balance(quantity_to_sell)} {self.base_asset} @ {format_balance(sell_price)}")
             
             # 構建訂單
             order_details = {
@@ -841,7 +985,11 @@ class MarketMaker:
                 "quantity": str(quantity_to_sell),
                 "side": "Ask",
                 "symbol": self.symbol,
-                "timeInForce": "IOC"  # 立即成交或取消，避免掛單
+                "timeInForce": "IOC",  # 立即成交或取消，避免掛單
+                "autoBorrow": True,
+                "autoBorrowRepay": True,
+                "autoLendRedeem": True,
+                "autoLend": True
             }
             
         elif actual_base_value < ideal_base_value:
@@ -851,22 +999,28 @@ class MarketMaker:
             
             # 計算需要的報價資產
             cost = quantity_to_buy * ask_price
-            max_affordable = quote_available * 0.95 / ask_price  # 保留5%作為緩衝
+            max_affordable_cost = quote_total * 0.95  # 基於總餘額的95%
+            max_affordable = max_affordable_cost / ask_price
             quantity_to_buy = min(quantity_to_buy, max_affordable)
             quantity_to_buy = round_to_precision(quantity_to_buy, self.base_precision)
             
             if quantity_to_buy < self.min_order_size:
-                logger.info(f"需要買入的數量 {quantity_to_buy} 低於最小訂單大小 {self.min_order_size}，不進行重新平衡")
+                logger.info(f"需要買入的數量 {format_balance(quantity_to_buy)} 低於最小訂單大小 {format_balance(self.min_order_size)}，不進行重新平衡")
                 return
                 
             cost = quantity_to_buy * ask_price
-            if cost > quote_available:
-                logger.warning(f"需要 {cost} {self.quote_asset} 但只有 {quote_available} 可用，調整買入數量")
-                quantity_to_buy = round_to_precision((quote_available * 0.9) / ask_price, self.base_precision)
+            if cost > quote_total:
+                logger.warning(f"需要 {format_balance(cost)} {self.quote_asset} 但總餘額只有 {format_balance(quote_total)}，調整買入數量")
+                quantity_to_buy = round_to_precision((quote_total * 0.9) / ask_price, self.base_precision)
+                cost = quantity_to_buy * ask_price
+            
+            # 檢查可用餘額
+            if quote_available < cost:
+                logger.info(f"可用餘額 {format_balance(quote_available)} {self.quote_asset} 不足，需要 {format_balance(cost)} {self.quote_asset}，將依靠自動贖回功能")
             
             # 使用略高於當前賣價的價格來快速成交
             buy_price = round_to_tick_size(ask_price * 1.001, self.tick_size)
-            logger.info(f"執行重新平衡: 買入 {quantity_to_buy} {self.base_asset} @ {buy_price}")
+            logger.info(f"執行重新平衡: 買入 {format_balance(quantity_to_buy)} {self.base_asset} @ {format_balance(buy_price)}")
             
             # 構建訂單
             order_details = {
@@ -875,7 +1029,9 @@ class MarketMaker:
                 "quantity": str(quantity_to_buy),
                 "side": "Bid",
                 "symbol": self.symbol,
-                "timeInForce": "IOC"  # 立即成交或取消，避免掛單
+                "timeInForce": "IOC",  # 立即成交或取消，避免掛單
+                "autoLendRedeem": True,
+                "autoLend": True
             }
         else:
             logger.info("倉位已經均衡，無需重新平衡")
@@ -930,7 +1086,7 @@ class MarketMaker:
             return True
     
     def place_limit_orders(self):
-        """下限價單"""
+        """下限價單（使用總餘額包含抵押品）"""
         self.check_ws_connection()
         self.cancel_existing_orders()
         
@@ -941,20 +1097,18 @@ class MarketMaker:
         
         # 處理訂單數量
         if self.order_quantity is None:
-            balances = get_balance(self.api_key, self.secret_key)
-            if isinstance(balances, dict) and "error" in balances:
-                logger.error(f"獲取餘額失敗: {balances['error']}")
-                return
+            # 獲取總可用餘額（包含抵押品）
+            base_available, base_total = self.get_asset_balance(self.base_asset)
+            quote_available, quote_total = self.get_asset_balance(self.quote_asset)
             
-            base_balance = 0
-            quote_balance = 0
-            for asset, balance in balances.items():
-                if asset == self.base_asset:
-                    base_balance = float(balance.get('available', 0))
-                elif asset == self.quote_asset:
-                    quote_balance = float(balance.get('available', 0))
+            logger.info(f"當前總餘額: {format_balance(base_total)} {self.base_asset}, {format_balance(quote_total)} {self.quote_asset}")
+            logger.info(f"當前可用餘額: {format_balance(base_available)} {self.base_asset}, {format_balance(quote_available)} {self.quote_asset}")
             
-            logger.info(f"當前餘額: {base_balance} {self.base_asset}, {quote_balance} {self.quote_asset}")
+            # 如果可用餘額很少但總餘額充足，說明資金在抵押品中
+            if base_available < base_total * 0.1:
+                logger.info(f"基礎資產主要在抵押品中，將依靠自動贖回功能")
+            if quote_available < quote_total * 0.1:
+                logger.info(f"報價資產主要在抵押品中，將依靠自動贖回功能")
             
             # 計算每個訂單的數量
             avg_price = sum(buy_prices) / len(buy_prices)
@@ -962,98 +1116,107 @@ class MarketMaker:
             # 使用更保守的分配比例，避免資金用盡
             allocation_percent = min(0.05, 1.0 / (self.max_orders * 4))  # 最多使用總資金的25%
             
-            quote_amount_per_side = quote_balance * allocation_percent
-            base_amount_per_side = base_balance * allocation_percent
+            # 基於總餘額計算，而不是可用餘額
+            quote_amount_per_side = quote_total * allocation_percent
+            base_amount_per_side = base_total * allocation_percent
             
             buy_quantity = max(self.min_order_size, round_to_precision(quote_amount_per_side / avg_price, self.base_precision))
             sell_quantity = max(self.min_order_size, round_to_precision(base_amount_per_side, self.base_precision))
+            
+            logger.info(f"計算訂單數量: 買單 {format_balance(buy_quantity)} {self.base_asset}, 賣單 {format_balance(sell_quantity)} {self.base_asset}")
         else:
             buy_quantity = max(self.min_order_size, round_to_precision(self.order_quantity, self.base_precision))
             sell_quantity = max(self.min_order_size, round_to_precision(self.order_quantity, self.base_precision))
         
-        # 下買單
-        buy_order_count = 0
-        for price in buy_prices:
-            # 根據市場情況動態調整訂單數量
-            adjusted_quantity = self._adjust_quantity_by_market(buy_quantity, 'buy')
-            
-            order_details = {
+        # 下買單 (併發處理)
+        buy_futures = []
+
+        def place_buy(price):
+            qty = self._adjust_quantity_by_market(buy_quantity, 'buy')
+            order = {
                 "orderType": "Limit",
                 "price": str(price),
-                "quantity": str(adjusted_quantity),
+                "quantity": str(qty),
                 "side": "Bid",
                 "symbol": self.symbol,
                 "timeInForce": "GTC",
-                "postOnly": True
+                "postOnly": True,
+                "autoLendRedeem": True,
+                "autoLend": True
             }
+            res = execute_order(self.api_key, self.secret_key, order)
+            if isinstance(res, dict) and "error" in res and "POST_ONLY_TAKER" in str(res["error"]):
+                logger.info("調整買單價格並重試...")
+                order["price"] = str(round_to_tick_size(float(order["price"]) - self.tick_size, self.tick_size))
+                res = execute_order(self.api_key, self.secret_key, order)
             
-            result = execute_order(self.api_key, self.secret_key, order_details)
+            # 特殊處理資金不足錯誤
+            if isinstance(res, dict) and "error" in res and "INSUFFICIENT_FUNDS" in str(res["error"]):
+                logger.warning(f"買單資金不足，可能需要手動贖回抵押品或等待自動贖回生效")
             
-            if isinstance(result, dict) and "error" in result:
-                logger.error(f"買單失敗: {result['error']}")
-                if "POST_ONLY_TAKER" in str(result['error']):
-                    logger.info("調整買單價格並重試...")
-                    adjusted_price = round_to_tick_size(price - self.tick_size, self.tick_size)
-                    order_details["price"] = str(adjusted_price)
-                    result = execute_order(self.api_key, self.secret_key, order_details)
-                    if isinstance(result, dict) and "error" in result:
-                        logger.error(f"調整後買單仍然失敗: {result['error']}")
-                    else:
-                        logger.info(f"買單成功: 價格 {adjusted_price}, 數量 {adjusted_quantity} (調整後)")
-                        self.active_buy_orders.append(result)
-                        self.orders_placed += 1
-                        buy_order_count += 1
+            return qty, order["price"], res
+
+        with ThreadPoolExecutor(max_workers=self.max_orders) as executor:
+            for p in buy_prices:
+                if len(buy_futures) >= self.max_orders:
+                    break
+                buy_futures.append(executor.submit(place_buy, p))
+
+        buy_order_count = 0
+        for future in buy_futures:
+            qty, p_used, res = future.result()
+            if isinstance(res, dict) and "error" in res:
+                logger.error(f"買單失敗: {res['error']}")
             else:
-                logger.info(f"買單成功: 價格 {price}, 數量 {adjusted_quantity}")
-                self.active_buy_orders.append(result)
+                logger.info(f"買單成功: 價格 {p_used}, 數量 {qty}")
+                self.active_buy_orders.append(res)
                 self.orders_placed += 1
                 buy_order_count += 1
-                
-            # 限制訂單數量
-            if buy_order_count >= self.max_orders:
-                break
-        
+
         # 下賣單
-        sell_order_count = 0
-        for price in sell_prices:
-            # 根據市場情況動態調整訂單數量
-            adjusted_quantity = self._adjust_quantity_by_market(sell_quantity, 'sell')
-            
-            order_details = {
+        sell_futures = []
+
+        def place_sell(price):
+            qty = self._adjust_quantity_by_market(sell_quantity, 'sell')
+            order = {
                 "orderType": "Limit",
                 "price": str(price),
-                "quantity": str(adjusted_quantity),
+                "quantity": str(qty),
                 "side": "Ask",
                 "symbol": self.symbol,
                 "timeInForce": "GTC",
-                "postOnly": True
+                "postOnly": True,
+                "autoLendRedeem": True,
+                "autoLend": True
             }
+            res = execute_order(self.api_key, self.secret_key, order)
+            if isinstance(res, dict) and "error" in res and "POST_ONLY_TAKER" in str(res["error"]):
+                logger.info("調整賣單價格並重試...")
+                order["price"] = str(round_to_tick_size(float(order["price"]) + self.tick_size, self.tick_size))
+                res = execute_order(self.api_key, self.secret_key, order)
             
-            result = execute_order(self.api_key, self.secret_key, order_details)
+            # 特殊處理資金不足錯誤
+            if isinstance(res, dict) and "error" in res and "INSUFFICIENT_FUNDS" in str(res["error"]):
+                logger.warning(f"賣單資金不足，可能需要手動贖回抵押品或等待自動贖回生效")
             
-            if isinstance(result, dict) and "error" in result:
-                logger.error(f"賣單失敗: {result['error']}")
-                if "POST_ONLY_TAKER" in str(result['error']):
-                    logger.info("調整賣單價格並重試...")
-                    adjusted_price = round_to_tick_size(price + self.tick_size, self.tick_size)
-                    order_details["price"] = str(adjusted_price)
-                    result = execute_order(self.api_key, self.secret_key, order_details)
-                    if isinstance(result, dict) and "error" in result:
-                        logger.error(f"調整後賣單仍然失敗: {result['error']}")
-                    else:
-                        logger.info(f"賣單成功: 價格 {adjusted_price}, 數量 {adjusted_quantity} (調整後)")
-                        self.active_sell_orders.append(result)
-                        self.orders_placed += 1
-                        sell_order_count += 1
+            return qty, order["price"], res
+
+        with ThreadPoolExecutor(max_workers=self.max_orders) as executor:
+            for p in sell_prices:
+                if len(sell_futures) >= self.max_orders:
+                    break
+                sell_futures.append(executor.submit(place_sell, p))
+
+        sell_order_count = 0
+        for future in sell_futures:
+            qty, p_used, res = future.result()
+            if isinstance(res, dict) and "error" in res:
+                logger.error(f"賣單失敗: {res['error']}")
             else:
-                logger.info(f"賣單成功: 價格 {price}, 數量 {adjusted_quantity}")
-                self.active_sell_orders.append(result)
+                logger.info(f"賣單成功: 價格 {p_used}, 數量 {qty}")
+                self.active_sell_orders.append(res)
                 self.orders_placed += 1
                 sell_order_count += 1
-                
-            # 限制訂單數量
-            if sell_order_count >= self.max_orders:
-                break
             
         logger.info(f"共下單: {buy_order_count} 個買單, {sell_order_count} 個賣單")
     
@@ -1357,6 +1520,13 @@ class MarketMaker:
             logger.info(f"毛利潤: {session_profit:.8f} {self.quote_asset}")
             logger.info(f"總手續費: {self.session_fees:.8f} {self.quote_asset}")
             logger.info(f"凈利潤: {(session_profit - self.session_fees):.8f} {self.quote_asset}")
+            
+            # 添加重平設置信息
+            logger.info(f"\n重平設置:")
+            logger.info(f"重平功能: {'開啟' if self.enable_rebalance else '關閉'}")
+            if self.enable_rebalance:
+                logger.info(f"目標比例: {self.base_asset_target_percentage}% {self.base_asset} / {self.quote_asset_target_percentage}% {self.quote_asset}")
+                logger.info(f"觸發閾值: {self.rebalance_threshold}%")
                 
             # 查詢前10筆最新成交
             recent_trades = self.db.get_recent_trades(self.symbol, 10)
@@ -1393,6 +1563,12 @@ class MarketMaker:
         logger.info(f"開始運行做市策略: {self.symbol}")
         logger.info(f"運行時間: {duration_seconds} 秒, 間隔: {interval_seconds} 秒")
         
+        # 打印重平設置
+        logger.info(f"重平功能: {'開啟' if self.enable_rebalance else '關閉'}")
+        if self.enable_rebalance:
+            logger.info(f"重平目標比例: {self.base_asset_target_percentage}% {self.base_asset} / {self.quote_asset_target_percentage}% {self.quote_asset}")
+            logger.info(f"重平觸發閾值: {self.rebalance_threshold}%")
+        
         # 重置本次執行的統計數據
         self.session_start_time = datetime.now()
         self.session_buy_trades = []
@@ -1416,7 +1592,7 @@ class MarketMaker:
                 if not self.ws.orderbook["bids"] and not self.ws.orderbook["asks"]:
                     self.ws.initialize_orderbook()
                 
-                # 檢查並確保所有數據流訂閲
+                # 檢查並確保所有數據流訂閱
                 if "depth" not in self.ws.subscriptions:
                     self.ws.subscribe_depth()
                 if "bookTicker" not in self.ws.subscriptions:
@@ -1433,9 +1609,9 @@ class MarketMaker:
                 # 檢查連接並在必要時重連
                 connection_status = self.check_ws_connection()
                 
-                # 如果連接成功，檢查並確保所有流訂閲
+                # 如果連接成功，檢查並確保所有流訂閱
                 if connection_status:
-                    # 重新訂閲必要的數據流
+                    # 重新訂閱必要的數據流
                     self._ensure_data_streams()
                 
                 # 檢查訂單成交情況

@@ -125,6 +125,15 @@ def get_balance(api_key, secret_key):
     instruction = "balanceQuery"
     return make_request("GET", endpoint, api_key, secret_key, instruction)
 
+def get_collateral(api_key=None, secret_key=None, subaccount_id=None):
+    """獲取抵押品資產"""
+    endpoint = f"/api/{API_VERSION}/capital/collateral"
+    params = {}
+    if subaccount_id is not None:
+        params["subaccountId"] = str(subaccount_id)
+    instruction = "collateralQuery" if api_key and secret_key else None
+    return make_request("GET", endpoint, api_key, secret_key, instruction, params)
+
 def execute_order(api_key, secret_key, order_details):
     """執行訂單"""
     endpoint = f"/api/{API_VERSION}/order"
