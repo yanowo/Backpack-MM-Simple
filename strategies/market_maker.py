@@ -986,8 +986,6 @@ class MarketMaker:
                 "side": "Ask",
                 "symbol": self.symbol,
                 "timeInForce": "IOC",  # 立即成交或取消，避免掛單
-                "autoBorrow": True,
-                "autoBorrowRepay": True,
                 "autoLendRedeem": True,
                 "autoLend": True
             }
