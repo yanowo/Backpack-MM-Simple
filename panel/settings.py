@@ -17,7 +17,12 @@ DEFAULT_SETTINGS = {
     'max_orders': 3,                # 每側3個訂單
     'duration': 24*3600,            # 運行24小時
     'interval': 60,                 # 每分鐘更新一次
-    'default_symbol': None          # 默認交易對
+    'default_symbol': None,         # 默認交易對
+    'market_type': 'spot',          # 默認現貨
+    'target_position': 0.0,         # 永續目標倉位
+    'max_position': 1.0,            # 永續最大倉位
+    'position_threshold': 0.1,      # 永續調整閾值
+    'inventory_skew': 0.25          # 永續報價偏移
 }
 
 class SettingsManager:

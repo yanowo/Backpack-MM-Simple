@@ -12,6 +12,7 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 - 基礎價差設置
 - **智能重平衡倉位系統**
 - **自定義資產配置比例**
+- **永續合約做市與倉位風險管理**
 - 詳細的交易統計
 - WebSocket 實時數據連接
 - 命令行界面
@@ -140,12 +141,37 @@ python main.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --i
 - `--max-orders`: 每側最大訂單數量 (默認: 3)
 - `--duration`: 運行時間（秒）(默認: 3600)
 - `--interval`: 更新間隔（秒）(默認: 60)
+- `--market-type`: 市場類型 (`spot` 或 `perp`)
+- `--target-position`: 永續合約目標淨倉位 (僅 `perp` 模式)
+- `--max-position`: 永續合約最大允許淨倉 (僅 `perp` 模式)
+- `--position-threshold`: 永續倉位調整觸發值 (僅 `perp` 模式)
+- `--inventory-skew`: 永續做市報價偏移係數 (0-1，僅 `perp` 模式)
 
 #### 重平設置參數
 - `--enable-rebalance`: 開啟重平功能
 - `--disable-rebalance`: 關閉重平功能
 - `--base-asset-target`: 基礎資產目標比例 (0-100，默認: 30)
 - `--rebalance-threshold`: 重平觸發閾值 (>0，默認: 15)
+
+### 永續合約做市
+
+程式現已支援永續合約做市。永續模式會自動追蹤淨倉位，並透過 Reduce-Only 訂單進行風險控管。
+
+```bash
+# 啟動永續做市，維持零淨倉
+python run.py --symbol SOL_PERP --spread 0.3 --market-type perp --target-position 0 --max-position 2
+
+# 指定交互式面板中使用永續模式
+python run.py --panel
+# 面板中可透過 set market_type perp 與 set target_position 等指令即時調整
+```
+
+主要特性：
+
+- `target_position`：目標淨倉位，程式會在偏離指定閾值時自動調整。
+- `max_position`：設定倉位硬上限，超出後會強制平倉。
+- `position_threshold`：觸發倉位調整的最小偏離量。
+- `inventory_skew`：依照倉位偏移調整掛單價格，協助拉回倉位。
 
 ## 重平衡功能詳解
 

@@ -48,6 +48,11 @@ def parse_arguments():
     parser.add_argument('--max-orders', type=int, default=3, help='每側最大訂單數量 (默認: 3)')
     parser.add_argument('--duration', type=int, default=3600, help='運行時間（秒）(默認: 3600)')
     parser.add_argument('--interval', type=int, default=60, help='更新間隔（秒）(默認: 60)')
+    parser.add_argument('--market-type', choices=['spot', 'perp'], default='spot', help='市場類型 (spot 或 perp)')
+    parser.add_argument('--target-position', type=float, default=0.0, help='永續合約目標淨倉位')
+    parser.add_argument('--max-position', type=float, default=1.0, help='永續合約最大允許倉位')
+    parser.add_argument('--position-threshold', type=float, default=0.1, help='永續倉位調整觸發值')
+    parser.add_argument('--inventory-skew', type=float, default=0.25, help='永續倉位偏移調整係數 (0-1)')
     
     # 重平設置參數
     parser.add_argument('--enable-rebalance', action='store_true', help='開啟重平功能')
@@ -59,6 +64,8 @@ def parse_arguments():
 
 def validate_rebalance_args(args):
     """驗證重平設置參數"""
+    if getattr(args, 'market_type', 'spot') == 'perp':
+        return
     if args.enable_rebalance and args.disable_rebalance:
         logger.error("不能同時設置 --enable-rebalance 和 --disable-rebalance")
         sys.exit(1)
@@ -114,44 +121,66 @@ def main():
         # 如果指定了交易對和價差，直接運行做市策略
         try:
             from strategies.market_maker import MarketMaker
+            from strategies.perp_market_maker import PerpetualMarketMaker
             
             # 處理重平設置
-            enable_rebalance = True  # 默認開啟
-            base_asset_target_percentage = 30.0  # 默認30%
-            rebalance_threshold = 15.0  # 默認15%
-            
-            if args.disable_rebalance:
-                enable_rebalance = False
-            elif args.enable_rebalance:
-                enable_rebalance = True
-            
-            if args.base_asset_target is not None:
-                base_asset_target_percentage = args.base_asset_target
-            
-            if args.rebalance_threshold is not None:
-                rebalance_threshold = args.rebalance_threshold
-            
-            # 打印重平設置
-            logger.info(f"重平設置:")
-            logger.info(f"  重平功能: {'開啟' if enable_rebalance else '關閉'}")
-            if enable_rebalance:
-                quote_asset_target_percentage = 100.0 - base_asset_target_percentage
-                logger.info(f"  目標比例: {base_asset_target_percentage}% 基礎資產 / {quote_asset_target_percentage}% 報價資產")
-                logger.info(f"  觸發閾值: {rebalance_threshold}%")
-            
-            # 初始化做市商
-            market_maker = MarketMaker(
-                api_key=api_key,
-                secret_key=secret_key,
-                symbol=args.symbol,
-                base_spread_percentage=args.spread,
-                order_quantity=args.quantity,
-                max_orders=args.max_orders,
-                enable_rebalance=enable_rebalance,
-                base_asset_target_percentage=base_asset_target_percentage,
-                rebalance_threshold=rebalance_threshold,
-                ws_proxy=ws_proxy
-            )
+            market_type = args.market_type
+
+            if market_type == 'perp':
+                logger.info("啟動永續合約做市模式")
+                logger.info(f"  目標淨倉: {args.target_position}")
+                logger.info(f"  最大倉位: {args.max_position}")
+                logger.info(f"  倉位觸發值: {args.position_threshold}")
+                logger.info(f"  報價偏移係數: {args.inventory_skew}")
+
+                market_maker = PerpetualMarketMaker(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=args.symbol,
+                    base_spread_percentage=args.spread,
+                    order_quantity=args.quantity,
+                    max_orders=args.max_orders,
+                    target_position=args.target_position,
+                    max_position=args.max_position,
+                    position_threshold=args.position_threshold,
+                    inventory_skew=args.inventory_skew,
+                    ws_proxy=ws_proxy
+                )
+            else:
+                enable_rebalance = True  # 默認開啟
+                base_asset_target_percentage = 30.0  # 默認30%
+                rebalance_threshold = 15.0  # 默認15%
+
+                if args.disable_rebalance:
+                    enable_rebalance = False
+                elif args.enable_rebalance:
+                    enable_rebalance = True
+
+                if args.base_asset_target is not None:
+                    base_asset_target_percentage = args.base_asset_target
+
+                if args.rebalance_threshold is not None:
+                    rebalance_threshold = args.rebalance_threshold
+
+                logger.info(f"重平設置:")
+                logger.info(f"  重平功能: {'開啟' if enable_rebalance else '關閉'}")
+                if enable_rebalance:
+                    quote_asset_target_percentage = 100.0 - base_asset_target_percentage
+                    logger.info(f"  目標比例: {base_asset_target_percentage}% 基礎資產 / {quote_asset_target_percentage}% 報價資產")
+                    logger.info(f"  觸發閾值: {rebalance_threshold}%")
+
+                market_maker = MarketMaker(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=args.symbol,
+                    base_spread_percentage=args.spread,
+                    order_quantity=args.quantity,
+                    max_orders=args.max_orders,
+                    enable_rebalance=enable_rebalance,
+                    base_asset_target_percentage=base_asset_target_percentage,
+                    rebalance_threshold=rebalance_threshold,
+                    ws_proxy=ws_proxy
+                )
             
             # 執行做市策略
             market_maker.run(duration_seconds=args.duration, interval_seconds=args.interval)
@@ -175,7 +204,7 @@ def main():
         print("  --rebalance-threshold 15  設置重平觸發閾值為15%")
         print("\n範例：")
         print("  python run.py --symbol SOL_USDC --spread 0.5 --enable-rebalance --base-asset-target 25 --rebalance-threshold 12")
-        print("  python run.py --symbol SOL_USDC --spread 0.5 --disable-rebalance")
+        print("  python run.py --symbol SOL_USDC --spread 0.5 --market-type perp --target-position 0 --max-position 2")
         print("\n使用 --help 查看完整幫助")
 
 if __name__ == "__main__":

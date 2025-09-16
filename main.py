@@ -10,6 +10,7 @@ from logger import setup_logger
 from config import API_KEY, SECRET_KEY, WS_PROXY
 from cli.commands import main_cli
 from strategies.market_maker import MarketMaker
+from strategies.perp_market_maker import PerpetualMarketMaker
 
 logger = setup_logger("main")
 
@@ -30,7 +31,12 @@ def parse_arguments():
     parser.add_argument('--max-orders', type=int, default=3, help='每側最大訂單數量 (默認: 3)')
     parser.add_argument('--duration', type=int, default=3600, help='運行時間（秒）(默認: 3600)')
     parser.add_argument('--interval', type=int, default=60, help='更新間隔（秒）(默認: 60)')
-    
+    parser.add_argument('--market-type', choices=['spot', 'perp'], default='spot', help='市場類型 (spot 或 perp)')
+    parser.add_argument('--target-position', type=float, default=0.0, help='永續合約目標淨倉位')
+    parser.add_argument('--max-position', type=float, default=1.0, help='永續合約最大允許倉位')
+    parser.add_argument('--position-threshold', type=float, default=0.1, help='永續倉位調整觸發值')
+    parser.add_argument('--inventory-skew', type=float, default=0.25, help='永續倉位偏移調整係數 (0-1)')
+
     return parser.parse_args()
 
 def run_market_maker(args, api_key, secret_key, ws_proxy=None):
@@ -46,19 +52,36 @@ def run_market_maker(args, api_key, secret_key, ws_proxy=None):
     
     try:
         # 初始化做市商
-        market_maker = MarketMaker(
-            api_key=api_key,
-            secret_key=secret_key,
-            symbol=args.symbol,
-            base_spread_percentage=args.spread,
-            order_quantity=args.quantity,
-            max_orders=args.max_orders,
-            ws_proxy=ws_proxy
-        )
-        
+        market_type = getattr(args, 'market_type', 'spot')
+
+        if market_type == 'perp':
+            market_maker = PerpetualMarketMaker(
+                api_key=api_key,
+                secret_key=secret_key,
+                symbol=args.symbol,
+                base_spread_percentage=args.spread,
+                order_quantity=args.quantity,
+                max_orders=args.max_orders,
+                target_position=args.target_position,
+                max_position=args.max_position,
+                position_threshold=args.position_threshold,
+                inventory_skew=args.inventory_skew,
+                ws_proxy=ws_proxy
+            )
+        else:
+            market_maker = MarketMaker(
+                api_key=api_key,
+                secret_key=secret_key,
+                symbol=args.symbol,
+                base_spread_percentage=args.spread,
+                order_quantity=args.quantity,
+                max_orders=args.max_orders,
+                ws_proxy=ws_proxy
+            )
+
         # 執行做市策略
         market_maker.run(duration_seconds=args.duration, interval_seconds=args.interval)
-        
+
     except KeyboardInterrupt:
         logger.info("收到中斷信號，正在退出...")
     except Exception as e:
