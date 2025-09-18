@@ -6,12 +6,15 @@ Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.e
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
+**使用本程式運行 MM 策略 可獲得 10~30% 返佣**
+
 ## 功能特點
 
 - 自動化做市策略
 - 基礎價差設置
 - **智能重平衡倉位系統**
 - **自定義資產配置比例**
+- **永續合約做市與倉位風險管理**
 - 詳細的交易統計
 - WebSocket 實時數據連接
 - 命令行界面
@@ -37,7 +40,8 @@ lemon_trader/
 │
 ├── strategies/           # 策略模塊
 │   ├── __init__.py
-│   └── market_maker.py   # 做市策略
+│   ├── market_maker.py   # 做市策略
+│   └── perp_market_maker.py   # 合約做市策略
 │
 ├── utils/                # 工具模塊
 │   ├── __init__.py
@@ -53,7 +57,6 @@ lemon_trader/
 │
 ├── config.py             # 配置文件
 ├── logger.py             # 日誌配置
-├── main.py               # 主執行文件
 ├── run.py                # 統一入口文件
 └── README.md             # 說明文檔
 ```
@@ -101,25 +104,11 @@ PROXY_WEBSOCKET=http://user:pass@host:port/ 或者 http://host:port (若不需�
 # 啟動交互式面板
 python run.py --panel
 
-# 啟動命令行界面
+# 啟動命令行界面 (推薦)
 python run.py --cli  
 
 # 直接運行做市策略
-python run.py --symbol SOL_USDC --spread 0.1
-```
-
-### 命令行界面
-
-啟動命令行界面:
-
-```bash
-python main.py --cli
-```
-
-### 直接執行做市策略
-
-```bash
-python main.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
+python run.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
 ```
 
 ### 命令行參數
@@ -140,12 +129,36 @@ python main.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --i
 - `--max-orders`: 每側最大訂單數量 (默認: 3)
 - `--duration`: 運行時間（秒）(默認: 3600)
 - `--interval`: 更新間隔（秒）(默認: 60)
+- `--market-type`: 市場類型 (`spot` 或 `perp`)
+- `--target-position`: 永續合約目標淨倉位 (僅 `perp` 模式)
+- `--max-position`: 永續合約最大允許淨倉 (僅 `perp` 模式)
+- `--position-threshold`: 永續倉位調整觸發值 (僅 `perp` 模式)
+- `--inventory-skew`: 永續做市報價偏移係數 (0-1，僅 `perp` 模式)
 
 #### 重平設置參數
 - `--enable-rebalance`: 開啟重平功能
 - `--disable-rebalance`: 關閉重平功能
 - `--base-asset-target`: 基礎資產目標比例 (0-100，默認: 30)
 - `--rebalance-threshold`: 重平觸發閾值 (>0，默認: 15)
+
+### 永續合約做市
+
+程式現已支援永續合約做市。永續模式會自動追蹤淨倉位，並透過 Reduce-Only 訂單進行風險控管。
+
+```bash
+# 啟動永續做市，維持零淨倉
+python run.py --symbol SOL_PERP --spread 0.3 --market-type perp --target-position 0 --max-position 2
+```
+
+主要特性：
+
+- `target_position`：設置**持倉量**。這是一個**絕對值**，代表您希望持有的庫存大小（例如 1.5 SOL），無論多空。 策略不會主動開倉達到此目標，而是在持倉**超過**此目標時進行減倉。
+- `max_position`：**最大持倉量**。這是倉位的硬性上限，超出後會立即強制平倉至上限以內，是最高優先級的風控。
+- `position_threshold`：觸發倉位調整的最小偏離量。當 `(當前持倉 - 設置持倉)` 的差額大於此值，會觸發減倉。
+- `inventory_skew`：**風險中性工具**。此參數會根據您當前的**淨倉位**（`net position`）來調整掛單價格。
+      - 若您持有多單，報價會自動下移，吸引他人成交您的賣單。
+      - 若您持有空單，報價會自動上移，吸引他人成交您的買單。
+      - 其核心目標是持續將您的**淨倉位**推向 `0`，以最大限度地降低方向性風險。
 
 ## 重平衡功能詳解
 

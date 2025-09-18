@@ -53,6 +53,11 @@ class InteractivePanel:
             'max_orders': self.settings.get('max_orders', 3),
             'duration': self.settings.get('duration', 24*3600),
             'interval': self.settings.get('interval', 60),
+            'market_type': self.settings.get('market_type', 'spot'),
+            'target_position': self.settings.get('target_position', 0.0),
+            'max_position': self.settings.get('max_position', 1.0),
+            'position_threshold': self.settings.get('position_threshold', 0.1),
+            'inventory_skew': self.settings.get('inventory_skew', 0.25),
         }
         
         # 策略狀態
@@ -87,6 +92,12 @@ class InteractivePanel:
             'total_profit': 0.0,     # 總利潤
             'orders_placed': 0,      # 訂單數量
             'trades_executed': 0,    # 成交數量
+            'market_type': self.settings.get('market_type', 'spot'),
+            'target_position': self.settings.get('target_position', 0.0),
+            'max_position': self.settings.get('max_position', 1.0),
+            'position_threshold': self.settings.get('position_threshold', 0.1),
+            'inventory_skew': self.settings.get('inventory_skew', 0.25),
+            'position_state': None,
         }
         
         # API 密鑰 (從環境變數或設定讀取)
@@ -216,7 +227,14 @@ class InteractivePanel:
         
         # 添加重要的策略參數
         strategy_table.add_row("基礎價差", f"{self.strategy_data['base_spread']:.4f}%")
-        
+        strategy_table.add_row("市場類型", self.strategy_data.get('market_type', 'spot'))
+
+        if self.strategy_data.get('market_type') == 'perp':
+            strategy_table.add_row("目標淨倉", f"{self.strategy_data.get('target_position', 0.0):.4f}")
+            strategy_table.add_row("最大倉位", f"{self.strategy_data.get('max_position', 0.0):.4f}")
+            strategy_table.add_row("調整閾值", f"{self.strategy_data.get('position_threshold', 0.0):.4f}")
+            strategy_table.add_row("報價偏移", f"{self.strategy_data.get('inventory_skew', 0.0):.2f}")
+
         # 顯示訂單數量
         order_quantity = self.strategy_params.get('order_quantity')
         if order_quantity is not None:
@@ -254,7 +272,14 @@ class InteractivePanel:
         position_table.add_row("不平衡%", f"{imbalance_pct:.2f}%")
         position_table.add_row("Maker買入", f"{self.strategy_data['maker_buy_volume']:.6f}")
         position_table.add_row("Maker賣出", f"{self.strategy_data['maker_sell_volume']:.6f}")
-        
+
+        position_state = self.strategy_data.get('position_state')
+        if position_state:
+            position_table.add_row("當前倉位", f"{position_state.get('net', 0.0):.6f}")
+            position_table.add_row("倉位方向", position_state.get('direction', '-'))
+            position_table.add_row("平均開倉價", f"{position_state.get('avg_entry', 0.0):.6f}")
+            position_table.add_row("未實現PnL", f"{position_state.get('unrealized', 0.0):.6f}")
+
         return Group(table, strategy_table, profit_table, position_table)
     
     def generate_log_panel(self):
@@ -427,6 +452,7 @@ class InteractivePanel:
             # 導入必要的類
             from database.db import Database
             from strategies.market_maker import MarketMaker
+            from strategies.perp_market_maker import PerpetualMarketMaker
             
             # 導入或獲取API密鑰
             try:
@@ -452,7 +478,12 @@ class InteractivePanel:
                 'execution_mode': 'standard',   # 標準執行模式
                 'risk_factor': 0.5,            # 默認風險因子
                 'duration': 24*3600,           # 運行24小時
-                'interval': 60                 # 每分鐘更新一次
+                'interval': 60,                # 每分鐘更新一次
+                'market_type': 'spot',
+                'target_position': 0.0,
+                'max_position': 1.0,
+                'position_threshold': 0.1,
+                'inventory_skew': 0.25,
             }
             
             # 合併用戶設置的參數
@@ -471,18 +502,46 @@ class InteractivePanel:
             
             # 更新策略數據
             self.strategy_data['base_spread'] = params['base_spread_percentage']
+            self.strategy_data['market_type'] = params['market_type']
+            self.strategy_data['target_position'] = params['target_position']
+            self.strategy_data['max_position'] = params['max_position']
+            self.strategy_data['position_threshold'] = params['position_threshold']
+            self.strategy_data['inventory_skew'] = params['inventory_skew']
             
             # 初始化做市商
-            self.market_maker = MarketMaker(
-                api_key=api_key,
-                secret_key=secret_key,
-                symbol=symbol,
-                db_instance=db,
-                base_spread_percentage=params['base_spread_percentage'],
-                order_quantity=params['order_quantity'],  # 使用設定的訂單數量
-                max_orders=params['max_orders'],
-                ws_proxy=ws_proxy
-            )
+            if params['market_type'] == 'perp':
+                self.add_log("使用永續合約策略參數", "SYSTEM")
+                self.market_maker = PerpetualMarketMaker(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    db_instance=db,
+                    base_spread_percentage=params['base_spread_percentage'],
+                    order_quantity=params['order_quantity'],
+                    max_orders=params['max_orders'],
+                    target_position=params['target_position'],
+                    max_position=params['max_position'],
+                    position_threshold=params['position_threshold'],
+                    inventory_skew=params['inventory_skew'],
+                    ws_proxy=ws_proxy
+                )
+            else:
+                self.market_maker = MarketMaker(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    db_instance=db,
+                    base_spread_percentage=params['base_spread_percentage'],
+                    order_quantity=params['order_quantity'],  # 使用設定的訂單數量
+                    max_orders=params['max_orders'],
+                    ws_proxy=ws_proxy
+                )
+
+            if hasattr(self.market_maker, 'get_position_state'):
+                try:
+                    self.strategy_data['position_state'] = self.market_maker.get_position_state()
+                except Exception:
+                    self.strategy_data['position_state'] = None
             
             # 標記策略為運行狀態
             self.strategy_running = True
@@ -715,10 +774,24 @@ class InteractivePanel:
                 self.strategy_data['taker_sell_volume'] = getattr(self.market_maker, 'taker_sell_volume', 0)
                 self.strategy_data['orders_placed'] = getattr(self.market_maker, 'orders_placed', 0)
                 self.strategy_data['trades_executed'] = getattr(self.market_maker, 'trades_executed', 0)
-                
+
                 # 利潤統計
                 self.strategy_data['session_profit'] = getattr(self.market_maker, 'session_profit', 0.0)
                 self.strategy_data['total_profit'] = getattr(self.market_maker, 'total_profit', 0.0)
+
+                self.strategy_data['market_type'] = self.strategy_params.get('market_type', 'spot')
+                self.strategy_data['target_position'] = getattr(self.market_maker, 'target_position', self.strategy_params.get('target_position', 0.0))
+                self.strategy_data['max_position'] = getattr(self.market_maker, 'max_position', self.strategy_params.get('max_position', 1.0))
+                self.strategy_data['position_threshold'] = getattr(self.market_maker, 'position_threshold', self.strategy_params.get('position_threshold', 0.1))
+                self.strategy_data['inventory_skew'] = getattr(self.market_maker, 'inventory_skew', self.strategy_params.get('inventory_skew', 0.25))
+
+                position_state = None
+                if hasattr(self.market_maker, 'get_position_state'):
+                    try:
+                        position_state = self.market_maker.get_position_state()
+                    except Exception as pos_err:
+                        self.add_log(f"獲取倉位資訊時出錯: {str(pos_err)}", "WARNING")
+                self.strategy_data['position_state'] = position_state
             except Exception as vol_err:
                 self.add_log(f"更新交易量數據時出錯: {str(vol_err)}", "WARNING")
                 
@@ -818,6 +891,11 @@ class InteractivePanel:
             self.add_log("max_orders - 每側最大訂單數", "SYSTEM")
             self.add_log("duration - 運行時間(秒)", "SYSTEM")
             self.add_log("interval - 更新間隔(秒)", "SYSTEM")
+            self.add_log("market_type - 市場類型 spot/perp", "SYSTEM")
+            self.add_log("target_position - 永續目標淨倉位", "SYSTEM")
+            self.add_log("max_position - 永續最大倉位", "SYSTEM")
+            self.add_log("position_threshold - 倉位調整觸發值", "SYSTEM")
+            self.add_log("inventory_skew - 報價偏移係數", "SYSTEM")
             return
         
         for param, value in self.strategy_params.items():
@@ -832,6 +910,7 @@ class InteractivePanel:
         self.add_log("set base_spread 0.2    - 設置價差為0.2%", "SYSTEM")
         self.add_log("set order_quantity 0.5 - 設置訂單數量為0.5", "SYSTEM")
         self.add_log("set max_orders 5       - 設置每側最大訂單數為5", "SYSTEM")
+        self.add_log("set market_type perp   - 切換為永續合約模式", "SYSTEM")
     
     def cmd_set_param(self, args):
         """設置策略參數"""
@@ -842,44 +921,55 @@ class InteractivePanel:
         param = args[0]
         value = args[1]
         
-        valid_params = {
-            'base_spread_percentage': float,
-            'order_quantity': float,
-            'max_orders': int,
-            'duration': int,
-            'interval': int
-        }
-        
-        if param not in valid_params:
+        float_params = {'base_spread_percentage', 'target_position', 'max_position', 'position_threshold', 'inventory_skew'}
+        int_params = {'max_orders', 'duration', 'interval'}
+        str_params = {'market_type'}
+
+        all_params = float_params | int_params | str_params | {'order_quantity'}
+
+        if param not in all_params:
             self.add_log(f"無效的參數名: {param}", "ERROR")
-            self.add_log("有效參數: " + ", ".join(valid_params.keys()), "SYSTEM")
+            self.add_log("有效參數: " + ", ".join(sorted(all_params)), "SYSTEM")
             return
-        
-        # 轉換參數值
+
         try:
-            # 處理特殊值：auto, none, null
-            if value.lower() in ('auto', 'none', 'null', 'auto'):
-                typed_value = None
-                self.add_log(f"訂單數量將設為自動 (由程序根據餘額決定)", "SYSTEM")
-            else:
-                # 數值處理
-                typed_value = float(value)
+            if param == 'order_quantity':
+                if value.lower() in ('auto', 'none', 'null'):
+                    typed_value = None
+                    self.add_log("訂單數量設為自動 (由程式決定)", "SYSTEM")
+                else:
+                    typed_value = float(value)
+                    if typed_value <= 0:
+                        raise ValueError("訂單數量必須大於0")
+            elif param in int_params:
+                typed_value = int(value)
                 if typed_value <= 0:
-                    raise ValueError("訂單數量必須大於0")
-            
-            # 存儲參數
+                    raise ValueError("整數參數必須大於0")
+            elif param in float_params:
+                typed_value = float(value)
+                if param in {'base_spread_percentage', 'position_threshold'} and typed_value <= 0:
+                    raise ValueError("參數必須大於0")
+                if param == 'max_position' and typed_value <= 0:
+                    raise ValueError("最大倉位必須大於0")
+                if param == 'inventory_skew' and not 0 <= typed_value <= 1:
+                    raise ValueError("inventory_skew 必須介於 0-1 之間")
+            elif param in str_params:
+                typed_value = value.lower()
+                if typed_value not in ('spot', 'perp'):
+                    raise ValueError("market_type 僅支援 spot 或 perp")
+            else:
+                typed_value = value
+
             self.strategy_params[param] = typed_value
-            
-            # 保存到設定文件
+
             try:
                 set_setting(param, typed_value)
                 self.add_log(f"參數已設置並保存: {param} = {typed_value}", "SYSTEM")
             except Exception as e:
                 self.add_log(f"參數已設置但保存失敗: {str(e)}", "WARNING")
-            
+
         except ValueError as e:
             self.add_log(f"參數值轉換錯誤: {str(e)}", "ERROR")
-            self.add_log(f"參數 {param} 需要 {valid_params[param].__name__} 類型", "SYSTEM")
     
     def cmd_show_status(self, args):
         """顯示當前狀態"""
@@ -901,17 +991,31 @@ class InteractivePanel:
             self.add_log("訂單數量: 自動", "SYSTEM")
             
         self.add_log(f"最大訂單數: {self.strategy_params.get('max_orders', 3)}", "SYSTEM")
-        
+
+        market_type = self.strategy_data.get('market_type', 'spot')
+        self.add_log(f"市場類型: {market_type}", "SYSTEM")
+        if market_type == 'perp':
+            self.add_log(f"目標淨倉: {self.strategy_data.get('target_position', 0.0)}", "SYSTEM")
+            self.add_log(f"最大倉位: {self.strategy_data.get('max_position', 1.0)}", "SYSTEM")
+            self.add_log(f"調整觸發: {self.strategy_data.get('position_threshold', 0.1)}", "SYSTEM")
+            self.add_log(f"報價偏移: {self.strategy_data.get('inventory_skew', 0.25)}", "SYSTEM")
+
         # 顯示重要狀態指標
         self.add_log("\n倉位統計:", "SYSTEM")
         total_bought = self.strategy_data['total_bought']
         total_sold = self.strategy_data['total_sold']
         imbalance = total_bought - total_sold
         imbalance_pct = abs(imbalance) / max(total_bought, total_sold) * 100 if max(total_bought, total_sold) > 0 else 0
-        
+
         self.add_log(f"總買入: {total_bought} - 總賣出: {total_sold}", "SYSTEM")
         self.add_log(f"倉位不平衡度: {imbalance_pct:.2f}%", "SYSTEM")
-        
+
+        position_state = self.strategy_data.get('position_state')
+        if position_state:
+            self.add_log(f"當前淨倉: {position_state.get('net', 0.0):.6f} ({position_state.get('direction', '-')})", "SYSTEM")
+            self.add_log(f"平均開倉價: {position_state.get('avg_entry', 0.0):.6f}", "SYSTEM")
+            self.add_log(f"未實現PnL: {position_state.get('unrealized', 0.0):.6f}", "SYSTEM")
+
         # 顯示利潤信息
         self.add_log("\n利潤統計:", "SYSTEM")
         total_profit = self.strategy_data['total_profit']

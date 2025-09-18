@@ -10,6 +10,7 @@ from api.client import (
 )
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
+from strategies.perp_market_maker import PerpetualMarketMaker
 from utils.helpers import calculate_volatility
 from database.db import Database
 from config import API_KEY, SECRET_KEY
@@ -234,52 +235,104 @@ def configure_rebalance_settings():
 
 def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     """執行做市策略命令"""
+    market_type_input = input("請選擇市場類型 (spot/perp，默認 spot): ").strip().lower()
+    market_type = market_type_input if market_type_input in ("spot", "perp") else "spot"
+
     symbol = input("請輸入要做市的交易對 (例如: SOL_USDC): ")
     markets_info = get_markets()
-    valid_symbol = False
+    selected_market = None
     if isinstance(markets_info, list):
         for market in markets_info:
             if market.get('symbol') == symbol:
-                valid_symbol = True
+                selected_market = market
                 break
-    
-    if not valid_symbol:
+
+    if not selected_market:
         print(f"交易對 {symbol} 不存在或不可交易")
         return
-    
+
+    if market_type == "spot":
+        print(f"已選擇現貨市場 {symbol}")
+    else:
+        print(f"已選擇永續合約市場 {symbol}")
+
     spread_percentage = float(input("請輸入價差百分比 (例如: 0.5 表示0.5%): "))
     quantity_input = input("請輸入每個訂單的數量 (留空則自動根據餘額計算): ")
     quantity = float(quantity_input) if quantity_input.strip() else None
     max_orders = int(input("請輸入每側(買/賣)最大訂單數 (例如: 3): "))
-    
-    # 配置重平設置
-    enable_rebalance, base_asset_target_percentage, rebalance_threshold = configure_rebalance_settings()
-    
+
+    if market_type == "perp":
+        try:
+            target_position_input = input("請輸入目標持倉量 (絕對值, 例如 1.0, 默認 1): ").strip()
+            target_position = float(target_position_input) if target_position_input else 1.0
+
+            max_position_input = input("最大允許持倉量(絕對值) (默認 1.0): ").strip()
+            max_position = float(max_position_input) if max_position_input else 1.0
+
+            threshold_input = input("倉位調整觸發值 (默認 0.1): ").strip()
+            position_threshold = float(threshold_input) if threshold_input else 0.1
+
+            skew_input = input("倉位偏移調整係數 (0-1，默認 0.0): ").strip()
+            inventory_skew = float(skew_input) if skew_input else 0.25
+
+            if max_position <= 0:
+                raise ValueError("最大持倉量必須大於0")
+            if position_threshold <= 0:
+                raise ValueError("倉位調整觸發值必須大於0")
+            if not 0 <= inventory_skew <= 1:
+                raise ValueError("倉位偏移調整係數需介於0-1之間")
+        except ValueError:
+            print("倉位參數輸入錯誤，取消操作")
+            return
+
+        enable_rebalance = False
+        base_asset_target_percentage = 0.0
+        rebalance_threshold = 0.0
+    else:
+        enable_rebalance, base_asset_target_percentage, rebalance_threshold = configure_rebalance_settings()
+        target_position = 0.0
+        max_position = 0.0
+        position_threshold = 0.0
+        inventory_skew = 0.0
+
     duration = int(input("請輸入運行時間(秒) (例如: 3600 表示1小時): "))
     interval = int(input("請輸入更新間隔(秒) (例如: 60 表示1分鐘): "))
-    
+
     try:
-        # 初始化數據庫
         db = Database()
-        
-        # 初始化做市商
-        market_maker = MarketMaker(
-            api_key=api_key,
-            secret_key=secret_key,
-            symbol=symbol,
-            db_instance=db,
-            base_spread_percentage=spread_percentage,
-            order_quantity=quantity,
-            max_orders=max_orders,
-            enable_rebalance=enable_rebalance,
-            base_asset_target_percentage=base_asset_target_percentage,
-            rebalance_threshold=rebalance_threshold,
-            ws_proxy=ws_proxy
-        )
-        
-        # 執行做市策略
+
+        if market_type == "perp":
+            market_maker = PerpetualMarketMaker(
+                api_key=api_key,
+                secret_key=secret_key,
+                symbol=symbol,
+                db_instance=db,
+                base_spread_percentage=spread_percentage,
+                order_quantity=quantity,
+                max_orders=max_orders,
+                target_position=target_position,
+                max_position=max_position,
+                position_threshold=position_threshold,
+                inventory_skew=inventory_skew,
+                ws_proxy=ws_proxy,
+            )
+        else:
+            market_maker = MarketMaker(
+                api_key=api_key,
+                secret_key=secret_key,
+                symbol=symbol,
+                db_instance=db,
+                base_spread_percentage=spread_percentage,
+                order_quantity=quantity,
+                max_orders=max_orders,
+                enable_rebalance=enable_rebalance,
+                base_asset_target_percentage=base_asset_target_percentage,
+                rebalance_threshold=rebalance_threshold,
+                ws_proxy=ws_proxy,
+            )
+
         market_maker.run(duration_seconds=duration, interval_seconds=interval)
-        
+
     except Exception as e:
         print(f"做市過程中發生錯誤: {str(e)}")
         import traceback
@@ -618,7 +671,7 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None):
         print("2 - 查詢餘額")
         print("3 - 獲取市場信息")
         print("4 - 獲取訂單簿")
-        print("5 - 執行做市策略")
+        print("5 - 執行現貨/合約做市策略")
         print("6 - 交易統計報表")
         print("7 - 市場分析")
         print("8 - 重平設置管理")
