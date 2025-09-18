@@ -10,7 +10,7 @@ import math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
-from api.client import execute_order
+from api.client import execute_order, get_positions
 from logger import setup_logger
 from strategies.market_maker import MarketMaker, format_balance
 from utils.helpers import round_to_precision, round_to_tick_size
@@ -29,13 +29,25 @@ class PerpetualMarketMaker(MarketMaker):
         target_position: float = 0.0,
         max_position: float = 1.0,
         position_threshold: float = 0.1,
-        inventory_skew: float = 0.25,
+        inventory_skew: float = 0.0,
         leverage: float = 1.0,
         ws_proxy: Optional[str] = None,
         **kwargs,
     ) -> None:
-        """初始化永續合約做市策略。"""
+        """
+        初始化永續合約做市策略。
 
+        Args:
+            api_key (str): API金鑰。
+            secret_key (str): API私鑰。
+            symbol (str): 交易對。
+            target_position (float): 目標持倉量 (絕對值)，策略會將倉位大小維持在此數值附近。
+            max_position (float): 最大允許持倉量（絕對值）。
+            position_threshold (float): 觸發倉位調整的閾值。
+            inventory_skew (float): 庫存偏移，影響報價的不對稱性，以將淨倉位推向0。
+            leverage (float): 槓桿倍數。
+            ws_proxy (Optional[str]): WebSocket代理地址。
+        """
         kwargs.setdefault("enable_rebalance", False)
         super().__init__(
             api_key=api_key,
@@ -45,7 +57,8 @@ class PerpetualMarketMaker(MarketMaker):
             **kwargs,
         )
 
-        self.target_position = target_position
+        # 核心修改：target_position 現在是絕對持倉量目標
+        self.target_position = abs(target_position)
         self.max_position = max(abs(max_position), self.min_order_size)
         self.position_threshold = max(position_threshold, self.min_order_size)
         self.inventory_skew = max(0.0, min(1.0, inventory_skew))
@@ -58,8 +71,12 @@ class PerpetualMarketMaker(MarketMaker):
             "unrealized": 0.0,
         }
 
+        # 添加總成交量統計（以報價資產計價）
+        self.total_volume_quote = 0.0
+        self.session_total_volume_quote = 0.0
+
         logger.info(
-            "初始化永續合約做市: %s | 目標倉位: %s | 最大倉位: %s | 觸發閾值: %s",
+            "初始化永續合約做市: %s | 目標持倉量: %s | 最大持倉量: %s | 觸發閾值: %s",
             symbol,
             format_balance(self.target_position),
             format_balance(self.max_position),
@@ -67,12 +84,96 @@ class PerpetualMarketMaker(MarketMaker):
         )
         self._update_position_state()
 
+    def on_ws_message(self, stream, data):
+        """處理WebSocket消息回調 - 添加總成交量統計"""
+        # 先調用父類的消息處理
+        super().on_ws_message(stream, data)
+        
+        # 添加總成交量統計
+        if stream.startswith("account.orderUpdate."):
+            event_type = data.get('e')
+            
+            if event_type == 'orderFill':
+                try:
+                    quantity = float(data.get('l', '0'))  # 成交數量
+                    price = float(data.get('L', '0'))     # 成交價格
+                    
+                    # 計算成交額（以報價資產計價）
+                    trade_volume = quantity * price
+                    
+                    # 更新總成交量統計
+                    self.total_volume_quote += trade_volume
+                    self.session_total_volume_quote += trade_volume
+                    
+                    logger.debug(f"更新總成交量: +{trade_volume:.2f} {self.quote_asset}, 累計: {self.total_volume_quote:.2f}")
+                    
+                except Exception as e:
+                    logger.error(f"更新總成交量統計時出錯: {e}")
+
     # ------------------------------------------------------------------
-    # 基礎資訊與工具方法
+    # 基礎資訊與工具方法 (此處函數未變動)
     # ------------------------------------------------------------------
     def get_net_position(self) -> float:
-        """取得目前的淨倉位。"""
-        return self.total_bought - self.total_sold
+        """取得目前的永續合約淨倉位。"""
+        try:
+            # 直接查詢特定交易對的倉位
+            result = get_positions(self.api_key, self.secret_key, self.symbol)
+            
+            if isinstance(result, dict) and "error" in result:
+                error_msg = result["error"]
+                # 404 錯誤表示沒有倉位，這是正常情況
+                if "404" in error_msg or "RESOURCE_NOT_FOUND" in error_msg:
+                    logger.debug("未找到 %s 的倉位記錄(404)，倉位為0", self.symbol)
+                    return 0.0
+                else:
+                    logger.error("查詢倉位失敗: %s", error_msg)
+                    return 0.0
+                
+            if not isinstance(result, list):
+                logger.warning("倉位API返回格式異常: %s", type(result))
+                return 0.0
+                
+            # 如果返回空列表，說明沒有該交易對的倉位
+            if not result:
+                logger.debug("未找到 %s 的倉位記錄，倉位為0", self.symbol)
+                return 0.0
+            
+            # 取第一個倉位（因為已經按symbol過濾了）
+            position = result[0]
+            net_quantity = float(position.get("netQuantity", 0))
+            
+            logger.debug("從API獲取 %s 永續倉位: %s", self.symbol, net_quantity)
+            return net_quantity
+            
+        except Exception as e:
+            logger.error("查詢永續倉位時發生錯誤: %s", e)
+            # 發生錯誤時，fallback到本地計算（雖然可能不準確）
+            logger.warning("使用本地計算的倉位作為備用")
+            return self.total_bought - self.total_sold
+
+    def _get_actual_position_info(self) -> Dict[str, Any]:
+        """獲取完整的倉位信息。"""
+        try:
+            result = get_positions(self.api_key, self.secret_key, self.symbol)
+            
+            if isinstance(result, dict) and "error" in result:
+                error_msg = result["error"]
+                # 404 錯誤表示沒有倉位，返回空字典
+                if "404" in error_msg or "RESOURCE_NOT_FOUND" in error_msg:
+                    logger.debug("未找到 %s 的倉位信息(404)", self.symbol)
+                    return {}
+                else:
+                    logger.error("查詢倉位信息失敗: %s", error_msg)
+                    return {}
+                
+            if not isinstance(result, list) or not result:
+                return {}
+            
+            return result[0]  # 返回第一個（也是唯一的）倉位信息
+            
+        except Exception as e:
+            logger.error("獲取倉位信息時發生錯誤: %s", e)
+            return {}
 
     def _calculate_average_short_entry(self) -> float:
         """計算目前空頭倉位的平均開倉價格。"""
@@ -100,22 +201,34 @@ class PerpetualMarketMaker(MarketMaker):
 
     def _update_position_state(self) -> None:
         """更新倉位相關統計。"""
-        net = self.get_net_position()
+        net = self.get_net_position()  # 現在這會從API獲取實際倉位
         current_price = self.get_current_price()
         direction = "FLAT"
         avg_entry = 0.0
         unrealized = 0.0
 
+        # 嘗試從API獲取更準確的信息
+        position_info = self._get_actual_position_info()
+        
+        if position_info:
+            # 使用API返回的精確信息
+            avg_entry = float(position_info.get("entryPrice", 0))
+            unrealized = float(position_info.get("pnlUnrealized", 0))
+        else:
+            # 使用本地計算作為備用
+            if net > 0:
+                avg_entry = self._calculate_average_buy_cost()
+                if current_price:
+                    unrealized = (current_price - avg_entry) * net
+            elif net < 0:
+                avg_entry = self._calculate_average_short_entry()
+                if current_price:
+                    unrealized = (avg_entry - current_price) * abs(net)
+
         if net > 0:
             direction = "LONG"
-            avg_entry = self._calculate_average_buy_cost()
-            if current_price:
-                unrealized = (current_price - avg_entry) * net
         elif net < 0:
             direction = "SHORT"
-            avg_entry = self._calculate_average_short_entry()
-            if current_price:
-                unrealized = (avg_entry - current_price) * abs(net)
 
         self.position_state = {
             "net": net,
@@ -136,8 +249,28 @@ class PerpetualMarketMaker(MarketMaker):
         self._update_position_state()
         return self.position_state
 
+    def estimate_profit(self):
+        """覆蓋父類方法，添加總成交量統計顯示"""
+        # 先調用父類的方法
+        super().estimate_profit()
+        
+        # 然後添加總成交量統計顯示
+        logger.info(f"\n---永續合約總成交量統計---")
+        logger.info(f"累計總成交量: {self.total_volume_quote:.2f} {self.quote_asset}")
+        logger.info(f"本次執行總成交量: {self.session_total_volume_quote:.2f} {self.quote_asset}")
+
+    def run(self, duration_seconds=3600, interval_seconds=60):
+        """執行永續合約做市策略"""
+        logger.info(f"開始運行永續合約做市策略: {self.symbol}")
+        
+        # 重置本次執行的總成交量統計
+        self.session_total_volume_quote = 0.0
+        
+        # 調用父類的 run 方法
+        super().run(duration_seconds, interval_seconds)
+
     # ------------------------------------------------------------------
-    # 下單相關
+    # 下單相關 (此處函數未變動)
     # ------------------------------------------------------------------
     def open_position(
         self,
@@ -153,7 +286,7 @@ class PerpetualMarketMaker(MarketMaker):
 
         normalized_order_type = order_type.capitalize()
         if normalized_order_type not in {"Limit", "Market"}:
-            raise ValueError("order_type 僅支援 'Limit' 或 'Market'")
+            raise ValueError("order_type 僅支持 'Limit' 或 'Market'")
 
         qty = round_to_precision(abs(quantity), self.base_precision)
         if qty < self.min_order_size:
@@ -255,14 +388,23 @@ class PerpetualMarketMaker(MarketMaker):
         client_id: Optional[str] = None,
     ) -> bool:
         """平倉操作。"""
-        net = self.get_net_position()
+        net = self.get_net_position()  # 使用API獲取實際倉位
         if math.isclose(net, 0.0, abs_tol=self.min_order_size / 10):
-            logger.info("倉位已經為零，無需平倉")
+            logger.info("實際倉位為零，無需平倉")
             return False
 
-        direction = side
-        if direction is None:
-            direction = "long" if net > 0 else "short"
+        # 根據實際倉位確定平倉方向
+        if net > 0:  # 多頭倉位，需要賣出平倉
+            direction = "long"
+            order_side = "Ask"
+        else:  # 空頭倉位，需要買入平倉
+            direction = "short"
+            order_side = "Bid"
+
+        # 如果手動指定了side，則使用指定的
+        if side is not None:
+            direction = side
+            order_side = "Ask" if direction == "long" else "Bid"
 
         qty_available = abs(net)
         qty = qty_available if quantity is None else min(abs(quantity), qty_available)
@@ -271,7 +413,13 @@ class PerpetualMarketMaker(MarketMaker):
             logger.info("平倉數量 %s 低於最小單位，忽略", format_balance(qty))
             return False
 
-        order_side = "Ask" if direction == "long" else "Bid"
+        logger.info(
+            "執行平倉: 實際倉位=%s, 平倉數量=%s, 方向=%s",
+            format_balance(net),
+            format_balance(qty),
+            direction
+        )
+
         result = self.open_position(
             side=order_side,
             quantity=qty,
@@ -290,81 +438,67 @@ class PerpetualMarketMaker(MarketMaker):
         return True
 
     # ------------------------------------------------------------------
-    # 倉位管理
+    # 倉位管理 (核心修改)
     # ------------------------------------------------------------------
     def need_rebalance(self) -> bool:
-        """判斷是否需要倉位調整。"""
+        """判斷是否需要倉位調整 (僅減倉)。"""
         net = self.get_net_position()
-        deviation = abs(net - self.target_position)
+        current_size = abs(net)
 
-        if abs(net) > self.max_position:
+        if current_size > self.max_position:
             logger.warning(
-                "淨倉位 %s 超過最大允許 %s，準備執行風控平倉",
-                format_balance(net),
+                "持倉量 %s 超過最大允許 %s，準備執行風控平倉",
+                format_balance(current_size),
                 format_balance(self.max_position),
             )
             return True
 
-        if deviation >= self.position_threshold:
+        deviation = current_size - self.target_position
+        if deviation > self.position_threshold:
             logger.info(
-                "倉位偏離目標 %.8f，觸發調整", deviation
+                "持倉量偏離目標 %.8f，觸發減倉調整", deviation
             )
             return True
 
         return False
 
     def manage_positions(self) -> bool:
-        """根據倉位狀態主動調整。"""
+        """根據持倉量狀態主動調整，此函數只負責減倉以控制風險。"""
         net = self.get_net_position()
-        desired = self.target_position
-        deviation = net - desired
+        current_size = abs(net)
+        desired_size = self.target_position
 
-        if abs(net) > self.max_position:
-            excess = abs(net) - self.max_position
-            logger.info(
-                "淨倉位超限 %s，執行緊急平倉",
-                format_balance(excess),
+        logger.debug(
+            "倉位管理: 實際持倉量=%s, 目標持倉量=%s",
+            format_balance(current_size),
+            format_balance(desired_size)
+        )
+
+        # 1. 風控：檢查是否超過最大持倉量
+        if current_size > self.max_position:
+            excess = current_size - self.max_position
+            logger.warning(
+                "持倉量 %s 超過最大允許 %s，執行緊急平倉 %s",
+                format_balance(current_size),
+                format_balance(self.max_position),
+                format_balance(excess)
             )
             return self.close_position(quantity=excess, order_type="Market")
 
+        # 2. 減倉：檢查持倉量是否超過目標 + 閾值
+        deviation = current_size - desired_size
         if deviation > self.position_threshold:
-            if net >= 0:
-                qty = min(deviation, net)
-                return self.close_position(quantity=qty, side="long")
-            max_extra = max(0.0, self.max_position - abs(net))
-            qty = min(deviation, max_extra)
-            if qty >= self.min_order_size:
-                self.open_short(qty, order_type="Market")
-                self._update_position_state()
-                return True
-            return False
+            qty_to_close = min(deviation, current_size)
+            logger.info(
+                "持倉量 %s 超過目標 %s，執行減倉 %s",
+                format_balance(current_size),
+                format_balance(desired_size),
+                format_balance(qty_to_close)
+            )
+            # close_position 會根據淨倉位自動判斷平倉方向
+            return self.close_position(quantity=qty_to_close, order_type="Market")
 
-        if deviation < -self.position_threshold:
-            if net <= 0:
-                qty = min(abs(deviation), abs(net))
-                return self.close_position(quantity=qty, side="short")
-            max_extra = max(0.0, self.max_position - net)
-            qty = min(abs(deviation), max_extra)
-            if qty >= self.min_order_size:
-                self.open_long(qty, order_type="Market")
-                self._update_position_state()
-                return True
-            return False
-
-        # 若目標倉位不為零且目前倉位低於目標，主動開倉
-        net_abs = abs(net)
-        target_abs = abs(desired)
-        if target_abs >= self.min_order_size and net_abs + self.min_order_size <= self.max_position:
-            if net_abs < target_abs and abs(deviation) >= self.position_threshold:
-                qty_to_open = min(target_abs - net_abs, self.max_position - net_abs)
-                if qty_to_open >= self.min_order_size:
-                    if desired > 0:
-                        self.open_long(qty_to_open, order_type="Market")
-                    elif desired < 0:
-                        self.open_short(qty_to_open, order_type="Market")
-                    self._update_position_state()
-                    return True
-
+        logger.debug("持倉量在目標範圍內，無需主動管理。")
         return False
 
     def rebalance_position(self) -> None:
@@ -375,59 +509,74 @@ class PerpetualMarketMaker(MarketMaker):
             logger.info("倉位已在安全範圍內，無需調整")
 
     # ------------------------------------------------------------------
-    # 報價調整
+    # 報價調整 (核心修改)
     # ------------------------------------------------------------------
     def calculate_prices(self):  # type: ignore[override]
+        """計算買賣訂單價格，並根據淨倉位進行偏移以控制方向風險。"""
         buy_prices, sell_prices = super().calculate_prices()
         if not buy_prices or not sell_prices:
             return buy_prices, sell_prices
 
         net = self.get_net_position()
-        desired = self.target_position
-        deviation = net - desired
+
+        # 如果沒有庫存偏移係數或沒有倉位，則不進行調整
+        if self.inventory_skew <= 0 or abs(net) < self.min_order_size:
+            return buy_prices, sell_prices
 
         if self.max_position <= 0:
             return buy_prices, sell_prices
 
+        # 核心偏移邏輯：根據淨倉位(net)調整報價，目標是將淨倉位推向0 (Delta中性)
+        # 偏離量就是淨倉位本身
+        deviation = net
         skew_ratio = max(-1.0, min(1.0, deviation / self.max_position))
-        if abs(skew_ratio) < 1e-6 or self.inventory_skew <= 0:
-            return buy_prices, sell_prices
 
         current_price = self.get_current_price()
         if not current_price:
             return buy_prices, sell_prices
 
+        # 如果是多頭 (net > 0)，skew_offset為正；如果是空頭 (net < 0)，skew_offset為負
         skew_offset = current_price * self.inventory_skew * skew_ratio
+
+        # 調整價格以鼓勵反向交易，使淨倉位回歸0
+        # 如果是多頭 (net > 0)，降低買賣價以鼓勵市場吃掉我們的賣單，同時降低我們買入的意願
+        # 如果是空頭 (net < 0)，提高買賣價以鼓勵市場吃掉我們的買單，同時降低我們賣出的意願
         adjusted_buys = [
             round_to_tick_size(price - skew_offset, self.tick_size)
             for price in buy_prices
         ]
         adjusted_sells = [
-            round_to_tick_size(price + skew_offset, self.tick_size)
+            round_to_tick_size(price - skew_offset, self.tick_size)
             for price in sell_prices
         ]
 
         logger.debug(
-            "倉位偏移 %.6f，調整買價 %s -> %s，賣價 %s -> %s",
-            deviation,
-            buy_prices[0],
-            adjusted_buys[0],
-            sell_prices[0],
-            adjusted_sells[0],
+            "淨倉位 %.6f，報價偏移 %.6f。買價: %s -> %s, 賣價: %s -> %s",
+            net,
+            skew_offset,
+            format_balance(buy_prices[0]),
+            format_balance(adjusted_buys[0]),
+            format_balance(sell_prices[0]),
+            format_balance(adjusted_sells[0]),
         )
+
+        # 風控：確保調整後買賣價沒有交叉
+        if adjusted_buys[0] >= adjusted_sells[0]:
+            logger.warning("報價調整後買賣價交叉或價差過小，恢復原始報價。買: %s, 賣: %s", adjusted_buys[0], adjusted_sells[0])
+            return buy_prices, sell_prices
 
         return adjusted_buys, adjusted_sells
 
     # ------------------------------------------------------------------
-    # 其他輔助方法
+    # 其他輔助方法 (核心修改)
     # ------------------------------------------------------------------
     def set_target_position(self, target: float, threshold: Optional[float] = None) -> None:
-        """更新目標淨倉位及觸發閾值。"""
-        self.target_position = target
+        """更新目標持倉量 (絕對值) 及觸發閾值。"""
+        self.target_position = abs(target)
         if threshold is not None:
             self.position_threshold = max(threshold, self.min_order_size)
         logger.info(
-            "更新目標倉位: %s (閾值: %s)",
+            "更新目標持倉量: %s (閾值: %s)",
             format_balance(self.target_position),
             format_balance(self.position_threshold),
         )

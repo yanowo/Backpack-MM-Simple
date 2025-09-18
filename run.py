@@ -49,10 +49,10 @@ def parse_arguments():
     parser.add_argument('--duration', type=int, default=3600, help='運行時間（秒）(默認: 3600)')
     parser.add_argument('--interval', type=int, default=60, help='更新間隔（秒）(默認: 60)')
     parser.add_argument('--market-type', choices=['spot', 'perp'], default='spot', help='市場類型 (spot 或 perp)')
-    parser.add_argument('--target-position', type=float, default=0.0, help='永續合約目標淨倉位')
-    parser.add_argument('--max-position', type=float, default=1.0, help='永續合約最大允許倉位')
+    parser.add_argument('--target-position', type=float, default=1.0, help='永續合約目標持倉量 (絕對值, 例如: 1.0)')
+    parser.add_argument('--max-position', type=float, default=1.0, help='永續合約最大允許倉位(絕對值)')
     parser.add_argument('--position-threshold', type=float, default=0.1, help='永續倉位調整觸發值')
-    parser.add_argument('--inventory-skew', type=float, default=0.25, help='永續倉位偏移調整係數 (0-1)')
+    parser.add_argument('--inventory-skew', type=float, default=0.0, help='永續倉位偏移調整係數 (0-1)')
     
     # 重平設置參數
     parser.add_argument('--enable-rebalance', action='store_true', help='開啟重平功能')
@@ -128,8 +128,8 @@ def main():
 
             if market_type == 'perp':
                 logger.info("啟動永續合約做市模式")
-                logger.info(f"  目標淨倉: {args.target_position}")
-                logger.info(f"  最大倉位: {args.max_position}")
+                logger.info(f"  目標持倉量: {abs(args.target_position)}")
+                logger.info(f"  最大持倉量: {args.max_position}")
                 logger.info(f"  倉位觸發值: {args.position_threshold}")
                 logger.info(f"  報價偏移係數: {args.inventory_skew}")
 
@@ -204,7 +204,7 @@ def main():
         print("  --rebalance-threshold 15  設置重平觸發閾值為15%")
         print("\n範例：")
         print("  python run.py --symbol SOL_USDC --spread 0.5 --enable-rebalance --base-asset-target 25 --rebalance-threshold 12")
-        print("  python run.py --symbol SOL_USDC --spread 0.5 --market-type perp --target-position 0 --max-position 2")
+        print("  python run.py --symbol SOL_USDC --spread 0.5 --market-type perp --target-position 1.0 --max-position 2")
         print("\n使用 --help 查看完整幫助")
 
 if __name__ == "__main__":

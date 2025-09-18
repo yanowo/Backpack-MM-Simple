@@ -30,7 +30,10 @@ def make_request(method: str, endpoint: str, api_key=None, secret_key=None, inst
         API響應數據
     """
     url = f"{API_URL}{endpoint}"
-    headers = {'Content-Type': 'application/json'}
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Broker-Id': '1500'
+    }
     
     # 構建簽名信息（如需要）
     if api_key and secret_key and instruction:
@@ -142,12 +145,15 @@ def execute_order(api_key, secret_key, order_details):
     # 提取所有參數用於簽名
     params = {
         "orderType": order_details["orderType"],
-        "price": order_details.get("price", "0"),
         "quantity": order_details["quantity"],
         "side": order_details["side"],
         "symbol": order_details["symbol"],
         "timeInForce": order_details.get("timeInForce", "GTC")
     }
+    
+    # 只有當訂單包含價格時才添加 price 參數
+    if "price" in order_details:
+        params["price"] = order_details["price"]
     
     # 添加可選參數
     for key in ["postOnly", "reduceOnly", "clientId", "quoteQuantity", 
@@ -274,3 +280,23 @@ def get_market_limits(symbol):
     else:
         logger.error(f"無法獲取交易對信息: {markets_info}")
         return None
+    
+def get_positions(api_key, secret_key, symbol=None):
+    """獲取永續合約倉位"""
+    endpoint = f"/api/{API_VERSION}/position"
+    instruction = "positionQuery"
+    params = {}
+    if symbol:
+        params["symbol"] = symbol
+    
+    # 對於倉位查詢，404是正常情況（表示沒有倉位），所以只重試1次
+    result = make_request("GET", endpoint, api_key, secret_key, instruction, params, retry_count=1)
+    
+    # 特殊處理404錯誤 - 對於倉位查詢，404表示沒有倉位，返回空列表
+    if isinstance(result, dict) and "error" in result:
+        error_msg = result["error"]
+        if "404" in error_msg or "RESOURCE_NOT_FOUND" in error_msg:
+            logger.debug("倉位查詢返回404，表示沒有活躍倉位")
+            return []  # 返回空列表而不是錯誤
+    
+    return result

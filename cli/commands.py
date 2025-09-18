@@ -263,20 +263,20 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
 
     if market_type == "perp":
         try:
-            target_position_input = input("目標淨倉 (默認 0): ").strip()
-            target_position = float(target_position_input) if target_position_input else 0.0
+            target_position_input = input("請輸入目標持倉量 (絕對值, 例如 1.0, 默認 1): ").strip()
+            target_position = float(target_position_input) if target_position_input else 1.0
 
-            max_position_input = input("最大允許淨倉 (默認 1): ").strip()
+            max_position_input = input("最大允許持倉量(絕對值) (默認 1.0): ").strip()
             max_position = float(max_position_input) if max_position_input else 1.0
 
             threshold_input = input("倉位調整觸發值 (默認 0.1): ").strip()
             position_threshold = float(threshold_input) if threshold_input else 0.1
 
-            skew_input = input("倉位偏移調整係數 (0-1，默認 0.25): ").strip()
+            skew_input = input("倉位偏移調整係數 (0-1，默認 0.0): ").strip()
             inventory_skew = float(skew_input) if skew_input else 0.25
 
             if max_position <= 0:
-                raise ValueError("最大淨倉必須大於0")
+                raise ValueError("最大持倉量必須大於0")
             if position_threshold <= 0:
                 raise ValueError("倉位調整觸發值必須大於0")
             if not 0 <= inventory_skew <= 1:

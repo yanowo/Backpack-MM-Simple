@@ -38,7 +38,8 @@ lemon_trader/
 │
 ├── strategies/           # 策略模塊
 │   ├── __init__.py
-│   └── market_maker.py   # 做市策略
+│   ├── market_maker.py   # 做市策略
+│   └── market_maker.py   # 合約做市策略
 │
 ├── utils/                # 工具模塊
 │   ├── __init__.py
@@ -54,7 +55,6 @@ lemon_trader/
 │
 ├── config.py             # 配置文件
 ├── logger.py             # 日誌配置
-├── main.py               # 主執行文件
 ├── run.py                # 統一入口文件
 └── README.md             # 說明文檔
 ```
@@ -102,25 +102,11 @@ PROXY_WEBSOCKET=http://user:pass@host:port/ 或者 http://host:port (若不需�
 # 啟動交互式面板
 python run.py --panel
 
-# 啟動命令行界面
+# 啟動命令行界面 (推薦)
 python run.py --cli  
 
 # 直接運行做市策略
-python run.py --symbol SOL_USDC --spread 0.1
-```
-
-### 命令行界面
-
-啟動命令行界面:
-
-```bash
-python main.py --cli
-```
-
-### 直接執行做市策略
-
-```bash
-python main.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
+python run.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
 ```
 
 ### 命令行參數
@@ -160,18 +146,17 @@ python main.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --i
 ```bash
 # 啟動永續做市，維持零淨倉
 python run.py --symbol SOL_PERP --spread 0.3 --market-type perp --target-position 0 --max-position 2
-
-# 指定交互式面板中使用永續模式
-python run.py --panel
-# 面板中可透過 set market_type perp 與 set target_position 等指令即時調整
 ```
 
 主要特性：
 
-- `target_position`：目標淨倉位，程式會在偏離指定閾值時自動調整。
-- `max_position`：設定倉位硬上限，超出後會強制平倉。
-- `position_threshold`：觸發倉位調整的最小偏離量。
-- `inventory_skew`：依照倉位偏移調整掛單價格，協助拉回倉位。
+- `target_position`：設置**持倉量**。這是一個**絕對值**，代表您希望持有的庫存大小（例如 1.5 SOL），無論多空。 策略不會主動開倉達到此目標，而是在持倉**超過**此目標時進行減倉。
+- `max_position`：**最大持倉量**。這是倉位的硬性上限，超出後會立即強制平倉至上限以內，是最高優先級的風控。
+- `position_threshold`：觸發倉位調整的最小偏離量。當 `(當前持倉 - 設置持倉)` 的差額大於此值，會觸發減倉。
+- `inventory_skew`：**風險中性工具**。此參數會根據您當前的**淨倉位**（`net position`）來調整掛單價格。
+      - 若您持有多單，報價會自動下移，吸引他人成交您的賣單。
+      - 若您持有空單，報價會自動上移，吸引他人成交您的買單。
+      - 其核心目標是持續將您的**淨倉位**推向 `0`，以最大限度地降低方向性風險。
 
 ## 重平衡功能詳解
 
