@@ -6,6 +6,8 @@ Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.e
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
+**使用本程式運行 MM 策略 可獲得 10~30% 返佣**
+
 ## 功能特點
 
 - 自動化做市策略
@@ -39,7 +41,7 @@ lemon_trader/
 ├── strategies/           # 策略模塊
 │   ├── __init__.py
 │   ├── market_maker.py   # 做市策略
-│   └── market_maker.py   # 合約做市策略
+│   └── perp_market_maker.py   # 合約做市策略
 │
 ├── utils/                # 工具模塊
 │   ├── __init__.py
