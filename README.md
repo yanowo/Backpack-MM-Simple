@@ -146,8 +146,8 @@ python run.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --in
 程式現已支援永續合約做市。永續模式會自動追蹤淨倉位，並透過 Reduce-Only 訂單進行風險控管。
 
 ```bash
-# 啟動永續做市，維持零淨倉
-python run.py --symbol SOL_PERP --spread 0.3 --market-type perp --target-position 0 --max-position 2
+# 啟動永續做市
+python run.py --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.2 --max-orders 3 --target-position 10 --max-position 12 --position-threshold 11 --inventory-skew 0 --duration 99999999 --interval 15
 ```
 
 主要特性：
