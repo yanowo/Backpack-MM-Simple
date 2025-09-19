@@ -174,7 +174,7 @@ python run.py --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity
 
 ### 重平設置建議
 
-根據不同的市場環境，建議使用不同的重平設置：
+根據不同的市場環境，建議使用不同的重平設置：以 SOL 為例
 
 #### 高波動率市場 (波動率 > 5%)
 ```bash
@@ -201,16 +201,16 @@ python run.py --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity
 
 假設您設置：
 - 總資產: 1000 USDC
-- 基礎資產目標比例: 30%
+- 基礎資產目標比例: 30% (SOL)
 - 重平觸發閾值: 15%
 
-**理想配置:**
-- 基礎資產價值: 300 USDC (30%)
-- 報價資產價值: 700 USDC (70%)
+**相當於:**
+- 基礎資產 SOL 價值: 300 USDC (30%)
+- 報價資產 USDC 價值: 700 USDC (70%)
 
 **觸發重平衡的情況:**
-- 當基礎資產價值 > 450 USDC (偏差 > 150 USDC = 15%) → 賣出基礎資產
-- 當基礎資產價值 < 150 USDC (偏差 > 150 USDC = 15%) → 買入基礎資產
+- 當 SOL 價值 > 450 USDC (偏差 > 150 USDC = 15%) → 賣出 SOL
+- 當 SOL 價值 < 150 USDC (偏差 > 150 USDC = 15%) → 買入 SOL
 - 在 150-450 USDC 範圍內不會觸發重平衡
 
 ## 設定保存
