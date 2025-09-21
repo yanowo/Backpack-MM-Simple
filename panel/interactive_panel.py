@@ -46,6 +46,9 @@ class InteractivePanel:
         # 初始化默認設定
         self.settings = load_settings()
         
+        # 客户端缓存，避免重复创建实例拖慢速度
+        self._client_cache = {}
+        
         # 策略參數
         self.strategy_params = {
             'base_spread_percentage': self.settings.get('base_spread_percentage', 0.1),
@@ -123,6 +126,23 @@ class InteractivePanel:
         
         # 註冊命令處理函數
         self.register_commands()
+        
+    def _get_client(self, api_key=None, secret_key=None):
+        """获取缓存的客户端实例，避免重复创建"""
+        from api.bp_client import BPClient
+        
+        # 为无认证的公开API调用创建一个通用客户端
+        if api_key is None and secret_key is None:
+            cache_key = "public"
+            if cache_key not in self._client_cache:
+                self._client_cache[cache_key] = BPClient({})
+            return self._client_cache[cache_key]
+        
+        # 为认证API调用创建特定的客户端
+        cache_key = f"{api_key}_{secret_key}"
+        if cache_key not in self._client_cache:
+            self._client_cache[cache_key] = BPClient({'api_key': api_key, 'secret_key': secret_key})
+        return self._client_cache[cache_key]
     
     def add_log(self, message, level="INFO"):
         """添加日誌"""
@@ -411,10 +431,7 @@ class InteractivePanel:
         self.add_log("正在獲取可用交易對...", "SYSTEM")
         
         try:
-            # 導入需要的模塊
-            from api.client import get_markets
-            
-            markets_info = get_markets()
+            markets_info = self._get_client().get_markets()
             if isinstance(markets_info, dict) and "error" in markets_info:
                 self.add_log(f"獲取市場信息失敗: {markets_info['error']}", "ERROR")
                 return
@@ -1027,10 +1044,7 @@ class InteractivePanel:
         self.add_log("正在查詢餘額...", "SYSTEM")
         
         try:
-            # 導入API客戶端
-            from api.client import get_balance
-            
-            balances = get_balance(API_KEY, SECRET_KEY)
+            balances = self._get_client(API_KEY, SECRET_KEY).get_balance()
             if isinstance(balances, dict) and "error" in balances and balances["error"]:
                 self.add_log(f"獲取餘額失敗: {balances['error']}", "ERROR")
                 return
@@ -1124,7 +1138,7 @@ class InteractivePanel:
         self.add_log("檢查必要模塊...", "SYSTEM")
         modules_to_check = [
             ('WebSocket庫', 'websocket'),
-            ('API客戶端', 'api.client'),
+            ('API客戶端', 'api.bp_client'),
             ('數據庫模塊', 'database.db'),
             ('策略模塊', 'strategies.market_maker')
         ]

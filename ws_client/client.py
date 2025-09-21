@@ -8,7 +8,7 @@ import websocket as ws
 from typing import Dict, List, Tuple, Any, Optional, Callable
 from config import WS_URL, DEFAULT_WINDOW
 from api.auth import create_signature
-from api.client import get_order_book
+from api.bp_client import BPClient
 from utils.helpers import calculate_volatility
 from logger import setup_logger
 
@@ -65,14 +65,24 @@ class BackpackWebSocket:
         # 添加代理参数
         self.proxy = proxy
         
+        # 客户端缓存，避免重复创建实例
+        self._client_cache = {}
+        
         # 添加重連中標誌，避免多次重連
         self.reconnecting = False
+
+    def _get_client(self):
+        """获取缓存的客户端实例，避免重复创建"""
+        cache_key = "public"
+        if cache_key not in self._client_cache:
+            self._client_cache[cache_key] = BPClient({})
+        return self._client_cache[cache_key]
 
     def initialize_orderbook(self):
         """通過REST API獲取訂單簿初始快照"""
         try:
             # 使用REST API獲取完整訂單簿
-            order_book = get_order_book(self.symbol, 100)  # 增加深度
+            order_book = self._get_client().get_order_book(self.symbol, 100)  # 增加深度
             if isinstance(order_book, dict) and "error" in order_book:
                 logger.error(f"初始化訂單簿失敗: {order_book['error']}")
                 return False

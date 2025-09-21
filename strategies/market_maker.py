@@ -7,11 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Union, Any
 from concurrent.futures import ThreadPoolExecutor
 
-from api.client import (
-    get_balance, execute_order, get_open_orders, cancel_all_orders, 
-    cancel_order, get_market_limits, get_klines, get_ticker, get_order_book,
-    get_collateral
-)
+from api.bp_client import BPClient
 from ws_client.client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
@@ -45,13 +41,26 @@ class MarketMaker:
         rebalance_threshold=15.0,
         enable_rebalance=True,
         base_asset_target_percentage=30.0,
-        ws_proxy=None
+        ws_proxy=None,
+        exchange='backpack',
+        exchange_config=None
     ):
         self.api_key = api_key
         self.secret_key = secret_key
         self.symbol = symbol
         self.base_spread_percentage = base_spread_percentage
         self.order_quantity = order_quantity
+        self.exchange = exchange
+        self.exchange_config = exchange_config or {}
+        
+        # 初始化交易所客户端
+        if exchange == 'backpack':
+            self.client = BPClient(self.exchange_config)
+        elif exchange == 'xxx':
+            ...
+        else:
+            raise ValueError(f"不支持的交易所: {exchange}")
+            
         self.max_orders = max_orders
         self.rebalance_threshold = rebalance_threshold
         
@@ -74,7 +83,7 @@ class MarketMaker:
         self.session_taker_sell_volume = 0.0
         
         # 初始化市場限制
-        self.market_limits = get_market_limits(symbol)
+        self.market_limits = self.client.get_market_limits(symbol)
         if not self.market_limits:
             raise ValueError(f"無法獲取 {symbol} 的市場限制")
         
@@ -92,12 +101,7 @@ class MarketMaker:
         self.taker_sell_volume = 0
         self.total_fees = 0
 
-        # 添加代理参数
-        self.ws_proxy = ws_proxy
-        # 建立WebSocket連接
-        self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True, proxy=self.ws_proxy)
-        self.ws.connect()
-        
+        # 關鍵：在任何可能出錯的代碼之前初始化這些屬性
         # 跟蹤活躍訂單
         self.active_buy_orders = []
         self.active_sell_orders = []
@@ -115,7 +119,18 @@ class MarketMaker:
         self.trades_executed = 0
         self.orders_placed = 0
         self.orders_cancelled = 0
-        
+
+        # 添加代理参数
+        self.ws_proxy = ws_proxy
+        # 建立WebSocket連接（仅对Backpack）
+        if exchange == 'backpack':
+            self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True, proxy=self.ws_proxy)
+            self.ws.connect()
+        elif exchange == 'xxx':
+            ...
+            self.ws = None
+        else:
+            self.ws = None  # 不使用WebSocket
         # 執行緒池用於後台任務
         self.executor = ThreadPoolExecutor(max_workers=3)
         
@@ -182,13 +197,13 @@ class MarketMaker:
         """獲取總餘額，包含普通餘額和抵押品餘額"""
         try:
             # 獲取普通餘額
-            balances = get_balance(self.api_key, self.secret_key)
+            balances = self.client.get_balance()
             if isinstance(balances, dict) and "error" in balances:
                 logger.error(f"獲取普通餘額失敗: {balances['error']}")
                 return None
             
             # 獲取抵押品餘額
-            collateral = get_collateral(self.api_key, self.secret_key)
+            collateral = self.client.get_collateral()
             if isinstance(collateral, dict) and "error" in collateral:
                 logger.warning(f"獲取抵押品餘額失敗: {collateral['error']}")
                 collateral_assets = []
@@ -277,6 +292,10 @@ class MarketMaker:
     
     def _initialize_websocket(self):
         """等待WebSocket連接建立並進行初始化訂閲"""
+        if self.ws is None:
+            logger.info("使用 REST API 模式（无 WebSocket）")
+            return
+            
         wait_time = 0
         max_wait_time = 10
         while not self.ws.connected and wait_time < max_wait_time:
@@ -378,6 +397,9 @@ class MarketMaker:
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
+            # 如果使用 xx 没有 WebSocket，直接返回 True
+            if self.exchange == 'xx':
+                return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
             
@@ -763,7 +785,7 @@ class MarketMaker:
             price = self.ws.get_current_price()
         
         if price is None:
-            ticker = get_ticker(self.symbol)
+            ticker = self.client.get_ticker(self.symbol)
             if isinstance(ticker, dict) and "error" in ticker:
                 logger.error(f"獲取價格失敗: {ticker['error']}")
                 return None
@@ -782,7 +804,7 @@ class MarketMaker:
             bid_price, ask_price = self.ws.get_bid_ask()
         
         if bid_price is None or ask_price is None:
-            order_book = get_order_book(self.symbol)
+            order_book = self.client.get_order_book(self.symbol)
             if isinstance(order_book, dict) and "error" in order_book:
                 logger.error(f"獲取訂單簿失敗: {order_book['error']}")
                 return None, None
@@ -1036,7 +1058,7 @@ class MarketMaker:
             return
         
         # 執行訂單
-        result = execute_order(self.api_key, self.secret_key, order_details)
+        result = self.client.execute_order(order_details)
         
         if isinstance(result, dict) and "error" in result:
             logger.error(f"重新平衡訂單執行失敗: {result['error']}")
@@ -1142,11 +1164,11 @@ class MarketMaker:
                 "autoLendRedeem": True,
                 "autoLend": True
             }
-            res = execute_order(self.api_key, self.secret_key, order)
+            res = self.client.execute_order(order)
             if isinstance(res, dict) and "error" in res and "POST_ONLY_TAKER" in str(res["error"]):
                 logger.info("調整買單價格並重試...")
                 order["price"] = str(round_to_tick_size(float(order["price"]) - self.tick_size, self.tick_size))
-                res = execute_order(self.api_key, self.secret_key, order)
+                res = self.client.execute_order(order)
             
             # 特殊處理資金不足錯誤
             if isinstance(res, dict) and "error" in res and "INSUFFICIENT_FUNDS" in str(res["error"]):
@@ -1187,11 +1209,11 @@ class MarketMaker:
                 "autoLendRedeem": True,
                 "autoLend": True
             }
-            res = execute_order(self.api_key, self.secret_key, order)
+            res = self.client.execute_order(order)
             if isinstance(res, dict) and "error" in res and "POST_ONLY_TAKER" in str(res["error"]):
                 logger.info("調整賣單價格並重試...")
                 order["price"] = str(round_to_tick_size(float(order["price"]) + self.tick_size, self.tick_size))
-                res = execute_order(self.api_key, self.secret_key, order)
+                res = self.client.execute_order(order)
             
             # 特殊處理資金不足錯誤
             if isinstance(res, dict) and "error" in res and "INSUFFICIENT_FUNDS" in str(res["error"]):
@@ -1225,7 +1247,7 @@ class MarketMaker:
     
     def cancel_existing_orders(self):
         """取消所有現有訂單"""
-        open_orders = get_open_orders(self.api_key, self.secret_key, self.symbol)
+        open_orders = self.client.get_open_orders(self.symbol)
         
         if isinstance(open_orders, dict) and "error" in open_orders:
             logger.error(f"獲取訂單失敗: {open_orders['error']}")
@@ -1241,7 +1263,7 @@ class MarketMaker:
         
         try:
             # 嘗試批量取消
-            result = cancel_all_orders(self.api_key, self.secret_key, self.symbol)
+            result = self.client.cancel_all_orders(self.symbol)
             
             if isinstance(result, dict) and "error" in result:
                 logger.error(f"批量取消訂單失敗: {result['error']}")
@@ -1257,11 +1279,11 @@ class MarketMaker:
                         if not order_id:
                             continue
                         
+                        # Use legacy wrapper to keep existing logic; could be refactored to self.client.cancel_order
+                        # Directly use instance client method now
                         future = executor.submit(
-                            cancel_order, 
-                            self.api_key, 
-                            self.secret_key, 
-                            order_id, 
+                            self.client.cancel_order,
+                            order_id,
                             self.symbol
                         )
                         cancel_futures.append((order_id, future))
@@ -1287,7 +1309,7 @@ class MarketMaker:
         time.sleep(1)
         
         # 檢查是否還有未取消的訂單
-        remaining_orders = get_open_orders(self.api_key, self.secret_key, self.symbol)
+        remaining_orders = self.client.get_open_orders(self.symbol)
         if remaining_orders and len(remaining_orders) > 0:
             logger.warning(f"警告: 仍有 {len(remaining_orders)} 個未取消的訂單")
         else:
@@ -1299,7 +1321,7 @@ class MarketMaker:
     
     def check_order_fills(self):
         """檢查訂單成交情況"""
-        open_orders = get_open_orders(self.api_key, self.secret_key, self.symbol)
+        open_orders = self.client.get_open_orders(self.symbol)
         
         if isinstance(open_orders, dict) and "error" in open_orders:
             logger.error(f"獲取訂單失敗: {open_orders['error']}")
@@ -1540,6 +1562,10 @@ class MarketMaker:
     
     def _ensure_data_streams(self):
         """確保所有必要的數據流訂閲都是活躍的"""
+        # 如果使用 Websea，不需要 WebSocket 数据流
+        if self.ws is None:
+            return
+            
         # 檢查深度流訂閲
         if "depth" not in self.ws.subscriptions:
             logger.info("重新訂閲深度數據流...")
@@ -1585,7 +1611,7 @@ class MarketMaker:
         try:
             # 先確保 WebSocket 連接可用
             connection_status = self.check_ws_connection()
-            if connection_status:
+            if connection_status and self.ws is not None:
                 # 初始化訂單簿和數據流
                 if not self.ws.orderbook["bids"] and not self.ws.orderbook["asks"]:
                     self.ws.initialize_orderbook()

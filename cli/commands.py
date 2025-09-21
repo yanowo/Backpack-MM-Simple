@@ -4,10 +4,7 @@ CLI命令模塊，提供命令行交互功能
 import time
 from datetime import datetime
 
-from api.client import (
-    get_deposit_address, get_balance, get_markets, get_order_book,
-    get_ticker, get_fill_history, get_klines, get_collateral
-)
+from api.bp_client import BPClient
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -18,16 +15,36 @@ from logger import setup_logger
 
 logger = setup_logger("cli")
 
+# 缓存客户端实例以提高性能
+_client_cache = {}
+
+def _get_client(api_key=None, secret_key=None):
+    """获取缓存的客户端实例，避免重复创建"""
+    # 为无认证的公开API调用创建一个通用客户端
+    if api_key is None and secret_key is None:
+        cache_key = "public"
+        if cache_key not in _client_cache:
+            _client_cache[cache_key] = BPClient({})
+        return _client_cache[cache_key]
+    
+    # 为认证API调用创建特定的客户端
+    cache_key = f"{api_key}_{secret_key}"
+    if cache_key not in _client_cache:
+        _client_cache[cache_key] = BPClient({'api_key': api_key, 'secret_key': secret_key})
+    return _client_cache[cache_key]
+
+
 def get_address_command(api_key, secret_key):
     """獲取存款地址命令"""
     blockchain = input("請輸入區塊鏈名稱(Solana, Ethereum, Bitcoin等): ")
-    result = get_deposit_address(api_key, secret_key, blockchain)
+    result = _get_client(api_key, secret_key).get_deposit_address(blockchain)
     print(result)
 
 def get_balance_command(api_key, secret_key):
     """獲取餘額命令"""
-    balances = get_balance(api_key, secret_key)
-    collateral = get_collateral(api_key, secret_key)
+    c = _get_client(api_key, secret_key)
+    balances = c.get_balance()
+    collateral = c.get_collateral()
     if isinstance(balances, dict) and "error" in balances and balances["error"]:
         print(f"獲取餘額失敗: {balances['error']}")
     else:
@@ -56,7 +73,7 @@ def get_balance_command(api_key, secret_key):
 def get_markets_command():
     """獲取市場信息命令"""
     print("\n獲取市場信息...")
-    markets_info = get_markets()
+    markets_info = _get_client().get_markets()
     
     if isinstance(markets_info, dict) and "error" in markets_info:
         print(f"獲取市場信息失敗: {markets_info['error']}")
@@ -88,7 +105,7 @@ def get_orderbook_command(api_key, secret_key, ws_proxy=None):
         
         if not ws.connected:
             print("WebSocket連接超時，使用REST API獲取訂單簿")
-            depth = get_order_book(symbol)
+            depth = _get_client().get_order_book(symbol)
         else:
             # 初始化訂單簿並訂閲深度流
             ws.initialize_orderbook()
@@ -139,7 +156,7 @@ def get_orderbook_command(api_key, secret_key, ws_proxy=None):
         print(f"獲取訂單簿失敗: {str(e)}")
         # 嘗試使用REST API
         try:
-            depth = get_order_book(symbol)
+            depth = _get_client().get_order_book(symbol)
             if isinstance(depth, dict) and "error" in depth:
                 print(f"獲取訂單簿失敗: {depth['error']}")
                 return
@@ -239,7 +256,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     market_type = market_type_input if market_type_input in ("spot", "perp") else "spot"
 
     symbol = input("請輸入要做市的交易對 (例如: SOL_USDC): ")
-    markets_info = get_markets()
+    markets_info = _get_client().get_markets()
     selected_market = None
     if isinstance(markets_info, list):
         for market in markets_info:
@@ -521,8 +538,8 @@ def market_analysis_command(api_key, secret_key, ws_proxy=None):
             
             # 獲取K線數據分析趨勢
             print("獲取歷史數據分析趨勢...")
-            klines = get_klines(symbol, "15m")
-            
+            klines = _get_client().get_klines(symbol, "15m")
+
             # 添加調試信息查看數據結構
             print("K線數據結構: ")
             if isinstance(klines, dict) and "error" in klines:

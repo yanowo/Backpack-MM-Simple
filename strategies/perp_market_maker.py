@@ -10,7 +10,7 @@ import math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
-from api.client import execute_order, get_positions
+# 全局函数导入已移除，现在使用客户端方法
 from logger import setup_logger
 from strategies.market_maker import MarketMaker, format_balance
 from utils.helpers import round_to_precision, round_to_tick_size
@@ -32,6 +32,8 @@ class PerpetualMarketMaker(MarketMaker):
         inventory_skew: float = 0.0,
         leverage: float = 1.0,
         ws_proxy: Optional[str] = None,
+        exchange: str = 'backpack',
+        exchange_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> None:
         """
@@ -54,6 +56,8 @@ class PerpetualMarketMaker(MarketMaker):
             secret_key=secret_key,
             symbol=symbol,
             ws_proxy=ws_proxy,
+            exchange=exchange,
+            exchange_config=exchange_config,
             **kwargs,
         )
 
@@ -117,8 +121,8 @@ class PerpetualMarketMaker(MarketMaker):
         """取得目前的永續合約淨倉位。"""
         try:
             # 直接查詢特定交易對的倉位
-            result = get_positions(self.api_key, self.secret_key, self.symbol)
-            
+            result = self.client.get_positions(self.symbol)
+
             if isinstance(result, dict) and "error" in result:
                 error_msg = result["error"]
                 # 404 錯誤表示沒有倉位，這是正常情況
@@ -126,6 +130,7 @@ class PerpetualMarketMaker(MarketMaker):
                     logger.debug("未找到 %s 的倉位記錄(404)，倉位為0", self.symbol)
                     return 0.0
                 else:
+                    logger.info(f"result: {result}")
                     logger.error("查詢倉位失敗: %s", error_msg)
                     return 0.0
                 
@@ -154,7 +159,7 @@ class PerpetualMarketMaker(MarketMaker):
     def _get_actual_position_info(self) -> Dict[str, Any]:
         """獲取完整的倉位信息。"""
         try:
-            result = get_positions(self.api_key, self.secret_key, self.symbol)
+            result = self.client.get_positions(self.symbol)
             
             if isinstance(result, dict) and "error" in result:
                 error_msg = result["error"]
@@ -334,7 +339,7 @@ class PerpetualMarketMaker(MarketMaker):
             normalized_order_type,
         )
 
-        result = execute_order(self.api_key, self.secret_key, order_details)
+        result = self.client.execute_order(order_details)
         if isinstance(result, dict) and "error" in result:
             logger.error("永續合約訂單失敗: %s", result["error"])
         else:
