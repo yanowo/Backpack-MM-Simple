@@ -341,7 +341,7 @@ class PerpetualMarketMaker(MarketMaker):
 
         result = self.client.execute_order(order_details)
         if isinstance(result, dict) and "error" in result:
-            logger.error("永續合約訂單失敗: %s", result["error"])
+            logger.error(f"永續合約訂單失敗: {result['error']}, 订单信息：{order_details}")
         else:
             self.orders_placed += 1
             logger.info("永續合約訂單提交成功: %s", result.get("id", "unknown"))
@@ -435,7 +435,17 @@ class PerpetualMarketMaker(MarketMaker):
         )
 
         if isinstance(result, dict) and "error" in result:
-            logger.error("平倉失敗: %s", result["error"])
+            logger.error(
+                "平倉失敗: %s | side=%s qty=%s price=%s type=%s reduceOnly=%s clientId=%s result=%s",
+                result.get("error"),
+                order_side,
+                format_balance(qty),
+                price if price is not None else "Market",
+                order_type,
+                True,
+                client_id or "",
+                result,
+            )
             return False
 
         logger.info("平倉完成，數量 %s", format_balance(qty))
@@ -458,10 +468,15 @@ class PerpetualMarketMaker(MarketMaker):
             )
             return True
 
-        deviation = current_size - self.target_position
-        if deviation > self.position_threshold:
+        # 檢查是否超過目標 + 閾值（而非僅僅偏離目標）
+        threshold_line = self.target_position + self.position_threshold
+        if current_size > threshold_line:
             logger.info(
-                "持倉量偏離目標 %.8f，觸發減倉調整", deviation
+                "持倉量 %s 超過閾值線 %s (目標 %s + 閾值 %s)，觸發減倉調整",
+                format_balance(current_size),
+                format_balance(threshold_line),
+                format_balance(self.target_position),
+                format_balance(self.position_threshold)
             )
             return True
 
@@ -491,13 +506,17 @@ class PerpetualMarketMaker(MarketMaker):
             return self.close_position(quantity=excess, order_type="Market")
 
         # 2. 減倉：檢查持倉量是否超過目標 + 閾值
-        deviation = current_size - desired_size
-        if deviation > self.position_threshold:
-            qty_to_close = min(deviation, current_size)
+        # 只有當實際持倉超過 (目標持倉 + 閾值) 時才減倉
+        threshold_line = desired_size + self.position_threshold
+        if current_size > threshold_line:
+            # 只平掉超出閾值線的部分，而不是全部
+            qty_to_close = current_size - threshold_line
             logger.info(
-                "持倉量 %s 超過目標 %s，執行減倉 %s",
+                "持倉量 %s 超過閾值線 %s (目標 %s + 閾值 %s)，執行減倉 %s",
                 format_balance(current_size),
+                format_balance(threshold_line),
                 format_balance(desired_size),
+                format_balance(self.position_threshold),
                 format_balance(qty_to_close)
             )
             # close_position 會根據淨倉位自動判斷平倉方向
@@ -523,9 +542,33 @@ class PerpetualMarketMaker(MarketMaker):
             return buy_prices, sell_prices
 
         net = self.get_net_position()
+        current_price = self.get_current_price()
+        
+        # 获取盘口信息
+        orderbook = self.client.get_order_book(self.symbol)
+        best_bid = best_ask = None
+        if orderbook and 'bids' in orderbook and 'asks' in orderbook:
+            if orderbook['bids']:
+                best_bid = float(orderbook['bids'][0][0])
+            if orderbook['asks']:
+                best_ask = float(orderbook['asks'][0][0])
+        
+        # 输出盘口和持仓信息
+        logger.info("=== 市场状态 ===")
+        if best_bid and best_ask:
+            spread = best_ask - best_bid
+            spread_pct = (spread / current_price * 100) if current_price else 0
+            logger.info(f"盘口: Bid {best_bid:.3f} | Ask {best_ask:.3f} | 价差 {spread:.3f} ({spread_pct:.3f}%)")
+        if current_price:
+            logger.info(f"中间价: {current_price:.3f}")
+        
+        # 输出持仓信息
+        direction = "空头" if net < 0 else "多头" if net > 0 else "无仓位"
+        logger.info(f"持仓: {direction} {abs(net):.3f} SOL | 目标: {self.target_position:.1f} | 上限: {self.max_position:.1f}")
 
         # 如果沒有庫存偏移係數或沒有倉位，則不進行調整
         if self.inventory_skew <= 0 or abs(net) < self.min_order_size:
+            logger.info(f"原始挂单: 买 {buy_prices[0]:.3f} | 卖 {sell_prices[0]:.3f} (无偏移)")
             return buy_prices, sell_prices
 
         if self.max_position <= 0:
@@ -536,7 +579,6 @@ class PerpetualMarketMaker(MarketMaker):
         deviation = net
         skew_ratio = max(-1.0, min(1.0, deviation / self.max_position))
 
-        current_price = self.get_current_price()
         if not current_price:
             return buy_prices, sell_prices
 
@@ -555,15 +597,11 @@ class PerpetualMarketMaker(MarketMaker):
             for price in sell_prices
         ]
 
-        logger.debug(
-            "淨倉位 %.6f，報價偏移 %.6f。買價: %s -> %s, 賣價: %s -> %s",
-            net,
-            skew_offset,
-            format_balance(buy_prices[0]),
-            format_balance(adjusted_buys[0]),
-            format_balance(sell_prices[0]),
-            format_balance(adjusted_sells[0]),
-        )
+        # 输出价格调整详情
+        logger.info("=== 价格计算 ===")
+        logger.info(f"原始挂单: 买 {buy_prices[0]:.3f} | 卖 {sell_prices[0]:.3f}")
+        logger.info(f"偏移计算: 净持仓 {net:.3f} | 偏移系数 {self.inventory_skew:.2f} | 偏移量 {skew_offset:.4f}")
+        logger.info(f"调整后挂单: 买 {adjusted_buys[0]:.3f} | 卖 {adjusted_sells[0]:.3f}")
 
         # 風控：確保調整後買賣價沒有交叉
         if adjusted_buys[0] >= adjusted_sells[0]:

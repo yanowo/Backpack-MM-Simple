@@ -84,12 +84,12 @@ def main():
             'api_version': 'v1',
             'default_window': '5000'
         }
-    elif exchange == 'xxx':
+    elif exchange == 'xx':
         """
-        這裡是 xxx 交易所的配置
+        這裡是 xx 交易所的配置
         """
     else:
-        logger.error("不支持的交易所，請選擇 'backpack' 或 'xxx'")
+        logger.error("不支持的交易所，請選擇 'backpack' 或 'xx'")
         sys.exit(1)
 
     
