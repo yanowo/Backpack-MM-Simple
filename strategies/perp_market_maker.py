@@ -10,7 +10,7 @@ import math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
-# 全局函数导入已移除，现在使用客户端方法
+# 全局函數導入已移除，現在使用客户端方法
 from logger import setup_logger
 from strategies.market_maker import MarketMaker, format_balance
 from utils.helpers import round_to_precision, round_to_tick_size
@@ -138,7 +138,7 @@ class PerpetualMarketMaker(MarketMaker):
                 logger.warning("倉位API返回格式異常: %s", type(result))
                 return 0.0
                 
-            # 如果返回空列表，說明沒有該交易對的倉位
+            # 如果返回空列表，説明沒有該交易對的倉位
             if not result:
                 logger.debug("未找到 %s 的倉位記錄，倉位為0", self.symbol)
                 return 0.0
@@ -341,7 +341,7 @@ class PerpetualMarketMaker(MarketMaker):
 
         result = self.client.execute_order(order_details)
         if isinstance(result, dict) and "error" in result:
-            logger.error(f"永續合約訂單失敗: {result['error']}, 订单信息：{order_details}")
+            logger.error(f"永續合約訂單失敗: {result['error']}, 訂單信息：{order_details}")
         else:
             self.orders_placed += 1
             logger.info("永續合約訂單提交成功: %s", result.get("id", "unknown"))
@@ -544,7 +544,7 @@ class PerpetualMarketMaker(MarketMaker):
         net = self.get_net_position()
         current_price = self.get_current_price()
         
-        # 获取盘口信息
+        # 獲取盤口信息
         orderbook = self.client.get_order_book(self.symbol)
         best_bid = best_ask = None
         if orderbook and 'bids' in orderbook and 'asks' in orderbook:
@@ -553,22 +553,22 @@ class PerpetualMarketMaker(MarketMaker):
             if orderbook['asks']:
                 best_ask = float(orderbook['asks'][0][0])
         
-        # 输出盘口和持仓信息
-        logger.info("=== 市场状态 ===")
+        # 輸出盤口和持倉信息
+        logger.info("=== 市場狀態 ===")
         if best_bid and best_ask:
             spread = best_ask - best_bid
             spread_pct = (spread / current_price * 100) if current_price else 0
-            logger.info(f"盘口: Bid {best_bid:.3f} | Ask {best_ask:.3f} | 价差 {spread:.3f} ({spread_pct:.3f}%)")
+            logger.info(f"盤口: Bid {best_bid:.3f} | Ask {best_ask:.3f} | 價差 {spread:.3f} ({spread_pct:.3f}%)")
         if current_price:
-            logger.info(f"中间价: {current_price:.3f}")
+            logger.info(f"中間價: {current_price:.3f}")
         
-        # 输出持仓信息
-        direction = "空头" if net < 0 else "多头" if net > 0 else "无仓位"
-        logger.info(f"持仓: {direction} {abs(net):.3f} SOL | 目标: {self.target_position:.1f} | 上限: {self.max_position:.1f}")
+        # 輸出持倉信息
+        direction = "空頭" if net < 0 else "多頭" if net > 0 else "無倉位"
+        logger.info(f"持倉: {direction} {abs(net):.3f} SOL | 目標: {self.target_position:.1f} | 上限: {self.max_position:.1f}")
 
         # 如果沒有庫存偏移係數或沒有倉位，則不進行調整
         if self.inventory_skew <= 0 or abs(net) < self.min_order_size:
-            logger.info(f"原始挂单: 买 {buy_prices[0]:.3f} | 卖 {sell_prices[0]:.3f} (无偏移)")
+            logger.info(f"原始掛單: 買 {buy_prices[0]:.3f} | 賣 {sell_prices[0]:.3f} (無偏移)")
             return buy_prices, sell_prices
 
         if self.max_position <= 0:
@@ -597,11 +597,11 @@ class PerpetualMarketMaker(MarketMaker):
             for price in sell_prices
         ]
 
-        # 输出价格调整详情
-        logger.info("=== 价格计算 ===")
-        logger.info(f"原始挂单: 买 {buy_prices[0]:.3f} | 卖 {sell_prices[0]:.3f}")
-        logger.info(f"偏移计算: 净持仓 {net:.3f} | 偏移系数 {self.inventory_skew:.2f} | 偏移量 {skew_offset:.4f}")
-        logger.info(f"调整后挂单: 买 {adjusted_buys[0]:.3f} | 卖 {adjusted_sells[0]:.3f}")
+        # 輸出價格調整詳情
+        logger.info("=== 價格計算 ===")
+        logger.info(f"原始掛單: 買 {buy_prices[0]:.3f} | 賣 {sell_prices[0]:.3f}")
+        logger.info(f"偏移計算: 淨持倉 {net:.3f} | 偏移係數 {self.inventory_skew:.2f} | 偏移量 {skew_offset:.4f}")
+        logger.info(f"調整後掛單: 買 {adjusted_buys[0]:.3f} | 賣 {adjusted_sells[0]:.3f}")
 
         # 風控：確保調整後買賣價沒有交叉
         if adjusted_buys[0] >= adjusted_sells[0]:

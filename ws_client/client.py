@@ -1,5 +1,5 @@
 """
-WebSocket客戶端模塊
+WebSocket客户端模塊
 """
 import json
 import time
@@ -17,7 +17,7 @@ logger = setup_logger("backpack_ws")
 class BackpackWebSocket:
     def __init__(self, api_key, secret_key, symbol, on_message_callback=None, auto_reconnect=True, proxy=None):
         """
-        初始化WebSocket客戶端
+        初始化WebSocket客户端
         
         Args:
             api_key: API密鑰
@@ -25,7 +25,7 @@ class BackpackWebSocket:
             symbol: 交易對符號
             on_message_callback: 消息回調函數
             auto_reconnect: 是否自動重連
-            proxy:  wss代理 支持格式为 http://user:pass@host:port/ 或者 http://host:port
+            proxy:  wss代理 支持格式為 http://user:pass@host:port/ 或者 http://host:port
 
         """
         self.api_key = api_key
@@ -62,17 +62,17 @@ class BackpackWebSocket:
         self.heartbeat_interval = 30
         self.heartbeat_thread = None
 
-        # 添加代理参数
+        # 添加代理參數
         self.proxy = proxy
         
-        # 客户端缓存，避免重复创建实例
+        # 客户端緩存，避免重複創建實例
         self._client_cache = {}
         
         # 添加重連中標誌，避免多次重連
         self.reconnecting = False
 
     def _get_client(self):
-        """获取缓存的客户端实例，避免重复创建"""
+        """獲取緩存的客户端實例，避免重複創建"""
         cache_key = "public"
         if cache_key not in self._client_cache:
             self._client_cache[cache_key] = BPClient({})

@@ -46,7 +46,7 @@ class InteractivePanel:
         # 初始化默認設定
         self.settings = load_settings()
         
-        # 客户端缓存，避免重复创建实例拖慢速度
+        # 客户端緩存，避免重複創建實例拖慢速度
         self._client_cache = {}
         
         # 策略參數
@@ -128,17 +128,17 @@ class InteractivePanel:
         self.register_commands()
         
     def _get_client(self, api_key=None, secret_key=None):
-        """获取缓存的客户端实例，避免重复创建"""
+        """獲取緩存的客户端實例，避免重複創建"""
         from api.bp_client import BPClient
         
-        # 为无认证的公开API调用创建一个通用客户端
+        # 為無認證的公開API調用創建一個通用客户端
         if api_key is None and secret_key is None:
             cache_key = "public"
             if cache_key not in self._client_cache:
                 self._client_cache[cache_key] = BPClient({})
             return self._client_cache[cache_key]
         
-        # 为认证API调用创建特定的客户端
+        # 為認證API調用創建特定的客户端
         cache_key = f"{api_key}_{secret_key}"
         if cache_key not in self._client_cache:
             self._client_cache[cache_key] = BPClient({'api_key': api_key, 'secret_key': secret_key})
@@ -171,7 +171,7 @@ class InteractivePanel:
         }
     
     def create_layout(self):
-        """創建UI布局"""
+        """創建UI佈局"""
         layout = Layout()
         
         # 分成上中下三部分
@@ -503,7 +503,7 @@ class InteractivePanel:
                 'inventory_skew': 0.25,
             }
             
-            # 合併用戶設置的參數
+            # 合併用户設置的參數
             for key, value in self.strategy_params.items():
                 if key in params:
                     params[key] = value
@@ -627,14 +627,14 @@ class InteractivePanel:
                                 # 等待訂單簿填充
                                 time.sleep(1)
                     
-                    # 確保所有數據流訂閱
-                    self.add_log("確保數據流訂閱...")
+                    # 確保所有數據流訂閲
+                    self.add_log("確保數據流訂閲...")
                     if hasattr(self.market_maker, '_ensure_data_streams'):
                         self.market_maker._ensure_data_streams()
                     
-                    # 增加小延遲確保訂閱成功
+                    # 增加小延遲確保訂閲成功
                     time.sleep(2)
-                    self.add_log("數據流訂閱完成，進入主循環...")
+                    self.add_log("數據流訂閲完成，進入主循環...")
                 else:
                     self.add_log("WebSocket連接失敗，請檢查網絡或API配置", "ERROR")
                     self.strategy_running = False
@@ -922,7 +922,7 @@ class InteractivePanel:
             else:
                 self.add_log(f"{param} = {value}", "SYSTEM")
                 
-        # 添加使用說明
+        # 添加使用説明
         self.add_log("\n設置參數示例:", "SYSTEM")
         self.add_log("set base_spread 0.2    - 設置價差為0.2%", "SYSTEM")
         self.add_log("set order_quantity 0.5 - 設置訂單數量為0.5", "SYSTEM")
@@ -1138,7 +1138,7 @@ class InteractivePanel:
         self.add_log("檢查必要模塊...", "SYSTEM")
         modules_to_check = [
             ('WebSocket庫', 'websocket'),
-            ('API客戶端', 'api.bp_client'),
+            ('API客户端', 'api.bp_client'),
             ('數據庫模塊', 'database.db'),
             ('策略模塊', 'strategies.market_maker')
         ]

@@ -1,5 +1,5 @@
 """
-API請求客戶端模塊
+API請求客户端模塊
 """
 import json
 import time
@@ -29,10 +29,10 @@ class BPClient(BaseExchangeClient):
         return "Backpack"
 
     async def connect(self) -> None:
-        logger.info("Backpack 客戶端已連接")
+        logger.info("Backpack 客户端已連接")
 
     async def disconnect(self) -> None:
-        logger.info("Backpack 客戶端已斷開連接")
+        logger.info("Backpack 客户端已斷開連接")
 
     def make_request(self, method: str, endpoint: str, api_key=None, secret_key=None, instruction=None, 
                     params=None, data=None, retry_count=3) -> Dict:
@@ -146,7 +146,7 @@ class BPClient(BaseExchangeClient):
         return self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
 
     def get_balance(self):
-        """獲取賬戶餘額"""
+        """獲取賬户餘額"""
         endpoint = f"/api/{API_VERSION}/capital"
         instruction = "balanceQuery"
         return self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction)
