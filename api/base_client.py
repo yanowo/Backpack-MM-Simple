@@ -167,6 +167,7 @@ class BaseExchangeClient(ABC):
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config or {}
+        self._order_update_callback = None
         # concrete clients may set up session/loggers
 
     # ---- lifecycle ----
@@ -178,6 +179,20 @@ class BaseExchangeClient(ABC):
 
     @abstractmethod
     def get_exchange_name(self) -> str: ...
+
+    # ---- Order update callback management ----
+    def set_order_update_callback(self, callback):
+        """设置订单更新回调函数"""
+        self._order_update_callback = callback
+
+    def _handle_order_update(self, order_data):
+        """处理订单更新的通用方法"""
+        if self._order_update_callback:
+            try:
+                self._order_update_callback(order_data)
+            except Exception as e:
+                # 防止回调函数的错误影响主流程
+                print(f"Error in order update callback: {e}")
 
     # ---- HTTP / request layer (sync for simplicity) ----
     @abstractmethod

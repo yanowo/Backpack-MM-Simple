@@ -10,11 +10,11 @@ def round_to_precision(value: float, precision: int) -> float:
     根據精度四捨五入數字
     
     Args:
-        value: 要四捨五入的數值
+        value: 要向下取整的數值
         precision: 小數點精度
         
     Returns:
-        四捨五入後的數值
+        向下取整的數值
     """
     factor = 10 ** precision
     return math.floor(value * factor) / factor

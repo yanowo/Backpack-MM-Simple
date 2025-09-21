@@ -20,7 +20,7 @@ def parse_arguments():
     parser.add_argument('--cli', action='store_true', help='啟動命令行界面')
     
     # 基本參數
-    parser.add_argument('--exchange', type=str, choices=['backpack', 'xx'], default='backpack', help='交易所選擇 (backpack 或 xx)')
+    parser.add_argument('--exchange', type=str, choices=['backpack', 'websea'], default='backpack', help='交易所選擇 (backpack, websea 或 xx)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--ws-proxy', type=str, help='WebSocket Proxy (可選，默認使用環境變數或配置文件)')
@@ -84,12 +84,22 @@ def main():
             'api_version': 'v1',
             'default_window': '5000'
         }
+    elif exchange == 'websea':
+        api_key = os.getenv('WEBSEA_TOKEN')
+        secret_key = os.getenv('WEBSEA_SECRET')
+        ws_proxy = os.getenv('PROXY_WEBSOCKET')  # 添加 ws_proxy 定义
+        base_url = os.getenv('WEBSEA_BASE_URL', 'https://coapi.websea.com')
+        exchange_config = {
+            'ticker': args.symbol,
+            'leverage': 10,
+            'is_full': 2  # 全仓模式
+        }
     elif exchange == 'xxx':
         """
         這裡是 xxx 交易所的配置
         """
     else:
-        logger.error("不支持的交易所，請選擇 'backpack' 或 'xxx'")
+        logger.error("不支持的交易所，請選擇 'backpack', 'websea' 或 'xxx'")
         sys.exit(1)
 
     
