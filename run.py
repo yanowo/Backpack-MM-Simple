@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Backpack Exchange 做市交易程序統一入口
-支持命令行模式和面板模式
+支持命令行模式和麪板模式
 """
 import argparse
 import sys
@@ -96,7 +96,7 @@ def main():
         }
     elif exchange == 'xxx':
         """
-        這裡是 xxx 交易所的配置
+        這裡是 xx 交易所的配置
         """
     else:
         logger.error("不支持的交易所，請選擇 'backpack', 'websea' 或 'xxx'")

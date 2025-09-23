@@ -13,9 +13,11 @@ from ws_client.client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
 from logger import setup_logger
+import traceback
 
 logger = setup_logger("market_maker")
 
+def format_balance(value, decimals=8, threshold=1e-8) -> str:
 def format_balance(value, decimals=8, threshold=1e-8) -> str:
     """
     格式化餘額顯示，避免科學記號
@@ -123,9 +125,9 @@ class MarketMaker:
         self.orders_placed = 0
         self.orders_cancelled = 0
 
-        # 添加代理参数
+        # 添加代理參數
         self.ws_proxy = ws_proxy
-        # 建立WebSocket連接（仅对Backpack）
+        # 建立WebSocket連接（僅對Backpack）
         if exchange == 'backpack':
             self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True, proxy=self.ws_proxy)
             self.ws.connect()
@@ -445,16 +447,18 @@ class MarketMaker:
                     time.sleep(0.5)
                 except Exception as e:
                     logger.debug(f"關閉現有WebSocket時的預期錯誤: {e}")
-            
-            # 創建新的連接
-            self.ws = BackpackWebSocket(
-                self.api_key, 
-                self.secret_key, 
-                self.symbol, 
-                self.on_ws_message, 
-                auto_reconnect=True,
-                proxy=self.ws_proxy
-            )
+            if self.exchange == 'backpack':
+                # 創建新的連接
+                self.ws = BackpackWebSocket(
+                    self.api_key, 
+                    self.secret_key, 
+                    self.symbol, 
+                    self.on_ws_message, 
+                    auto_reconnect=True,
+                    proxy=self.ws_proxy
+                )
+            elif self.exchange == 'xx':
+                ...
             self.ws.connect()
             
             # 等待連接建立，但不要等太久
@@ -1024,7 +1028,7 @@ class MarketMaker:
             logger.info(f"總資產價值 {total_assets:.2f} {self.quote_asset} 過小，跳過重平衡檢查")
             return False
         
-        # 使用用戶設定的目標比例
+        # 使用用户設定的目標比例
         ideal_base_value = total_assets * (self.base_asset_target_percentage / 100)
         actual_base_value = base_total * current_price
         
@@ -1232,7 +1236,7 @@ class MarketMaker:
             logger.info(f"當前總餘額: {format_balance(base_total)} {self.base_asset}, {format_balance(quote_total)} {self.quote_asset}")
             logger.info(f"當前可用餘額: {format_balance(base_available)} {self.base_asset}, {format_balance(quote_available)} {self.quote_asset}")
             
-            # 如果可用餘額很少但總餘額充足，說明資金在抵押品中
+            # 如果可用餘額很少但總餘額充足，説明資金在抵押品中
             if base_available < base_total * 0.1:
                 logger.info(f"基礎資產主要在抵押品中，將依靠自動贖回功能")
             if quote_available < quote_total * 0.1:
@@ -1484,35 +1488,35 @@ class MarketMaker:
         logger.info(f"當前活躍訂單: 買單 {len(self.active_buy_orders)} 個, 賣單 {len(self.active_sell_orders)} 個")
     
     def estimate_profit(self):
-        """简化的利润统计"""
+        """簡化的利潤統計"""
         # 計算總的PnL和本次執行的PnL
         realized_pnl, unrealized_pnl, total_fees, net_pnl, session_realized_pnl, session_fees, session_net_pnl = self.calculate_pnl()
         
-        # 计算本次执行的成交量
+        # 計算本次執行的成交量
         session_buy_volume = sum(qty for _, qty in self.session_buy_trades)
         session_sell_volume = sum(qty for _, qty in self.session_sell_trades)
         
-        # 只输出关键信息
-        logger.info("=== 本次执行总结 ===")
+        # 只輸出關鍵信息
+        logger.info("=== 本次執行總結 ===")
         if session_buy_volume > 0 or session_sell_volume > 0:
-            logger.info(f"成交: 买入 {session_buy_volume:.3f} SOL | 卖出 {session_sell_volume:.3f} SOL")
-            logger.info(f"本次盈亏: {session_net_pnl:.4f} USDT (手续费: {session_fees:.4f})")
+            logger.info(f"成交: 買入 {session_buy_volume:.3f} SOL | 賣出 {session_sell_volume:.3f} SOL")
+            logger.info(f"本次盈虧: {session_net_pnl:.4f} USDT (手續費: {session_fees:.4f})")
         else:
-            logger.info("成交: 无")
+            logger.info("成交: 無")
         
-        logger.info(f"累计盈亏: {net_pnl:.4f} USDT | 未实现: {unrealized_pnl:.4f} USDT")
+        logger.info(f"累計盈虧: {net_pnl:.4f} USDT | 未實現: {unrealized_pnl:.4f} USDT")
         
-        # 活跃订单状态
+        # 活躍訂單狀態
         if self.active_buy_orders and self.active_sell_orders:
             buy_price = float(self.active_buy_orders[0].get('price', 0))
             sell_price = float(self.active_sell_orders[0].get('price', 0))
             spread = sell_price - buy_price
             spread_pct = (spread / buy_price * 100) if buy_price > 0 else 0
-            logger.info(f"活跃订单: 买 {buy_price:.3f} | 卖 {sell_price:.3f} | 价差 {spread:.3f} ({spread_pct:.3f}%)")
+            logger.info(f"活躍訂單: 買 {buy_price:.3f} | 賣 {sell_price:.3f} | 價差 {spread:.3f} ({spread_pct:.3f}%)")
         else:
             active_buy_count = len(self.active_buy_orders)
             active_sell_count = len(self.active_sell_orders)
-            logger.info(f"活跃订单: 买单 {active_buy_count} | 卖单 {active_sell_count}")
+            logger.info(f"活躍訂單: 買單 {active_buy_count} | 賣單 {active_sell_count}")
             
         logger.info("=" * 40)
     
@@ -1623,7 +1627,7 @@ class MarketMaker:
     
     def _ensure_data_streams(self):
         """確保所有必要的數據流訂閲都是活躍的"""
-        # 如果使用 Websea，不需要 WebSocket 数据流
+        # 如果使用 Websea，不需要 WebSocket 數據流
         if self.ws is None:
             return
             
@@ -1685,7 +1689,7 @@ class MarketMaker:
                 if not self.ws.orderbook["bids"] and not self.ws.orderbook["asks"]:
                     self.ws.initialize_orderbook()
                 
-                # 檢查並確保所有數據流訂閱
+                # 檢查並確保所有數據流訂閲
                 if "depth" not in self.ws.subscriptions:
                     self.ws.subscribe_depth()
                 if "bookTicker" not in self.ws.subscriptions:
@@ -1702,9 +1706,9 @@ class MarketMaker:
                 # 檢查連接並在必要時重連
                 connection_status = self.check_ws_connection()
                 
-                # 如果連接成功，檢查並確保所有流訂閱
+                # 如果連接成功，檢查並確保所有流訂閲
                 if connection_status:
-                    # 重新訂閱必要的數據流
+                    # 重新訂閲必要的數據流
                     self._ensure_data_streams()
                 
                 # 檢查訂單成交情況

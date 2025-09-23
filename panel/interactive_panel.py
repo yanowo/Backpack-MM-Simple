@@ -46,7 +46,7 @@ class InteractivePanel:
         # 初始化默認設定
         self.settings = load_settings()
         
-        # 客户端缓存，避免重复创建实例拖慢速度
+        # 客户端緩存，避免重複創建實例拖慢速度
         self._client_cache = {}
         
         # 策略參數
@@ -128,17 +128,17 @@ class InteractivePanel:
         self.register_commands()
         
     def _get_client(self, api_key=None, secret_key=None):
-        """获取缓存的客户端实例，避免重复创建"""
+        """獲取緩存的客户端實例，避免重複創建"""
         from api.bp_client import BPClient
         
-        # 为无认证的公开API调用创建一个通用客户端
+        # 為無認證的公開API調用創建一個通用客户端
         if api_key is None and secret_key is None:
             cache_key = "public"
             if cache_key not in self._client_cache:
                 self._client_cache[cache_key] = BPClient({})
             return self._client_cache[cache_key]
         
-        # 为认证API调用创建特定的客户端
+        # 為認證API調用創建特定的客户端
         cache_key = f"{api_key}_{secret_key}"
         if cache_key not in self._client_cache:
             self._client_cache[cache_key] = BPClient({'api_key': api_key, 'secret_key': secret_key})
@@ -171,7 +171,7 @@ class InteractivePanel:
         }
     
     def create_layout(self):
-        """創建UI布局"""
+        """創建UI佈局"""
         layout = Layout()
         
         # 分成上中下三部分
@@ -406,9 +406,14 @@ class InteractivePanel:
         self.add_log("help - 顯示幫助", "SYSTEM")
         self.add_log("symbols - 列出可用交易對", "SYSTEM")
         self.add_log("start <symbol> - 啟動指定交易對的做市策略", "SYSTEM")
+        self.add_log("  現貨示例: start SOL_USDC", "SYSTEM")
+        self.add_log("  永續示例: start SOL_USDC_PERP (需先設置 market_type perp)", "SYSTEM")
         self.add_log("stop - 停止當前做市策略", "SYSTEM")
         self.add_log("params - 顯示當前策略參數", "SYSTEM")
         self.add_log("set <參數> <值> - 設置策略參數", "SYSTEM")
+        self.add_log("  基本參數: set base_spread 0.1", "SYSTEM")
+        self.add_log("  市場類型: set market_type perp", "SYSTEM")
+        self.add_log("  永續參數: set target_position 0.5", "SYSTEM")
         self.add_log("status - 顯示當前狀態", "SYSTEM")
         self.add_log("balance - 查詢餘額", "SYSTEM")
         self.add_log("orders - 顯示活躍訂單", "SYSTEM")
@@ -454,7 +459,13 @@ class InteractivePanel:
     def cmd_start_strategy(self, args):
         """啟動做市策略"""
         if not args:
-            self.add_log("請指定交易對，例如: start SOL_USDC", "ERROR")
+            current_market_type = self.strategy_params.get('market_type', 'spot')
+            if current_market_type == 'perp':
+                self.add_log("請指定交易對，例如: start SOL_USDC_PERP", "ERROR")
+                self.add_log("永續合約交易對示例: SOL_USDC_PERP, BTC_USDC_PERP, ETH_USDC_PERP", "SYSTEM")
+            else:
+                self.add_log("請指定交易對，例如: start SOL_USDC", "ERROR")
+                self.add_log("現貨交易對示例: SOL_USDC, BTC_USDC, ETH_USDC", "SYSTEM")
             return
         
         symbol = args[0]
@@ -503,7 +514,7 @@ class InteractivePanel:
                 'inventory_skew': 0.25,
             }
             
-            # 合併用戶設置的參數
+            # 合併用户設置的參數
             for key, value in self.strategy_params.items():
                 if key in params:
                     params[key] = value
@@ -627,14 +638,14 @@ class InteractivePanel:
                                 # 等待訂單簿填充
                                 time.sleep(1)
                     
-                    # 確保所有數據流訂閱
-                    self.add_log("確保數據流訂閱...")
+                    # 確保所有數據流訂閲
+                    self.add_log("確保數據流訂閲...")
                     if hasattr(self.market_maker, '_ensure_data_streams'):
                         self.market_maker._ensure_data_streams()
                     
-                    # 增加小延遲確保訂閱成功
+                    # 增加小延遲確保訂閲成功
                     time.sleep(2)
-                    self.add_log("數據流訂閱完成，進入主循環...")
+                    self.add_log("數據流訂閲完成，進入主循環...")
                 else:
                     self.add_log("WebSocket連接失敗，請檢查網絡或API配置", "ERROR")
                     self.strategy_running = False
@@ -903,16 +914,18 @@ class InteractivePanel:
         if not self.strategy_params:
             self.add_log("尚未設置任何參數，使用默認值", "SYSTEM")
             self.add_log("可用參數:", "SYSTEM")
-            self.add_log("base_spread - 基礎價差百分比", "SYSTEM")
-            self.add_log("order_quantity - 訂單數量 (例如: 0.5 SOL)", "SYSTEM")
-            self.add_log("max_orders - 每側最大訂單數", "SYSTEM")
-            self.add_log("duration - 運行時間(秒)", "SYSTEM")
-            self.add_log("interval - 更新間隔(秒)", "SYSTEM")
-            self.add_log("market_type - 市場類型 spot/perp", "SYSTEM")
-            self.add_log("target_position - 永續目標淨倉位", "SYSTEM")
-            self.add_log("max_position - 永續最大倉位", "SYSTEM")
-            self.add_log("position_threshold - 倉位調整觸發值", "SYSTEM")
-            self.add_log("inventory_skew - 報價偏移係數", "SYSTEM")
+            self.add_log("base_spread - 基礎價差百分比 (例: 0.1 = 0.1%)", "SYSTEM")
+            self.add_log("order_quantity - 訂單數量 (例: 0.5 SOL，auto為自動)", "SYSTEM")
+            self.add_log("max_orders - 每側最大訂單數 (例: 3)", "SYSTEM")
+            self.add_log("duration - 運行時間(秒) (例: 3600 = 1小時)", "SYSTEM")
+            self.add_log("interval - 更新間隔(秒) (例: 60 = 1分鐘)", "SYSTEM")
+            self.add_log("market_type - 市場類型: spot(現貨) 或 perp(永續)", "SYSTEM")
+            self.add_log("", "SYSTEM")
+            self.add_log("永續合約專用參數:", "SYSTEM")
+            self.add_log("target_position - 目標淨倉位 (例: 0.0為中性)", "SYSTEM")
+            self.add_log("max_position - 最大倉位限制 (例: 1.0)", "SYSTEM")
+            self.add_log("position_threshold - 倉位調整觸發值 (例: 0.1)", "SYSTEM")
+            self.add_log("inventory_skew - 報價偏移係數 (例: 0.25)", "SYSTEM")
             return
         
         for param, value in self.strategy_params.items():
@@ -923,16 +936,45 @@ class InteractivePanel:
                 self.add_log(f"{param} = {value}", "SYSTEM")
                 
         # 添加使用說明
+        current_market_type = self.strategy_params.get('market_type', 'spot')
         self.add_log("\n設置參數示例:", "SYSTEM")
-        self.add_log("set base_spread 0.2    - 設置價差為0.2%", "SYSTEM")
-        self.add_log("set order_quantity 0.5 - 設置訂單數量為0.5", "SYSTEM")
-        self.add_log("set max_orders 5       - 設置每側最大訂單數為5", "SYSTEM")
-        self.add_log("set market_type perp   - 切換為永續合約模式", "SYSTEM")
+        self.add_log("set base_spread 0.2         - 設置價差為0.2%", "SYSTEM")
+        self.add_log("set order_quantity 0.5      - 設置訂單數量為0.5", "SYSTEM")
+        self.add_log("set order_quantity auto     - 設為自動訂單數量", "SYSTEM")
+        self.add_log("set max_orders 5            - 設置每側最大訂單數為5", "SYSTEM")
+        self.add_log("set market_type spot        - 設為現貨交易模式", "SYSTEM")
+        self.add_log("set market_type perp        - 設為永續合約模式", "SYSTEM")
+        
+        if current_market_type == 'perp':
+            self.add_log("\n永續合約模式專用參數:", "SYSTEM")
+            self.add_log("set target_position 0.0     - 目標中性倉位", "SYSTEM")
+            self.add_log("set target_position 0.5     - 目標做多0.5", "SYSTEM")
+            self.add_log("set max_position 1.0        - 最大倉位限制", "SYSTEM")
+            self.add_log("set position_threshold 0.1  - 倉位調整觸發", "SYSTEM")
+            self.add_log("set inventory_skew 0.25     - 報價偏移係數", "SYSTEM")
+            self.add_log("\n永續合約交易對示例: SOL_USDC_PERP", "SYSTEM")
+        else:
+            self.add_log("\n現貨交易對示例: SOL_USDC, BTC_USDC, ETH_USDC", "SYSTEM")
+            self.add_log("切換到永續模式: set market_type perp", "SYSTEM")
     
     def cmd_set_param(self, args):
         """設置策略參數"""
         if len(args) < 2:
             self.add_log("用法: set <參數名> <參數值>", "ERROR")
+            current_market_type = self.strategy_params.get('market_type', 'spot')
+            self.add_log("\n常用參數示例:", "SYSTEM")
+            self.add_log("set base_spread 0.2         - 基礎價差0.2%", "SYSTEM")
+            self.add_log("set order_quantity 0.5      - 訂單數量0.5", "SYSTEM")
+            self.add_log("set order_quantity auto     - 自動訂單數量", "SYSTEM")
+            self.add_log("set max_orders 5            - 每側最大5個訂單", "SYSTEM")
+            self.add_log("set market_type spot        - 現貨模式", "SYSTEM")
+            self.add_log("set market_type perp        - 永續合約模式", "SYSTEM")
+            if current_market_type == 'perp':
+                self.add_log("\n永續合約參數:", "SYSTEM")
+                self.add_log("set target_position 0.0     - 中性倉位", "SYSTEM")
+                self.add_log("set max_position 1.0        - 最大倉位", "SYSTEM")
+                self.add_log("set position_threshold 0.1  - 調整觸發", "SYSTEM")
+                self.add_log("set inventory_skew 0.25     - 報價偏移", "SYSTEM")
             return
         
         param = args[0]
@@ -982,6 +1024,28 @@ class InteractivePanel:
             try:
                 set_setting(param, typed_value)
                 self.add_log(f"參數已設置並保存: {param} = {typed_value}", "SYSTEM")
+                
+                # 根據設置的參數給出相應提示
+                if param == 'market_type':
+                    if typed_value == 'perp':
+                        self.add_log("已切換到永續合約模式！", "SYSTEM")
+                        self.add_log("永續合約交易對示例: SOL_USDC_PERP, BTC_USDC_PERP", "SYSTEM")
+                        self.add_log("建議設置永續參數: target_position, max_position", "SYSTEM")
+                    else:
+                        self.add_log("已切換到現貨交易模式！", "SYSTEM")
+                        self.add_log("現貨交易對示例: SOL_USDC, BTC_USDC, ETH_USDC", "SYSTEM")
+                elif param == 'base_spread_percentage':
+                    self.add_log(f"價差已設為 {typed_value}%，較小的價差可能提高成交率但減少利潤", "SYSTEM")
+                elif param == 'order_quantity':
+                    if typed_value is None:
+                        self.add_log("訂單數量設為自動，將根據餘額動態計算", "SYSTEM")
+                    else:
+                        self.add_log(f"訂單數量已固定為 {typed_value}，確保有足夠餘額", "SYSTEM")
+                elif param in ['target_position', 'max_position', 'position_threshold', 'inventory_skew']:
+                    if self.strategy_params.get('market_type') != 'perp':
+                        self.add_log("注意：此參數僅在永續合約模式下生效", "WARNING")
+                        self.add_log("切換到永續模式: set market_type perp", "SYSTEM")
+                    
             except Exception as e:
                 self.add_log(f"參數已設置但保存失敗: {str(e)}", "WARNING")
 
@@ -1138,7 +1202,7 @@ class InteractivePanel:
         self.add_log("檢查必要模塊...", "SYSTEM")
         modules_to_check = [
             ('WebSocket庫', 'websocket'),
-            ('API客戶端', 'api.bp_client'),
+            ('API客户端', 'api.bp_client'),
             ('數據庫模塊', 'database.db'),
             ('策略模塊', 'strategies.market_maker')
         ]
@@ -1191,6 +1255,17 @@ class InteractivePanel:
         self.add_log("做市交易面板已啟動", "SYSTEM")
         self.add_log("按 : 或 / 進入命令模式", "SYSTEM")
         self.add_log("輸入 help 查看可用命令", "SYSTEM")
+        self.add_log("", "SYSTEM")
+        
+        # 顯示當前市場類型和相關提示
+        current_market_type = self.strategy_params.get('market_type', 'spot')
+        self.add_log(f"當前市場類型: {current_market_type}", "SYSTEM")
+        if current_market_type == 'spot':
+            self.add_log("現貨交易示例: start SOL_USDC", "SYSTEM")
+            self.add_log("切換永續模式: set market_type perp", "SYSTEM")
+        else:
+            self.add_log("永續交易示例: start SOL_USDC_PERP", "SYSTEM")
+            self.add_log("切換現貨模式: set market_type spot", "SYSTEM")
         
         self.running = True
         

@@ -15,19 +15,19 @@ from logger import setup_logger
 
 logger = setup_logger("cli")
 
-# 缓存客户端实例以提高性能
+# 緩存客户端實例以提高性能
 _client_cache = {}
 
 def _get_client(api_key=None, secret_key=None):
-    """获取缓存的客户端实例，避免重复创建"""
-    # 为无认证的公开API调用创建一个通用客户端
+    """獲取緩存的客户端實例，避免重複創建"""
+    # 為無認證的公開API調用創建一個通用客户端
     if api_key is None and secret_key is None:
         cache_key = "public"
         if cache_key not in _client_cache:
             _client_cache[cache_key] = BPClient({})
         return _client_cache[cache_key]
     
-    # 为认证API调用创建特定的客户端
+    # 為認證API調用創建特定的客户端
     cache_key = f"{api_key}_{secret_key}"
     if cache_key not in _client_cache:
         _client_cache[cache_key] = BPClient({'api_key': api_key, 'secret_key': secret_key})
@@ -317,6 +317,10 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
 
     try:
         db = Database()
+        exchange_config = {
+            'api_key': api_key,
+            'secret_key': secret_key
+        }
 
         if market_type == "perp":
             market_maker = PerpetualMarketMaker(
@@ -332,6 +336,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                 position_threshold=position_threshold,
                 inventory_skew=inventory_skew,
                 ws_proxy=ws_proxy,
+                exchange_config=exchange_config
             )
         else:
             market_maker = MarketMaker(
@@ -346,6 +351,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                 base_asset_target_percentage=base_asset_target_percentage,
                 rebalance_threshold=rebalance_threshold,
                 ws_proxy=ws_proxy,
+                exchange_config=exchange_config
             )
 
         market_maker.run(duration_seconds=duration, interval_seconds=interval)
@@ -358,14 +364,14 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
 def rebalance_settings_command():
     """重平設置管理命令"""
     print("\n=== 重平設置管理 ===")
-    print("1 - 查看重平設置說明")
+    print("1 - 查看重平設置説明")
     print("2 - 測試重平設置")
     print("3 - 返回主菜單")
     
     choice = input("請選擇操作: ")
     
     if choice == '1':
-        print("\n=== 重平設置說明 ===")
+        print("\n=== 重平設置説明 ===")
         print("重平功能用於保持資產配置的平衡，避免因市場波動導致的資產比例失衡。")
         print("\n主要參數:")
         print("1. 重平功能開關: 控制是否啟用自動重平衡")
