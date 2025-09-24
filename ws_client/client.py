@@ -1,5 +1,5 @@
 """
-WebSocket客戶端模塊
+WebSocket客户端模塊
 """
 import json
 import time
@@ -8,7 +8,7 @@ import websocket as ws
 from typing import Dict, List, Tuple, Any, Optional, Callable
 from config import WS_URL, DEFAULT_WINDOW
 from api.auth import create_signature
-from api.client import get_order_book
+from api.bp_client import BPClient
 from utils.helpers import calculate_volatility
 from logger import setup_logger
 
@@ -17,7 +17,7 @@ logger = setup_logger("backpack_ws")
 class BackpackWebSocket:
     def __init__(self, api_key, secret_key, symbol, on_message_callback=None, auto_reconnect=True, proxy=None):
         """
-        初始化WebSocket客戶端
+        初始化WebSocket客户端
         
         Args:
             api_key: API密鑰
@@ -25,7 +25,7 @@ class BackpackWebSocket:
             symbol: 交易對符號
             on_message_callback: 消息回調函數
             auto_reconnect: 是否自動重連
-            proxy:  wss代理 支持格式为 http://user:pass@host:port/ 或者 http://host:port
+            proxy:  wss代理 支持格式為 http://user:pass@host:port/ 或者 http://host:port
 
         """
         self.api_key = api_key
@@ -62,17 +62,27 @@ class BackpackWebSocket:
         self.heartbeat_interval = 30
         self.heartbeat_thread = None
 
-        # 添加代理参数
+        # 添加代理參數
         self.proxy = proxy
+        
+        # 客户端緩存，避免重複創建實例
+        self._client_cache = {}
         
         # 添加重連中標誌，避免多次重連
         self.reconnecting = False
+
+    def _get_client(self):
+        """獲取緩存的客户端實例，避免重複創建"""
+        cache_key = "public"
+        if cache_key not in self._client_cache:
+            self._client_cache[cache_key] = BPClient({})
+        return self._client_cache[cache_key]
 
     def initialize_orderbook(self):
         """通過REST API獲取訂單簿初始快照"""
         try:
             # 使用REST API獲取完整訂單簿
-            order_book = get_order_book(self.symbol, 100)  # 增加深度
+            order_book = self._get_client().get_order_book(self.symbol, 100)  # 增加深度
             if isinstance(order_book, dict) and "error" in order_book:
                 logger.error(f"初始化訂單簿失敗: {order_book['error']}")
                 return False

@@ -10,7 +10,7 @@ import math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
-from api.client import execute_order, get_positions
+# 全局函數導入已移除，現在使用客户端方法
 from logger import setup_logger
 from strategies.market_maker import MarketMaker, format_balance
 from utils.helpers import round_to_precision, round_to_tick_size
@@ -32,6 +32,8 @@ class PerpetualMarketMaker(MarketMaker):
         inventory_skew: float = 0.0,
         leverage: float = 1.0,
         ws_proxy: Optional[str] = None,
+        exchange: str = 'backpack',
+        exchange_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> None:
         """
@@ -54,6 +56,8 @@ class PerpetualMarketMaker(MarketMaker):
             secret_key=secret_key,
             symbol=symbol,
             ws_proxy=ws_proxy,
+            exchange=exchange,
+            exchange_config=exchange_config,
             **kwargs,
         )
 
@@ -117,8 +121,8 @@ class PerpetualMarketMaker(MarketMaker):
         """取得目前的永續合約淨倉位。"""
         try:
             # 直接查詢特定交易對的倉位
-            result = get_positions(self.api_key, self.secret_key, self.symbol)
-            
+            result = self.client.get_positions(self.symbol)
+
             if isinstance(result, dict) and "error" in result:
                 error_msg = result["error"]
                 # 404 錯誤表示沒有倉位，這是正常情況
@@ -126,6 +130,7 @@ class PerpetualMarketMaker(MarketMaker):
                     logger.debug("未找到 %s 的倉位記錄(404)，倉位為0", self.symbol)
                     return 0.0
                 else:
+                    logger.info(f"result: {result}")
                     logger.error("查詢倉位失敗: %s", error_msg)
                     return 0.0
                 
@@ -133,7 +138,7 @@ class PerpetualMarketMaker(MarketMaker):
                 logger.warning("倉位API返回格式異常: %s", type(result))
                 return 0.0
                 
-            # 如果返回空列表，說明沒有該交易對的倉位
+            # 如果返回空列表，説明沒有該交易對的倉位
             if not result:
                 logger.debug("未找到 %s 的倉位記錄，倉位為0", self.symbol)
                 return 0.0
@@ -154,7 +159,7 @@ class PerpetualMarketMaker(MarketMaker):
     def _get_actual_position_info(self) -> Dict[str, Any]:
         """獲取完整的倉位信息。"""
         try:
-            result = get_positions(self.api_key, self.secret_key, self.symbol)
+            result = self.client.get_positions(self.symbol)
             
             if isinstance(result, dict) and "error" in result:
                 error_msg = result["error"]
@@ -334,9 +339,9 @@ class PerpetualMarketMaker(MarketMaker):
             normalized_order_type,
         )
 
-        result = execute_order(self.api_key, self.secret_key, order_details)
+        result = self.client.execute_order(order_details)
         if isinstance(result, dict) and "error" in result:
-            logger.error("永續合約訂單失敗: %s", result["error"])
+            logger.error(f"永續合約訂單失敗: {result['error']}, 訂單信息：{order_details}")
         else:
             self.orders_placed += 1
             logger.info("永續合約訂單提交成功: %s", result.get("id", "unknown"))
@@ -430,7 +435,17 @@ class PerpetualMarketMaker(MarketMaker):
         )
 
         if isinstance(result, dict) and "error" in result:
-            logger.error("平倉失敗: %s", result["error"])
+            logger.error(
+                "平倉失敗: %s | side=%s qty=%s price=%s type=%s reduceOnly=%s clientId=%s result=%s",
+                result.get("error"),
+                order_side,
+                format_balance(qty),
+                price if price is not None else "Market",
+                order_type,
+                True,
+                client_id or "",
+                result,
+            )
             return False
 
         logger.info("平倉完成，數量 %s", format_balance(qty))
@@ -453,10 +468,15 @@ class PerpetualMarketMaker(MarketMaker):
             )
             return True
 
-        deviation = current_size - self.target_position
-        if deviation > self.position_threshold:
+        # 檢查是否超過目標 + 閾值（而非僅僅偏離目標）
+        threshold_line = self.target_position + self.position_threshold
+        if current_size > threshold_line:
             logger.info(
-                "持倉量偏離目標 %.8f，觸發減倉調整", deviation
+                "持倉量 %s 超過閾值線 %s (目標 %s + 閾值 %s)，觸發減倉調整",
+                format_balance(current_size),
+                format_balance(threshold_line),
+                format_balance(self.target_position),
+                format_balance(self.position_threshold)
             )
             return True
 
@@ -486,13 +506,17 @@ class PerpetualMarketMaker(MarketMaker):
             return self.close_position(quantity=excess, order_type="Market")
 
         # 2. 減倉：檢查持倉量是否超過目標 + 閾值
-        deviation = current_size - desired_size
-        if deviation > self.position_threshold:
-            qty_to_close = min(deviation, current_size)
+        # 只有當實際持倉超過 (目標持倉 + 閾值) 時才減倉
+        threshold_line = desired_size + self.position_threshold
+        if current_size > threshold_line:
+            # 只平掉超出閾值線的部分，而不是全部
+            qty_to_close = current_size - threshold_line
             logger.info(
-                "持倉量 %s 超過目標 %s，執行減倉 %s",
+                "持倉量 %s 超過閾值線 %s (目標 %s + 閾值 %s)，執行減倉 %s",
                 format_balance(current_size),
+                format_balance(threshold_line),
                 format_balance(desired_size),
+                format_balance(self.position_threshold),
                 format_balance(qty_to_close)
             )
             # close_position 會根據淨倉位自動判斷平倉方向
@@ -518,9 +542,33 @@ class PerpetualMarketMaker(MarketMaker):
             return buy_prices, sell_prices
 
         net = self.get_net_position()
+        current_price = self.get_current_price()
+        
+        # 獲取盤口信息
+        orderbook = self.client.get_order_book(self.symbol)
+        best_bid = best_ask = None
+        if orderbook and 'bids' in orderbook and 'asks' in orderbook:
+            if orderbook['bids']:
+                best_bid = float(orderbook['bids'][0][0])
+            if orderbook['asks']:
+                best_ask = float(orderbook['asks'][0][0])
+        
+        # 輸出盤口和持倉信息
+        logger.info("=== 市場狀態 ===")
+        if best_bid and best_ask:
+            spread = best_ask - best_bid
+            spread_pct = (spread / current_price * 100) if current_price else 0
+            logger.info(f"盤口: Bid {best_bid:.3f} | Ask {best_ask:.3f} | 價差 {spread:.3f} ({spread_pct:.3f}%)")
+        if current_price:
+            logger.info(f"中間價: {current_price:.3f}")
+        
+        # 輸出持倉信息
+        direction = "空頭" if net < 0 else "多頭" if net > 0 else "無倉位"
+        logger.info(f"持倉: {direction} {abs(net):.3f} SOL | 目標: {self.target_position:.1f} | 上限: {self.max_position:.1f}")
 
         # 如果沒有庫存偏移係數或沒有倉位，則不進行調整
         if self.inventory_skew <= 0 or abs(net) < self.min_order_size:
+            logger.info(f"原始掛單: 買 {buy_prices[0]:.3f} | 賣 {sell_prices[0]:.3f} (無偏移)")
             return buy_prices, sell_prices
 
         if self.max_position <= 0:
@@ -531,7 +579,6 @@ class PerpetualMarketMaker(MarketMaker):
         deviation = net
         skew_ratio = max(-1.0, min(1.0, deviation / self.max_position))
 
-        current_price = self.get_current_price()
         if not current_price:
             return buy_prices, sell_prices
 
@@ -550,15 +597,11 @@ class PerpetualMarketMaker(MarketMaker):
             for price in sell_prices
         ]
 
-        logger.debug(
-            "淨倉位 %.6f，報價偏移 %.6f。買價: %s -> %s, 賣價: %s -> %s",
-            net,
-            skew_offset,
-            format_balance(buy_prices[0]),
-            format_balance(adjusted_buys[0]),
-            format_balance(sell_prices[0]),
-            format_balance(adjusted_sells[0]),
-        )
+        # 輸出價格調整詳情
+        logger.info("=== 價格計算 ===")
+        logger.info(f"原始掛單: 買 {buy_prices[0]:.3f} | 賣 {sell_prices[0]:.3f}")
+        logger.info(f"偏移計算: 淨持倉 {net:.3f} | 偏移係數 {self.inventory_skew:.2f} | 偏移量 {skew_offset:.4f}")
+        logger.info(f"調整後掛單: 買 {adjusted_buys[0]:.3f} | 賣 {adjusted_sells[0]:.3f}")
 
         # 風控：確保調整後買賣價沒有交叉
         if adjusted_buys[0] >= adjusted_sells[0]:

@@ -1,29 +1,12 @@
 #!/usr/bin/env python
 """
 Backpack Exchange 做市交易程序統一入口
-支持命令行模式和面板模式
+支持命令行模式和麪板模式
 """
 import argparse
 import sys
 import os
-
-# 嘗試導入需要的模塊
-try:
-    from logger import setup_logger
-    from config import API_KEY, SECRET_KEY, WS_PROXY
-except ImportError:
-    API_KEY = os.getenv('API_KEY')
-    SECRET_KEY = os.getenv('SECRET_KEY')
-    WS_PROXY = os.getenv('PROXY_WEBSOCKET')
-    
-    def setup_logger(name):
-        import logging
-        logger = logging.getLogger(name)
-        logger.setLevel(logging.INFO)
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        logger.addHandler(handler)
-        return logger
+from logger import setup_logger
 
 # 創建記錄器
 logger = setup_logger("main")
@@ -37,6 +20,7 @@ def parse_arguments():
     parser.add_argument('--cli', action='store_true', help='啟動命令行界面')
     
     # 基本參數
+    parser.add_argument('--exchange', type=str, choices=['backpack', 'xx'], default='backpack', help='交易所選擇 (backpack 或 xx)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--ws-proxy', type=str, help='WebSocket Proxy (可選，默認使用環境變數或配置文件)')
@@ -87,12 +71,27 @@ def main():
     # 驗證重平參數
     validate_rebalance_args(args)
     
-    # 優先使用命令行參數中的API密鑰
-    api_key = args.api_key or API_KEY
-    secret_key = args.secret_key or SECRET_KEY
+    exchange = args.exchange
+    if exchange == 'backpack':
+        api_key = os.getenv('API_KEY')
+        secret_key = os.getenv('SECRET_KEY')
+        ws_proxy = os.getenv('PROXY_WEBSOCKET')
+        base_url = os.getenv('BASE_URL', 'https://api.backpack.work')
+        exchange_config = {
+            'api_key': api_key,
+            'secret_key': secret_key,
+            'base_url': base_url,
+            'api_version': 'v1',
+            'default_window': '5000'
+        }
+    elif exchange == 'xx':
+        """
+        這裡是 xx 交易所的配置
+        """
+    else:
+        logger.error("不支持的交易所，請選擇 'backpack' 或 'xx'")
+        sys.exit(1)
 
-    # 读取wss代理
-    ws_proxy = args.ws_proxy or WS_PROXY
     
     # 檢查API密鑰
     if not api_key or not secret_key:
@@ -128,6 +127,7 @@ def main():
 
             if market_type == 'perp':
                 logger.info("啟動永續合約做市模式")
+                logger.info(f"啟動永續合約做市模式 (交易所: {exchange})")
                 logger.info(f"  目標持倉量: {abs(args.target_position)}")
                 logger.info(f"  最大持倉量: {args.max_position}")
                 logger.info(f"  倉位觸發值: {args.position_threshold}")
@@ -144,9 +144,12 @@ def main():
                     max_position=args.max_position,
                     position_threshold=args.position_threshold,
                     inventory_skew=args.inventory_skew,
-                    ws_proxy=ws_proxy
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config
                 )
             else:
+                logger.info("啟動現貨做市模式")
                 enable_rebalance = True  # 默認開啟
                 base_asset_target_percentage = 30.0  # 默認30%
                 rebalance_threshold = 15.0  # 默認15%
@@ -179,7 +182,9 @@ def main():
                     enable_rebalance=enable_rebalance,
                     base_asset_target_percentage=base_asset_target_percentage,
                     rebalance_threshold=rebalance_threshold,
-                    ws_proxy=ws_proxy
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config
                 )
             
             # 執行做市策略

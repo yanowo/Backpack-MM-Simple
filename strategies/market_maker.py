@@ -7,19 +7,16 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Union, Any
 from concurrent.futures import ThreadPoolExecutor
 
-from api.client import (
-    get_balance, execute_order, get_open_orders, cancel_all_orders, 
-    cancel_order, get_market_limits, get_klines, get_ticker, get_order_book,
-    get_collateral
-)
+from api.bp_client import BPClient
 from ws_client.client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
 from logger import setup_logger
+import traceback
 
 logger = setup_logger("market_maker")
 
-def format_balance(value, decimals=8, threshold=1e-8):
+def format_balance(value, decimals=8, threshold=1e-8) -> str:
     """
     格式化餘額顯示，避免科學記號
     
@@ -45,13 +42,26 @@ class MarketMaker:
         rebalance_threshold=15.0,
         enable_rebalance=True,
         base_asset_target_percentage=30.0,
-        ws_proxy=None
+        ws_proxy=None,
+        exchange='backpack',
+        exchange_config=None
     ):
         self.api_key = api_key
         self.secret_key = secret_key
         self.symbol = symbol
         self.base_spread_percentage = base_spread_percentage
         self.order_quantity = order_quantity
+        self.exchange = exchange
+        self.exchange_config = exchange_config or {}
+        
+        # 初始化交易所客户端
+        if exchange == 'backpack':
+            self.client = BPClient(self.exchange_config)
+        elif exchange == 'xx':
+            ...
+        else:
+            raise ValueError(f"不支持的交易所: {exchange}")
+            
         self.max_orders = max_orders
         self.rebalance_threshold = rebalance_threshold
         
@@ -74,7 +84,7 @@ class MarketMaker:
         self.session_taker_sell_volume = 0.0
         
         # 初始化市場限制
-        self.market_limits = get_market_limits(symbol)
+        self.market_limits = self.client.get_market_limits(symbol)
         if not self.market_limits:
             raise ValueError(f"無法獲取 {symbol} 的市場限制")
         
@@ -92,12 +102,7 @@ class MarketMaker:
         self.taker_sell_volume = 0
         self.total_fees = 0
 
-        # 添加代理参数
-        self.ws_proxy = ws_proxy
-        # 建立WebSocket連接
-        self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True, proxy=self.ws_proxy)
-        self.ws.connect()
-        
+        # 關鍵：在任何可能出錯的代碼之前初始化這些屬性
         # 跟蹤活躍訂單
         self.active_buy_orders = []
         self.active_sell_orders = []
@@ -115,7 +120,18 @@ class MarketMaker:
         self.trades_executed = 0
         self.orders_placed = 0
         self.orders_cancelled = 0
-        
+
+        # 添加代理參數
+        self.ws_proxy = ws_proxy
+        # 建立WebSocket連接（僅對Backpack）
+        if exchange == 'backpack':
+            self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True, proxy=self.ws_proxy)
+            self.ws.connect()
+        elif exchange == 'xx':
+            ...
+            self.ws = None
+        else:
+            self.ws = None  # 不使用WebSocket
         # 執行緒池用於後台任務
         self.executor = ThreadPoolExecutor(max_workers=3)
         
@@ -182,13 +198,13 @@ class MarketMaker:
         """獲取總餘額，包含普通餘額和抵押品餘額"""
         try:
             # 獲取普通餘額
-            balances = get_balance(self.api_key, self.secret_key)
+            balances = self.client.get_balance()
             if isinstance(balances, dict) and "error" in balances:
                 logger.error(f"獲取普通餘額失敗: {balances['error']}")
                 return None
             
             # 獲取抵押品餘額
-            collateral = get_collateral(self.api_key, self.secret_key)
+            collateral = self.client.get_collateral()
             if isinstance(collateral, dict) and "error" in collateral:
                 logger.warning(f"獲取抵押品餘額失敗: {collateral['error']}")
                 collateral_assets = []
@@ -277,6 +293,10 @@ class MarketMaker:
     
     def _initialize_websocket(self):
         """等待WebSocket連接建立並進行初始化訂閲"""
+        if self.ws is None:
+            logger.info("使用 REST API 模式（無 WebSocket）")
+            return
+            
         wait_time = 0
         max_wait_time = 10
         while not self.ws.connected and wait_time < max_wait_time:
@@ -378,6 +398,9 @@ class MarketMaker:
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
+            # 如果使用 xx 沒有 WebSocket，直接返回 True
+            if self.exchange == 'xx':
+                return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
             
@@ -403,16 +426,18 @@ class MarketMaker:
                     time.sleep(0.5)
                 except Exception as e:
                     logger.debug(f"關閉現有WebSocket時的預期錯誤: {e}")
-            
-            # 創建新的連接
-            self.ws = BackpackWebSocket(
-                self.api_key, 
-                self.secret_key, 
-                self.symbol, 
-                self.on_ws_message, 
-                auto_reconnect=True,
-                proxy=self.ws_proxy
-            )
+            if self.exchange == 'backpack':
+                # 創建新的連接
+                self.ws = BackpackWebSocket(
+                    self.api_key, 
+                    self.secret_key, 
+                    self.symbol, 
+                    self.on_ws_message, 
+                    auto_reconnect=True,
+                    proxy=self.ws_proxy
+                )
+            elif self.exchange == 'xx':
+                ...
             self.ws.connect()
             
             # 等待連接建立，但不要等太久
@@ -562,8 +587,94 @@ class MarketMaker:
                     
                 except Exception as e:
                     logger.error(f"處理訂單成交消息時出錯: {e}")
-                    import traceback
                     traceback.print_exc()
+    
+    def on_order_update(self, order_data):
+        """處理所有交易所的訂單更新消息 - 統一接口"""
+        try:
+            order_id = order_data.get('order_id')
+            side = order_data.get('side', '').lower()
+            status = order_data.get('status')
+            filled_size = float(order_data.get('filled_size', '0'))
+            price = float(order_data.get('price', '0'))
+            
+            # 簡化日誌輸出 - 只記錄重要的狀態變化
+            if status in ('FILLED', 'PARTIALLY_FILLED', 'filled', 'partial_filled'):
+                if filled_size > 0:
+                    direction = "買入" if side == 'buy' else "賣出"
+                    logger.info(f"*** 成交通知: {direction} {filled_size:.3f} SOL @ {price:.3f} USDT ({status}) ***")
+                
+            # 通用處理邏輯 - 處理成交的訂單
+            if status in ('FILLED', 'PARTIALLY_FILLED', 'filled', 'partial_filled') and filled_size > 0:
+                # 模擬訂單成交數據格式
+                is_maker = True  # 限價單通常是 maker
+                
+                # 準備訂單數據用於數據庫記錄
+                order_data_db = {
+                    'order_id': order_id,
+                    'symbol': self.symbol,
+                    'side': 'Bid' if side == 'buy' else 'Ask',  # 轉換為數據庫格式
+                    'quantity': filled_size,
+                    'price': price,
+                    'maker': is_maker,
+                    'fee': 0.0,  # 手續費可能需要單獨查詢
+                    'fee_asset': self.quote_asset,
+                    'trade_type': 'market_making'
+                }
+                
+                # 更新統計
+                if side == 'buy':
+                    self.total_bought += filled_size
+                    if is_maker:
+                        self.maker_buy_volume += filled_size
+                        self.session_maker_buy_volume += filled_size
+                    else:
+                        self.taker_buy_volume += filled_size
+                        self.session_taker_buy_volume += filled_size
+                    self.buy_trades.append((price, filled_size))
+                    self.session_buy_trades.append((price, filled_size))
+                elif side == 'sell':
+                    self.total_sold += filled_size
+                    if is_maker:
+                        self.maker_sell_volume += filled_size
+                        self.session_maker_sell_volume += filled_size
+                    else:
+                        self.taker_sell_volume += filled_size
+                        self.session_taker_sell_volume += filled_size
+                    self.sell_trades.append((price, filled_size))
+                    self.session_sell_trades.append((price, filled_size))
+                
+                # 異步插入數據庫
+                def safe_insert_order():
+                    try:
+                        self.db.insert_order(order_data_db)
+                    except Exception as db_err:
+                        logger.error(f"插入訂單數據時出錯: {db_err}")
+                
+                self.executor.submit(safe_insert_order)
+                
+                # 更新利潤計算
+                def update_profit():
+                    try:
+                        profit = self._calculate_db_profit()
+                        self.total_profit = profit
+                    except Exception as e:
+                        logger.error(f"更新利潤計算時出錯: {e}")
+                
+                self.executor.submit(update_profit)
+                
+                # 執行統計報告
+                session_profit = self._calculate_session_profit()
+                
+                logger.info(f"累計利潤: {self.total_profit:.8f} {self.quote_asset}")
+                logger.info(f"本次執行利潤: {session_profit:.8f} {self.quote_asset}")
+                logger.info(f"總買入: {self.total_bought} {self.base_asset}, 總賣出: {self.total_sold} {self.base_asset}")
+                
+                self.trades_executed += 1
+                
+        except Exception as e:
+            logger.error(f"處理訂單更新時出錯: {e}")
+            traceback.print_exc()
     
     def _calculate_db_profit(self):
         """基於數據庫記錄計算已實現利潤（FIFO方法）"""
@@ -763,7 +874,7 @@ class MarketMaker:
             price = self.ws.get_current_price()
         
         if price is None:
-            ticker = get_ticker(self.symbol)
+            ticker = self.client.get_ticker(self.symbol)
             if isinstance(ticker, dict) and "error" in ticker:
                 logger.error(f"獲取價格失敗: {ticker['error']}")
                 return None
@@ -782,7 +893,7 @@ class MarketMaker:
             bid_price, ask_price = self.ws.get_bid_ask()
         
         if bid_price is None or ask_price is None:
-            order_book = get_order_book(self.symbol)
+            order_book = self.client.get_order_book(self.symbol)
             if isinstance(order_book, dict) and "error" in order_book:
                 logger.error(f"獲取訂單簿失敗: {order_book['error']}")
                 return None, None
@@ -894,7 +1005,7 @@ class MarketMaker:
             logger.info(f"總資產價值 {total_assets:.2f} {self.quote_asset} 過小，跳過重平衡檢查")
             return False
         
-        # 使用用戶設定的目標比例
+        # 使用用户設定的目標比例
         ideal_base_value = total_assets * (self.base_asset_target_percentage / 100)
         actual_base_value = base_total * current_price
         
@@ -1036,7 +1147,7 @@ class MarketMaker:
             return
         
         # 執行訂單
-        result = execute_order(self.api_key, self.secret_key, order_details)
+        result = self.client.execute_order(order_details)
         
         if isinstance(result, dict) and "error" in result:
             logger.error(f"重新平衡訂單執行失敗: {result['error']}")
@@ -1102,7 +1213,7 @@ class MarketMaker:
             logger.info(f"當前總餘額: {format_balance(base_total)} {self.base_asset}, {format_balance(quote_total)} {self.quote_asset}")
             logger.info(f"當前可用餘額: {format_balance(base_available)} {self.base_asset}, {format_balance(quote_available)} {self.quote_asset}")
             
-            # 如果可用餘額很少但總餘額充足，說明資金在抵押品中
+            # 如果可用餘額很少但總餘額充足，説明資金在抵押品中
             if base_available < base_total * 0.1:
                 logger.info(f"基礎資產主要在抵押品中，將依靠自動贖回功能")
             if quote_available < quote_total * 0.1:
@@ -1129,8 +1240,7 @@ class MarketMaker:
         # 下買單 (併發處理)
         buy_futures = []
 
-        def place_buy(price):
-            qty = self._adjust_quantity_by_market(buy_quantity, 'buy')
+        def place_buy(price, qty):
             order = {
                 "orderType": "Limit",
                 "price": str(price),
@@ -1142,11 +1252,11 @@ class MarketMaker:
                 "autoLendRedeem": True,
                 "autoLend": True
             }
-            res = execute_order(self.api_key, self.secret_key, order)
+            res = self.client.execute_order(order)
             if isinstance(res, dict) and "error" in res and "POST_ONLY_TAKER" in str(res["error"]):
                 logger.info("調整買單價格並重試...")
                 order["price"] = str(round_to_tick_size(float(order["price"]) - self.tick_size, self.tick_size))
-                res = execute_order(self.api_key, self.secret_key, order)
+                res = self.client.execute_order(order)
             
             # 特殊處理資金不足錯誤
             if isinstance(res, dict) and "error" in res and "INSUFFICIENT_FUNDS" in str(res["error"]):
@@ -1158,7 +1268,7 @@ class MarketMaker:
             for p in buy_prices:
                 if len(buy_futures) >= self.max_orders:
                     break
-                buy_futures.append(executor.submit(place_buy, p))
+                buy_futures.append(executor.submit(place_buy, p, buy_quantity))
 
         buy_order_count = 0
         for future in buy_futures:
@@ -1174,8 +1284,7 @@ class MarketMaker:
         # 下賣單
         sell_futures = []
 
-        def place_sell(price):
-            qty = self._adjust_quantity_by_market(sell_quantity, 'sell')
+        def place_sell(price, qty):
             order = {
                 "orderType": "Limit",
                 "price": str(price),
@@ -1187,11 +1296,11 @@ class MarketMaker:
                 "autoLendRedeem": True,
                 "autoLend": True
             }
-            res = execute_order(self.api_key, self.secret_key, order)
+            res = self.client.execute_order(order)
             if isinstance(res, dict) and "error" in res and "POST_ONLY_TAKER" in str(res["error"]):
                 logger.info("調整賣單價格並重試...")
                 order["price"] = str(round_to_tick_size(float(order["price"]) + self.tick_size, self.tick_size))
-                res = execute_order(self.api_key, self.secret_key, order)
+                res = self.client.execute_order(order)
             
             # 特殊處理資金不足錯誤
             if isinstance(res, dict) and "error" in res and "INSUFFICIENT_FUNDS" in str(res["error"]):
@@ -1203,7 +1312,7 @@ class MarketMaker:
             for p in sell_prices:
                 if len(sell_futures) >= self.max_orders:
                     break
-                sell_futures.append(executor.submit(place_sell, p))
+                sell_futures.append(executor.submit(place_sell, p, sell_quantity))
 
         sell_order_count = 0
         for future in sell_futures:
@@ -1218,14 +1327,9 @@ class MarketMaker:
             
         logger.info(f"共下單: {buy_order_count} 個買單, {sell_order_count} 個賣單")
     
-    def _adjust_quantity_by_market(self, base_quantity, side):
-        """根據市場情況動態調整訂單數量"""
-        # 直接返回基本數量，不進行任何調整
-        return max(self.min_order_size, round_to_precision(base_quantity, self.base_precision))
-    
     def cancel_existing_orders(self):
         """取消所有現有訂單"""
-        open_orders = get_open_orders(self.api_key, self.secret_key, self.symbol)
+        open_orders = self.client.get_open_orders(self.symbol)
         
         if isinstance(open_orders, dict) and "error" in open_orders:
             logger.error(f"獲取訂單失敗: {open_orders['error']}")
@@ -1241,7 +1345,7 @@ class MarketMaker:
         
         try:
             # 嘗試批量取消
-            result = cancel_all_orders(self.api_key, self.secret_key, self.symbol)
+            result = self.client.cancel_all_orders(self.symbol)
             
             if isinstance(result, dict) and "error" in result:
                 logger.error(f"批量取消訂單失敗: {result['error']}")
@@ -1257,11 +1361,11 @@ class MarketMaker:
                         if not order_id:
                             continue
                         
+                        # Use legacy wrapper to keep existing logic; could be refactored to self.client.cancel_order
+                        # Directly use instance client method now
                         future = executor.submit(
-                            cancel_order, 
-                            self.api_key, 
-                            self.secret_key, 
-                            order_id, 
+                            self.client.cancel_order,
+                            order_id,
                             self.symbol
                         )
                         cancel_futures.append((order_id, future))
@@ -1287,7 +1391,7 @@ class MarketMaker:
         time.sleep(1)
         
         # 檢查是否還有未取消的訂單
-        remaining_orders = get_open_orders(self.api_key, self.secret_key, self.symbol)
+        remaining_orders = self.client.get_open_orders(self.symbol)
         if remaining_orders and len(remaining_orders) > 0:
             logger.warning(f"警告: 仍有 {len(remaining_orders)} 個未取消的訂單")
         else:
@@ -1299,7 +1403,7 @@ class MarketMaker:
     
     def check_order_fills(self):
         """檢查訂單成交情況"""
-        open_orders = get_open_orders(self.api_key, self.secret_key, self.symbol)
+        open_orders = self.client.get_open_orders(self.symbol)
         
         if isinstance(open_orders, dict) and "error" in open_orders:
             logger.error(f"獲取訂單失敗: {open_orders['error']}")
@@ -1359,79 +1463,37 @@ class MarketMaker:
         logger.info(f"當前活躍訂單: 買單 {len(self.active_buy_orders)} 個, 賣單 {len(self.active_sell_orders)} 個")
     
     def estimate_profit(self):
-        """估算潛在利潤"""
-        # 計算活躍買賣單的平均價格
-        avg_buy_price = 0
-        total_buy_quantity = 0
-        for order in self.active_buy_orders:
-            price = float(order.get('price', 0))
-            quantity = float(order.get('quantity', 0))
-            avg_buy_price += price * quantity
-            total_buy_quantity += quantity
-        
-        if total_buy_quantity > 0:
-            avg_buy_price /= total_buy_quantity
-        
-        avg_sell_price = 0
-        total_sell_quantity = 0
-        for order in self.active_sell_orders:
-            price = float(order.get('price', 0))
-            quantity = float(order.get('quantity', 0))
-            avg_sell_price += price * quantity
-            total_sell_quantity += quantity
-        
-        if total_sell_quantity > 0:
-            avg_sell_price /= total_sell_quantity
-        
+        """簡化的利潤統計"""
         # 計算總的PnL和本次執行的PnL
         realized_pnl, unrealized_pnl, total_fees, net_pnl, session_realized_pnl, session_fees, session_net_pnl = self.calculate_pnl()
         
-        # 計算活躍訂單的潛在利潤
-        if avg_buy_price > 0 and avg_sell_price > 0:
-            spread = avg_sell_price - avg_buy_price
-            spread_percentage = (spread / avg_buy_price) * 100
-            min_quantity = min(total_buy_quantity, total_sell_quantity)
-            potential_profit = spread * min_quantity
-            
-            logger.info(f"估算利潤: 買入均價 {avg_buy_price:.8f}, 賣出均價 {avg_sell_price:.8f}")
-            logger.info(f"價差: {spread:.8f} ({spread_percentage:.2f}%), 潛在利潤: {potential_profit:.8f} {self.quote_asset}")
-            logger.info(f"已實現利潤(總): {realized_pnl:.8f} {self.quote_asset}")
-            logger.info(f"總手續費(總): {total_fees:.8f} {self.quote_asset}")
-            logger.info(f"凈利潤(總): {net_pnl:.8f} {self.quote_asset}")
-            logger.info(f"未實現利潤: {unrealized_pnl:.8f} {self.quote_asset}")
-            
-            # 打印本次執行的統計信息
-            logger.info(f"\n---本次執行統計---")
-            logger.info(f"本次執行已實現利潤: {session_realized_pnl:.8f} {self.quote_asset}")
-            logger.info(f"本次執行手續費: {session_fees:.8f} {self.quote_asset}")
-            logger.info(f"本次執行凈利潤: {session_net_pnl:.8f} {self.quote_asset}")
-            
-            session_buy_volume = sum(qty for _, qty in self.session_buy_trades)
-            session_sell_volume = sum(qty for _, qty in self.session_sell_trades)
-            
-            logger.info(f"本次執行買入量: {session_buy_volume} {self.base_asset}, 賣出量: {session_sell_volume} {self.base_asset}")
-            logger.info(f"本次執行Maker買入: {self.session_maker_buy_volume} {self.base_asset}, Maker賣出: {self.session_maker_sell_volume} {self.base_asset}")
-            logger.info(f"本次執行Taker買入: {self.session_taker_buy_volume} {self.base_asset}, Taker賣出: {self.session_taker_sell_volume} {self.base_asset}")
-            
+        # 計算本次執行的成交量
+        session_buy_volume = sum(qty for _, qty in self.session_buy_trades)
+        session_sell_volume = sum(qty for _, qty in self.session_sell_trades)
+        
+        # 只輸出關鍵信息
+        logger.info("=== 本次執行總結 ===")
+        if session_buy_volume > 0 or session_sell_volume > 0:
+            logger.info(f"成交: 買入 {session_buy_volume:.3f} SOL | 賣出 {session_sell_volume:.3f} SOL")
+            logger.info(f"本次盈虧: {session_net_pnl:.4f} USDT (手續費: {session_fees:.4f})")
         else:
-            logger.info(f"無法估算潛在利潤: 缺少活躍的買/賣訂單")
-            logger.info(f"已實現利潤(總): {realized_pnl:.8f} {self.quote_asset}")
-            logger.info(f"總手續費(總): {total_fees:.8f} {self.quote_asset}")
-            logger.info(f"凈利潤(總): {net_pnl:.8f} {self.quote_asset}")
-            logger.info(f"未實現利潤: {unrealized_pnl:.8f} {self.quote_asset}")
+            logger.info("成交: 無")
+        
+        logger.info(f"累計盈虧: {net_pnl:.4f} USDT | 未實現: {unrealized_pnl:.4f} USDT")
+        
+        # 活躍訂單狀態
+        if self.active_buy_orders and self.active_sell_orders:
+            buy_price = float(self.active_buy_orders[0].get('price', 0))
+            sell_price = float(self.active_sell_orders[0].get('price', 0))
+            spread = sell_price - buy_price
+            spread_pct = (spread / buy_price * 100) if buy_price > 0 else 0
+            logger.info(f"活躍訂單: 買 {buy_price:.3f} | 賣 {sell_price:.3f} | 價差 {spread:.3f} ({spread_pct:.3f}%)")
+        else:
+            active_buy_count = len(self.active_buy_orders)
+            active_sell_count = len(self.active_sell_orders)
+            logger.info(f"活躍訂單: 買單 {active_buy_count} | 賣單 {active_sell_count}")
             
-            # 打印本次執行的統計信息
-            logger.info(f"\n---本次執行統計---")
-            logger.info(f"本次執行已實現利潤: {session_realized_pnl:.8f} {self.quote_asset}")
-            logger.info(f"本次執行手續費: {session_fees:.8f} {self.quote_asset}")
-            logger.info(f"本次執行凈利潤: {session_net_pnl:.8f} {self.quote_asset}")
-            
-            session_buy_volume = sum(qty for _, qty in self.session_buy_trades)
-            session_sell_volume = sum(qty for _, qty in self.session_sell_trades)
-            
-            logger.info(f"本次執行買入量: {session_buy_volume} {self.base_asset}, 賣出量: {session_sell_volume} {self.base_asset}")
-            logger.info(f"本次執行Maker買入: {self.session_maker_buy_volume} {self.base_asset}, Maker賣出: {self.session_maker_sell_volume} {self.base_asset}")
-            logger.info(f"本次執行Taker買入: {self.session_taker_buy_volume} {self.base_asset}, Taker賣出: {self.session_taker_sell_volume} {self.base_asset}")
+        logger.info("=" * 40)
     
     def print_trading_stats(self):
         """打印交易統計報表"""
@@ -1540,6 +1602,10 @@ class MarketMaker:
     
     def _ensure_data_streams(self):
         """確保所有必要的數據流訂閲都是活躍的"""
+        # 如果使用 Websea，不需要 WebSocket 數據流
+        if self.ws is None:
+            return
+            
         # 檢查深度流訂閲
         if "depth" not in self.ws.subscriptions:
             logger.info("重新訂閲深度數據流...")
@@ -1585,12 +1651,12 @@ class MarketMaker:
         try:
             # 先確保 WebSocket 連接可用
             connection_status = self.check_ws_connection()
-            if connection_status:
+            if connection_status and self.ws is not None:
                 # 初始化訂單簿和數據流
                 if not self.ws.orderbook["bids"] and not self.ws.orderbook["asks"]:
                     self.ws.initialize_orderbook()
                 
-                # 檢查並確保所有數據流訂閱
+                # 檢查並確保所有數據流訂閲
                 if "depth" not in self.ws.subscriptions:
                     self.ws.subscribe_depth()
                 if "bookTicker" not in self.ws.subscriptions:
@@ -1607,9 +1673,9 @@ class MarketMaker:
                 # 檢查連接並在必要時重連
                 connection_status = self.check_ws_connection()
                 
-                # 如果連接成功，檢查並確保所有流訂閱
+                # 如果連接成功，檢查並確保所有流訂閲
                 if connection_status:
-                    # 重新訂閱必要的數據流
+                    # 重新訂閲必要的數據流
                     self._ensure_data_streams()
                 
                 # 檢查訂單成交情況

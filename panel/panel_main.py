@@ -20,12 +20,22 @@ from panel.settings import load_settings, update_settings
 
 def parse_arguments():
     """解析命令行參數"""
-    parser = argparse.ArgumentParser(description='Backpack Exchange 做市交易面板')
+    parser = argparse.ArgumentParser(
+        description='Backpack Exchange 做市交易面板',
+        epilog='''
+使用示例:
+  現貨交易:
+    python panel/panel_main.py --symbol SOL_USDC
+  
+  永續合約 (需在面板中設置 market_type perp):
+    python panel/panel_main.py --symbol SOL_USDC_PERP
+        '''
+    )
     
     # 基本參數
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
-    parser.add_argument('--symbol', type=str, help='默認交易對 (例如: SOL_USDC)')
+    parser.add_argument('--symbol', type=str, help='默認交易對 (現貨: SOL_USDC, 永續: SOL_USDC_PERP)')
     parser.add_argument('--settings-dir', type=str, default='settings', help='設定目錄路徑')
     
     return parser.parse_args()

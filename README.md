@@ -6,19 +6,20 @@ Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.e
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
-**使用本程式運行 MM 策略 可獲得 10~30% 返佣**
+**使用本程式運行 MM 策略 可獲得 10~30% 自返傭 (每週由官方自動發放)**
 
 ## 功能特點
 
-- 自動化做市策略
-- 基礎價差設置
-- **智能重平衡倉位系統**
-- **自定義資產配置比例**
-- **永續合約做市與倉位風險管理**
-- 詳細的交易統計
-- WebSocket 實時數據連接
-- 命令行界面
-- 交互式面板
+- **多交易所架構**：支援 Backpack、未來可擴展至其他交易所
+- **自動化做市策略**：智能價差管理和訂單調整
+- **永續合約做市**：倉位風險管理與風險中性機制
+- **智能重平衡系統**：自動維持資產配置比例
+- **增強日誌系統**：詳細的市場狀態和策略追蹤
+- **WebSocket 實時連接**：即時市場數據和訂單更新
+- **命令行界面**：靈活的參數配置和策略執行
+- **交互式面板**：用户友好的操作介面
+
+*2025.09.22 更新：新增多交易所架構和倉位管理優化，增強日誌系統提供更清晰的市場狀態追蹤。*
 
 ## 項目結構
 
@@ -28,11 +29,12 @@ lemon_trader/
 ├── api/                  # API相關模塊
 │   ├── __init__.py
 │   ├── auth.py           # API認證和簽名相關
-│   └── client.py         # API請求客戶端
+│   ├── base_client.py    # 抽象基礎客户端 (支持繼承開發接入任意交易所)
+│   └── bp_client.py      # Backpack Exchange 客户端
 │
 ├── websocket/            # WebSocket模塊
 │   ├── __init__.py
-│   └── client.py         # WebSocket客戶端
+│   └── client.py         # WebSocket客户端
 │
 ├── database/             # 數據庫模塊
 │   ├── __init__.py
@@ -58,7 +60,7 @@ lemon_trader/
 ├── config.py             # 配置文件
 ├── logger.py             # 日誌配置
 ├── run.py                # 統一入口文件
-└── README.md             # 說明文檔
+└── README.md             # 説明文檔
 ```
 
 ## 環境要求
@@ -108,7 +110,7 @@ python run.py --panel
 python run.py --cli  
 
 # 直接運行做市策略
-python run.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
 ```
 
 ### 命令行參數
@@ -116,11 +118,10 @@ python run.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --in
 #### 基本參數
 - `--api-key`: API 密鑰 (可選，默認使用環境變數)
 - `--secret-key`: API 密鑰 (可選，默認使用環境變數)
+- `--exchange`: 交易所選擇 (默認: backpack)
 - `--ws-proxy`: Websocket 代理 (可選，默認使用環境變數)
 - `--cli`: 啟動命令行界面
 - `--panel`: 啟動交互式面板
-
-				
 
 #### 做市參數
 - `--symbol`: 交易對 (例如: SOL_USDC)
@@ -143,22 +144,51 @@ python run.py --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --in
 
 ### 永續合約做市
 
-程式現已支援永續合約做市。永續模式會自動追蹤淨倉位，並透過 Reduce-Only 訂單進行風險控管。
 
-```bash
-# 啟動永續做市
-python run.py --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.2 --max-orders 3 --target-position 10 --max-position 12 --position-threshold 11 --inventory-skew 0 --duration 99999999 --interval 15
+#### 倉位管理邏輯優化
+
+| 當前倉位 | 目標倉位 | 閾值 | 最大倉位 | 執行動作 |
+|---------|---------|------|---------|---------|
+| 0.1 SOL | 0 SOL | 0.2 SOL | 0.4 SOL | 無操作（在目標範圍內） |
+| 0.25 SOL | 0 SOL | 0.2 SOL | 0.4 SOL | 減倉 0.05 SOL（只平掉超出閾值線的部分） |
+| 0.5 SOL | 0 SOL | 0.2 SOL | 0.4 SOL | 風控平倉 0.1 SOL（降到最大倉位限制內） |
+
+#### 增強日誌輸出範例
+
+```
+=== 市場狀態 ===
+盤口: Bid 239.379 | Ask 239.447 | 價差 0.068 (0.028%)
+中間價: 239.408
+持倉: 空頭 6.000 SOL | 目標: 1.0 | 上限: 1.0
+
+=== 價格計算 ===
+原始掛單: 買 238.800 | 賣 239.996
+偏移計算: 淨持倉 -6.000 | 偏移係數 0.00 | 偏移量 0.0000
+調整後掛單: 買 238.800 | 賣 239.996
+
+=== 本次執行總結 ===
+成交: 買入 0.200 SOL | 賣出 0.150 SOL
+本次盈虧: 2.4500 USDT (手續費: 0.1200)
+累計盈虧: 15.2300 USDT | 未實現: -1.8900 USDT
+活躍訂單: 買 238.800 | 賣 239.996 | 價差 1.196 (0.50%)
 ```
 
-主要特性：
+#### 啟動永續做市範例
 
-- `target_position`：設置**持倉量**。這是一個**絕對值**，代表您希望持有的庫存大小（例如 1.5 SOL），無論多空。 策略不會主動開倉達到此目標，而是在持倉**超過**此目標時進行減倉。
-- `max_position`：**最大持倉量**。這是倉位的硬性上限，超出後會立即強制平倉至上限以內，是最高優先級的風控。
-- `position_threshold`：觸發倉位調整的最小偏離量。當 `(當前持倉 - 設置持倉)` 的差額大於此值，會觸發減倉。
-- `inventory_skew`：**風險中性工具**。此參數會根據您當前的**淨倉位**（`net position`）來調整掛單價格。
-      - 若您持有多單，報價會自動下移，吸引他人成交您的賣單。
-      - 若您持有空單，報價會自動上移，吸引他人成交您的買單。
-      - 其核心目標是持續將您的**淨倉位**推向 `0`，以最大限度地降低方向性風險。
+```bash
+# 基本永續做市 (Backpack)
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.2 --max-orders 3 --target-position 0 --max-position 0.4 --position-threshold 0.2 --inventory-skew 0 --duration 99999999 --interval 15
+```
+
+#### 永續合約參數詳解
+
+- `target_position`：**目標持倉量**（絕對值）。設置您希望維持的庫存大小，策略會在持倉**超過**此目標時進行減倉，而非主動開倉達到目標。
+- `max_position`：**最大持倉量**。倉位的硬性上限，超出後會立即強制平倉，是最高優先級的風控機制。
+- `position_threshold`：**倉位調整閾值**。當 `當前持倉 > target_position + threshold` 時觸發減倉操作。
+- `inventory_skew`：**風險中性係數** (0-1)。根據淨倉位自動調整報價：
+  - 持有多單時：報價下移，吸引賣單成交
+  - 持有空單時：報價上移，吸引買單成交
+  - 目標：持續將淨倉位推向 `0`，降低方向性風險
 
 ## 重平衡功能詳解
 
@@ -166,7 +196,7 @@ python run.py --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity
 
 重平衡功能用於維持資產配置的平衡，避免因市場波動導致的資產比例失衡。例如，如果您設置基礎資產目標比例為30%，當基礎資產比例因價格波動偏離目標過多時，程序會自動執行交易來恢復平衡。
 
-### 重平設置參數說明
+### 重平設置參數説明
 
 1. **重平功能開關**: 控制是否啟用自動重平衡
 2. **基礎資產目標比例**: 基礎資產應佔總資產的百分比 (0-100%)
@@ -223,38 +253,38 @@ python run.py --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity
 ### 基本做市示例
 
 ```bash
-python run.py --symbol SOL_USDC --spread 0.2 --max-orders 5
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.2 --max-orders 5
 ```
 
 ### 開啟重平功能示例
 
 ```bash
 # 標準重平設置
-python run.py --symbol SOL_USDC --spread 0.2 --enable-rebalance
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.2 --enable-rebalance
 
 # 自定義重平設置
-python run.py --symbol SOL_USDC --spread 0.2 --enable-rebalance --base-asset-target 25 --rebalance-threshold 12
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.2 --enable-rebalance --base-asset-target 25 --rebalance-threshold 12
 
 # 高風險環境設置
-python run.py --symbol SOL_USDC --spread 0.3 --enable-rebalance --base-asset-target 20 --rebalance-threshold 10
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.3 --enable-rebalance --base-asset-target 20 --rebalance-threshold 10
 ```
 
 ### 關閉重平功能示例
 
 ```bash
-python run.py --symbol SOL_USDC --spread 0.2 --disable-rebalance
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.2 --disable-rebalance
 ```
 
 ### 長時間運行示例
 
 ```bash
-python run.py --symbol SOL_USDC --spread 0.1 --duration 86400 --interval 120 --enable-rebalance --base-asset-target 30
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.1 --duration 86400 --interval 120 --enable-rebalance --base-asset-target 30
 ```
 
 ### 完整參數示例
 
 ```bash
-python run.py --symbol SOL_USDC --spread 0.3 --quantity 0.5 --max-orders 3 --duration 7200 --interval 60 --enable-rebalance --base-asset-target 25 --rebalance-threshold 15
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.3 --quantity 0.5 --max-orders 3 --duration 7200 --interval 60 --enable-rebalance --base-asset-target 25 --rebalance-threshold 15
 ``` 
 
 ## 重平功能管理
@@ -267,12 +297,12 @@ python run.py --cli
 
 在 CLI 界面中選擇：
 - `5 - 執行做市策略`: 設置完整的做市和重平參數
-- `8 - 重平設置管理`: 查看重平設置說明和測試配置
+- `8 - 重平設置管理`: 查看重平設置説明和測試配置
 
 ### 交互式配置
 
 CLI 界面提供交互式重平配置，包括：
-- 詳細的參數說明
+- 詳細的參數説明
 - 模擬計算示例
 - 智能參數建議
 - 配置驗證
@@ -293,7 +323,16 @@ CLI 界面提供交互式重平配置，包括：
 
 ### 最佳實踐建議
 
-1. **新手用戶**: 建議從默認設置開始 (30% 基礎資產，15% 閾值)
+1. **新手用户**: 建議從默認設置開始 (30% 基礎資產，15% 閾值)
 2. **保守策略**: 使用較低的基礎資產比例 (20-25%) 和較低的閾值 (10-12%)
 3. **激進策略**: 可以使用較高的基礎資產比例 (35-40%) 和較高的閾值 (20-25%)
 4. **測試驗證**: 先在小資金上測試不同的重平設置，找到最適合的參數組合
+
+## 技術架構
+
+程式採用模組化設計，支援多交易所擴展：
+
+- **Base Client 架構**：抽象基礎類別，統一不同交易所的 API 介面
+- **精確倉位管理**：只平掉超出閾值的部分，避免過度平倉風控
+- **分層日誌系統**：市場狀態、策略決策、價格計算、執行結果四層資訊
+- **相容性設計**：支援多種 API 回應格式，強化錯誤處理機制
