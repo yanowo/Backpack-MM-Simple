@@ -1,8 +1,8 @@
 """
-永續合約做市策略模塊。
+永续合约做市策略模块。
 
-此模塊在現貨做市策略的基礎上擴展，提供專為永續合約設計的
-開倉、平倉與倉位風險管理功能。
+此模块在现货做市策略的基础上扩展，提供专为永续合约设计的
+开仓、平仓与仓位风险管理功能。
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ logger = setup_logger("perp_market_maker")
 
 
 class PerpetualMarketMaker(MarketMaker):
-    """專為永續合約設計的做市策略。"""
+    """专为永续合约设计的做市策略。"""
 
     def __init__(
         self,
@@ -37,17 +37,17 @@ class PerpetualMarketMaker(MarketMaker):
         **kwargs,
     ) -> None:
         """
-        初始化永續合約做市策略。
+        初始化永续合约做市策略。
 
         Args:
-            api_key (str): API金鑰。
-            secret_key (str): API私鑰。
-            symbol (str): 交易對。
-            target_position (float): 目標持倉量 (絕對值)，策略會將倉位大小維持在此數值附近。
-            max_position (float): 最大允許持倉量（絕對值）。
-            position_threshold (float): 觸發倉位調整的閾值。
-            inventory_skew (float): 庫存偏移，影響報價的不對稱性，以將淨倉位推向0。
-            leverage (float): 槓桿倍數。
+            api_key (str): API金钥。
+            secret_key (str): API私钥。
+            symbol (str): 交易对。
+            target_position (float): 目标持仓量 (绝对值)，策略会将仓位大小维持在此数值附近。
+            max_position (float): 最大允许持仓量（绝对值）。
+            position_threshold (float): 触发仓位调整的阈值。
+            inventory_skew (float): 库存偏移，影响报价的不对称性，以将净仓位推向0。
+            leverage (float): 杠杆倍数。
             ws_proxy (Optional[str]): WebSocket代理地址。
         """
         kwargs.setdefault("enable_rebalance", False)
@@ -61,7 +61,7 @@ class PerpetualMarketMaker(MarketMaker):
             **kwargs,
         )
 
-        # 核心修改：target_position 現在是絕對持倉量目標
+        # 核心修改：target_position 现在是绝对持仓量目标
         self.target_position = abs(target_position)
         self.max_position = max(abs(max_position), self.min_order_size)
         self.position_threshold = max(position_threshold, self.min_order_size)
@@ -75,12 +75,12 @@ class PerpetualMarketMaker(MarketMaker):
             "unrealized": 0.0,
         }
 
-        # 添加總成交量統計（以報價資產計價）
+        # 添加总成交量统计（以报价资产计价）
         self.total_volume_quote = 0.0
         self.session_total_volume_quote = 0.0
 
         logger.info(
-            "初始化永續合約做市: %s | 目標持倉量: %s | 最大持倉量: %s | 觸發閾值: %s",
+            "初始化永续合约做市: %s | 目标持仓量: %s | 最大持仓量: %s | 触发阈值: %s",
             symbol,
             format_balance(self.target_position),
             format_balance(self.max_position),
@@ -89,60 +89,59 @@ class PerpetualMarketMaker(MarketMaker):
         self._update_position_state()
 
     def on_ws_message(self, stream, data):
-        """處理WebSocket消息回調 - 添加總成交量統計"""
-        # 先調用父類的消息處理
+        """处理WebSocket消息回调 - 添加总成交量统计"""
+        # 先调用父类的消息处理
         super().on_ws_message(stream, data)
         
-        # 添加總成交量統計
+        # 添加总成交量统计
         if stream.startswith("account.orderUpdate."):
             event_type = data.get('e')
             
             if event_type == 'orderFill':
                 try:
-                    quantity = float(data.get('l', '0'))  # 成交數量
-                    price = float(data.get('L', '0'))     # 成交價格
+                    quantity = float(data.get('l', '0'))  # 成交数量
+                    price = float(data.get('L', '0'))     # 成交价格
                     
-                    # 計算成交額（以報價資產計價）
+                    # 计算成交额（以报价资产计价）
                     trade_volume = quantity * price
                     
-                    # 更新總成交量統計
+                    # 更新总成交量统计
                     self.total_volume_quote += trade_volume
                     self.session_total_volume_quote += trade_volume
                     
-                    logger.debug(f"更新總成交量: +{trade_volume:.2f} {self.quote_asset}, 累計: {self.total_volume_quote:.2f}")
+                    logger.debug(f"更新总成交量: +{trade_volume:.2f} {self.quote_asset}, 累计: {self.total_volume_quote:.2f}")
                     
                 except Exception as e:
-                    logger.error(f"更新總成交量統計時出錯: {e}")
+                    logger.error(f"更新总成交量统计时出错: {e}")
 
     # ------------------------------------------------------------------
-    # 基礎資訊與工具方法 (此處函數未變動)
+    # 基础资讯与工具方法 (此处函数未变动)
     # ------------------------------------------------------------------
     def _fetch_positions(self) -> List[Dict[str, Any]]:
-        """從交易所獲取倉位列表，統一處理錯誤與日誌。"""
+        """从交易所获取仓位列表，统一处理错误与日志。"""
         try:
             result = self.client.get_positions(self.symbol)
 
             if isinstance(result, dict) and "error" in result:
                 error_msg = result["error"]
                 if any(code in error_msg for code in ("404", "RESOURCE_NOT_FOUND")):
-                    logger.debug("未找到 %s 的倉位記錄(404)", self.symbol)
+                    logger.debug("未找到 %s 的仓位记录(404)", self.symbol)
                     return []
-                logger.error("查詢倉位失敗: %s", error_msg)
+                logger.error("查询仓位失败: %s", error_msg)
                 return []
 
             if not isinstance(result, list):
-                logger.warning("倉位API返回格式異常: %s", type(result))
+                logger.warning("仓位API返回格式异常: %s", type(result))
                 return []
 
             return result
 
         except Exception as exc:
-            logger.error("獲取永續倉位時發生錯誤: %s", exc)
-            logger.warning("使用本地統計作為備用倉位資訊")
+            logger.error("获取永续仓位时发生错误: %s", exc)
+            logger.warning("使用本地统计作为备用仓位信息")
             return []
 
     def _aggregate_positions(self, positions: List[Dict[str, Any]]) -> Tuple[float, Dict[str, Any]]:
-        """統計多倉、空倉及平均價格，用於倉位管理。"""
         if not positions:
             return 0.0, {}
 
@@ -229,7 +228,6 @@ class PerpetualMarketMaker(MarketMaker):
         return net_quantity, aggregated
 
     def _get_position_snapshot(self) -> Tuple[float, float, Dict[str, Any]]:
-        """同時返回淨倉位、最大絕對倉位以及彙總資訊。"""
         positions = self._fetch_positions()
         net_quantity, aggregated = self._aggregate_positions(positions)
 
@@ -240,18 +238,16 @@ class PerpetualMarketMaker(MarketMaker):
         return net_quantity, max_exposure, aggregated
 
     def get_net_position(self) -> float:
-        """取得目前的永續合約淨倉位。"""
         net_quantity, _, _ = self._get_position_snapshot()
         logger.debug("從API聚合 %s 永續倉位: %s", self.symbol, net_quantity)
         return net_quantity
 
     def _get_actual_position_info(self) -> Dict[str, Any]:
-        """獲取完整的倉位信息。"""
         _, _, aggregated = self._get_position_snapshot()
         return aggregated
 
     def _calculate_average_short_entry(self) -> float:
-        """計算目前空頭倉位的平均開倉價格。"""
+        """计算目前空头仓位的平均开仓价格。"""
         if not self.sell_trades:
             return 0.0
 
@@ -275,19 +271,22 @@ class PerpetualMarketMaker(MarketMaker):
         return unmatched_notional / unmatched_quantity
 
     def _update_position_state(self) -> None:
-        """更新倉位相關統計。"""
-        net, _, position_info = self._get_position_snapshot()
+        """更新仓位相关统计。"""
+        net = self.get_net_position()  # 现在这会从API获取实际仓位
         current_price = self.get_current_price()
         direction = "FLAT"
         avg_entry = 0.0
         unrealized = 0.0
 
+        # 尝试从API获取更准确的信息
+        position_info = self._get_actual_position_info()
+        
         if position_info:
-            # 使用API返回的精確信息
-            avg_entry = float(position_info.get("entryPrice", 0) or 0)
-            unrealized = float(position_info.get("pnlUnrealized", 0) or 0)
+            # 使用API返回的精确信息
+            avg_entry = float(position_info.get("entryPrice", 0))
+            unrealized = float(position_info.get("pnlUnrealized", 0))
         else:
-            # 使用本地計算作為備用
+            # 使用本地计算作为备用
             if net > 0:
                 avg_entry = self._calculate_average_buy_cost()
                 if current_price:
@@ -317,32 +316,32 @@ class PerpetualMarketMaker(MarketMaker):
         }
 
     def get_position_state(self) -> Dict[str, Any]:
-        """取得倉位資訊快照。"""
+        """取得仓位资讯快照。"""
         self._update_position_state()
         return self.position_state
 
     def estimate_profit(self):
-        """覆蓋父類方法，添加總成交量統計顯示"""
-        # 先調用父類的方法
+        """覆盖父类方法，添加总成交量统计显示"""
+        # 先调用父类的方法
         super().estimate_profit()
         
-        # 然後添加總成交量統計顯示
-        logger.info(f"\n---永續合約總成交量統計---")
-        logger.info(f"累計總成交量: {self.total_volume_quote:.2f} {self.quote_asset}")
-        logger.info(f"本次執行總成交量: {self.session_total_volume_quote:.2f} {self.quote_asset}")
+        # 然后添加总成交量统计显示
+        logger.info(f"\n---永续合约总成交量统计---")
+        logger.info(f"累计总成交量: {self.total_volume_quote:.2f} {self.quote_asset}")
+        logger.info(f"本次执行总成交量: {self.session_total_volume_quote:.2f} {self.quote_asset}")
 
     def run(self, duration_seconds=3600, interval_seconds=60):
-        """執行永續合約做市策略"""
-        logger.info(f"開始運行永續合約做市策略: {self.symbol}")
+        """执行永续合约做市策略"""
+        logger.info(f"开始运行永续合约做市策略: {self.symbol}")
         
-        # 重置本次執行的總成交量統計
+        # 重置本次执行的总成交量统计
         self.session_total_volume_quote = 0.0
         
-        # 調用父類的 run 方法
+        # 调用父类的 run 方法
         super().run(duration_seconds, interval_seconds)
 
     # ------------------------------------------------------------------
-    # 下單相關 (此處函數未變動)
+    # 下单相关 (此处函数未变动)
     # ------------------------------------------------------------------
     def open_position(
         self,
@@ -354,16 +353,16 @@ class PerpetualMarketMaker(MarketMaker):
         time_in_force: str = "GTC",
         client_id: Optional[str] = None,
     ) -> Dict:
-        """提交開倉或平倉訂單。"""
+        """提交开仓或平仓订单。"""
 
         normalized_order_type = order_type.capitalize()
         if normalized_order_type not in {"Limit", "Market"}:
-            raise ValueError("order_type 僅支持 'Limit' 或 'Market'")
+            raise ValueError("order_type 仅支持 'Limit' 或 'Market'")
 
         qty = round_to_precision(abs(quantity), self.base_precision)
         if qty < self.min_order_size:
             logger.warning(
-                "下單數量 %s 低於最小單位 %s，取消下單",
+                "下单数量 %s 低于最小单位 %s，取消下单",
                 format_balance(qty),
                 format_balance(self.min_order_size),
             )
@@ -379,17 +378,17 @@ class PerpetualMarketMaker(MarketMaker):
 
         if normalized_order_type == "Limit":
             if price is None:
-                raise ValueError("Limit 訂單需要提供價格")
+                raise ValueError("Limit 订单需要提供价格")
             price_value = round_to_tick_size(price, self.tick_size)
             order_details["price"] = str(price_value)
             order_details["timeInForce"] = time_in_force.upper()
         else:
-            # 使用當前深度推估價格方便記錄
+            # 使用当前深度推估价格方便记录
             bid_price, ask_price = self.get_market_depth()
             reference_price = ask_price if side == "Bid" else bid_price
             if reference_price:
                 logger.debug(
-                    "使用市場價格 %.8f 作為 %s 市價訂單參考",
+                    "使用市场价格 %.8f 作为 %s 市价订单参考",
                     reference_price,
                     side,
                 )
@@ -398,7 +397,7 @@ class PerpetualMarketMaker(MarketMaker):
             order_details["clientId"] = str(client_id)
 
         logger.info(
-            "提交永續合約訂單: %s %s %s | reduceOnly=%s | 類型=%s",
+            "提交永续合约订单: %s %s %s | reduceOnly=%s | 类型=%s",
             side,
             format_balance(qty),
             self.symbol,
@@ -408,10 +407,10 @@ class PerpetualMarketMaker(MarketMaker):
 
         result = self.client.execute_order(order_details)
         if isinstance(result, dict) and "error" in result:
-            logger.error(f"永續合約訂單失敗: {result['error']}, 订单信息：{order_details}")
+            logger.error(f"永续合约订单失败: {result['error']}, 订单信息：{order_details}")
         else:
             self.orders_placed += 1
-            logger.info("永續合約訂單提交成功: %s", result.get("id", "unknown"))
+            logger.info("永续合约订单提交成功: %s", result.get("id", "unknown"))
 
         return result
 
@@ -423,7 +422,7 @@ class PerpetualMarketMaker(MarketMaker):
         reduce_only: bool = False,
         **kwargs,
     ) -> Dict:
-        """開啟或增加多頭倉位。"""
+        """开启或增加多头仓位。"""
         return self.open_position(
             side="Bid",
             quantity=quantity,
@@ -441,7 +440,7 @@ class PerpetualMarketMaker(MarketMaker):
         reduce_only: bool = False,
         **kwargs,
     ) -> Dict:
-        """開啟或增加空頭倉位。"""
+        """开启或增加空头仓位。"""
         return self.open_position(
             side="Ask",
             quantity=quantity,
@@ -459,21 +458,21 @@ class PerpetualMarketMaker(MarketMaker):
         side: Optional[str] = None,
         client_id: Optional[str] = None,
     ) -> bool:
-        """平倉操作。"""
-        net, _, position_info = self._get_position_snapshot()
+        """平仓操作。"""
+        net = self.get_net_position()  # 使用API获取实际仓位
         if math.isclose(net, 0.0, abs_tol=self.min_order_size / 10):
-            logger.info("實際倉位為零，無需平倉")
+            logger.info("实际仓位为零，无需平仓")
             return False
 
-        # 根據實際倉位確定平倉方向
-        if net > 0:  # 多頭倉位，需要賣出平倉
+        # 根据实际仓位确定平仓方向
+        if net > 0:  # 多头仓位，需要卖出平仓
             direction = "long"
             order_side = "Ask"
-        else:  # 空頭倉位，需要買入平倉
+        else:  # 空头仓位，需要买入平仓
             direction = "short"
             order_side = "Bid"
 
-        # 如果手動指定了side，則使用指定的
+        # 如果手动指定了side，则使用指定的
         if side is not None:
             direction = side
             order_side = "Ask" if direction == "long" else "Bid"
@@ -487,11 +486,11 @@ class PerpetualMarketMaker(MarketMaker):
         qty = qty_available if quantity is None else min(abs(quantity), qty_available)
         qty = round_to_precision(qty, self.base_precision)
         if qty < self.min_order_size:
-            logger.info("平倉數量 %s 低於最小單位，忽略", format_balance(qty))
+            logger.info("平仓数量 %s 低于最小单位，忽略", format_balance(qty))
             return False
 
         logger.info(
-            "執行平倉: 實際倉位=%s, 平倉數量=%s, 方向=%s",
+            "执行平仓: 实际仓位=%s, 平仓数量=%s, 方向=%s",
             format_balance(net),
             format_balance(qty),
             direction
@@ -508,7 +507,7 @@ class PerpetualMarketMaker(MarketMaker):
 
         if isinstance(result, dict) and "error" in result:
             logger.error(
-                "平倉失敗: %s | side=%s qty=%s price=%s type=%s reduceOnly=%s clientId=%s result=%s",
+                "平仓失败: %s | side=%s qty=%s price=%s type=%s reduceOnly=%s clientId=%s result=%s",
                 result.get("error"),
                 order_side,
                 format_balance(qty),
@@ -520,30 +519,31 @@ class PerpetualMarketMaker(MarketMaker):
             )
             return False
 
-        logger.info("平倉完成，數量 %s", format_balance(qty))
+        logger.info("平仓完成，数量 %s", format_balance(qty))
         self._update_position_state()
         return True
 
     # ------------------------------------------------------------------
-    # 倉位管理 (核心修改)
+    # 仓位管理 (核心修改)
     # ------------------------------------------------------------------
     def need_rebalance(self) -> bool:
-        """判斷是否需要倉位調整 (僅減倉)。"""
-        net, current_size, _ = self._get_position_snapshot()
+        """判断是否需要仓位调整 (仅减仓)。"""
+        net = self.get_net_position()
+        current_size = abs(net)
 
         if current_size > self.max_position:
             logger.warning(
-                "持倉量 %s 超過最大允許 %s，準備執行風控平倉",
+                "持仓量 %s 超过最大允许 %s，准备执行风控平仓",
                 format_balance(current_size),
                 format_balance(self.max_position),
             )
             return True
 
-        # 檢查是否超過目標 + 閾值（而非僅僅偏離目標）
+        # 检查是否超过目标 + 阈值（而非仅仅偏离目标）
         threshold_line = self.target_position + self.position_threshold
         if current_size > threshold_line:
             logger.info(
-                "持倉量 %s 超過閾值線 %s (目標 %s + 閾值 %s)，觸發減倉調整",
+                "持仓量 %s 超过阈值线 %s (目标 %s + 阈值 %s)，触发减仓调整",
                 format_balance(current_size),
                 format_balance(threshold_line),
                 format_balance(self.target_position),
@@ -554,17 +554,18 @@ class PerpetualMarketMaker(MarketMaker):
         return False
 
     def manage_positions(self) -> bool:
-        """根據持倉量狀態主動調整，此函數只負責減倉以控制風險。"""
-        net, current_size, position_info = self._get_position_snapshot()
+        """根据持仓量状态主动调整，此函数只负责减仓以控制风险。"""
+        net = self.get_net_position()
+        current_size = abs(net)
         desired_size = self.target_position
 
         logger.debug(
-            "倉位管理: 實際持倉量=%s, 目標持倉量=%s",
+            "仓位管理: 实际持仓量=%s, 目标持仓量=%s",
             format_balance(current_size),
             format_balance(desired_size)
         )
 
-        # 1. 風控：檢查是否超過最大持倉量
+        # 1. 风控：检查是否超过最大持仓量
         if current_size > self.max_position:
             short_qty = float(position_info.get("shortQuantity", 0.0)) if position_info else 0.0
             long_qty = float(position_info.get("longQuantity", 0.0)) if position_info else 0.0
@@ -572,7 +573,7 @@ class PerpetualMarketMaker(MarketMaker):
             qty_exposure = short_qty if net < 0 else long_qty
             excess = current_size - self.max_position
             logger.warning(
-                "持倉量 %s 超過最大允許 %s，執行緊急平倉 %s",
+                "持仓量 %s 超过最大允许 %s，执行紧急平仓 %s",
                 format_balance(current_size),
                 format_balance(self.max_position),
                 format_balance(excess)
@@ -580,38 +581,38 @@ class PerpetualMarketMaker(MarketMaker):
             close_amount = excess if excess > 0 else qty_exposure
             return self.close_position(quantity=close_amount, order_type="Market")
 
-        # 2. 減倉：檢查持倉量是否超過目標 + 閾值
-        # 只有當實際持倉超過 (目標持倉 + 閾值) 時才減倉
+        # 2. 减仓：检查持仓量是否超过目标 + 阈值
+        # 只有当实际持仓超过 (目标持仓 + 阈值) 时才减仓
         threshold_line = desired_size + self.position_threshold
         if current_size > threshold_line:
-            # 只平掉超出閾值線的部分，而不是全部
+            # 只平掉超出阈值线的部分，而不是全部
             qty_to_close = current_size - threshold_line
             logger.info(
-                "持倉量 %s 超過閾值線 %s (目標 %s + 閾值 %s)，執行減倉 %s",
+                "持仓量 %s 超过阈值线 %s (目标 %s + 阈值 %s)，执行减仓 %s",
                 format_balance(current_size),
                 format_balance(threshold_line),
                 format_balance(desired_size),
                 format_balance(self.position_threshold),
                 format_balance(qty_to_close)
             )
-            # close_position 會根據淨倉位自動判斷平倉方向
+            # close_position 会根据净仓位自动判断平仓方向
             return self.close_position(quantity=qty_to_close, order_type="Market")
 
-        logger.debug("持倉量在目標範圍內，無需主動管理。")
+        logger.debug("持仓量在目标范围内，无需主动管理。")
         return False
 
     def rebalance_position(self) -> None:
-        """覆寫現貨邏輯，改為永續倉位管理。"""
-        logger.info("執行永續倉位管理")
+        """覆写现货逻辑，改为永续仓位管理。"""
+        logger.info("执行永续仓位管理")
         acted = self.manage_positions()
         if not acted:
-            logger.info("倉位已在安全範圍內，無需調整")
+            logger.info("仓位已在安全范围内，无需调整")
 
     # ------------------------------------------------------------------
-    # 報價調整 (核心修改)
+    # 报价调整 (核心修改)
     # ------------------------------------------------------------------
     def calculate_prices(self):  # type: ignore[override]
-        """計算買賣訂單價格，並根據淨倉位進行偏移以控制方向風險。"""
+        """计算买卖订单价格，并根据净仓位进行偏移以控制方向风险。"""
         buy_prices, sell_prices = super().calculate_prices()
         if not buy_prices or not sell_prices:
             return buy_prices, sell_prices
@@ -641,7 +642,7 @@ class PerpetualMarketMaker(MarketMaker):
         direction = "空头" if net < 0 else "多头" if net > 0 else "无仓位"
         logger.info(f"持仓: {direction} {abs(net):.3f} SOL | 目标: {self.target_position:.1f} | 上限: {self.max_position:.1f}")
 
-        # 如果沒有庫存偏移係數或沒有倉位，則不進行調整
+        # 如果没有库存偏移系数或没有仓位，则不进行调整
         if self.inventory_skew <= 0 or abs(net) < self.min_order_size:
             logger.info(f"原始挂单: 买 {buy_prices[0]:.3f} | 卖 {sell_prices[0]:.3f} (无偏移)")
             return buy_prices, sell_prices
@@ -649,20 +650,20 @@ class PerpetualMarketMaker(MarketMaker):
         if self.max_position <= 0:
             return buy_prices, sell_prices
 
-        # 核心偏移邏輯：根據淨倉位(net)調整報價，目標是將淨倉位推向0 (Delta中性)
-        # 偏離量就是淨倉位本身
+        # 核心偏移逻辑：根据净仓位(net)调整报价，目标是将净仓位推向0 (Delta中性)
+        # 偏离量就是净仓位本身
         deviation = net
         skew_ratio = max(-1.0, min(1.0, deviation / self.max_position))
 
         if not current_price:
             return buy_prices, sell_prices
 
-        # 如果是多頭 (net > 0)，skew_offset為正；如果是空頭 (net < 0)，skew_offset為負
+        # 如果是多头 (net > 0)，skew_offset为正；如果是空头 (net < 0)，skew_offset为负
         skew_offset = current_price * self.inventory_skew * skew_ratio
 
-        # 調整價格以鼓勵反向交易，使淨倉位回歸0
-        # 如果是多頭 (net > 0)，降低買賣價以鼓勵市場吃掉我們的賣單，同時降低我們買入的意願
-        # 如果是空頭 (net < 0)，提高買賣價以鼓勵市場吃掉我們的買單，同時降低我們賣出的意願
+        # 调整价格以鼓励反向交易，使净仓位回归0
+        # 如果是多头 (net > 0)，降低买卖价以鼓励市场吃掉我们的卖单，同时降低我们买入的意愿
+        # 如果是空头 (net < 0)，提高买卖价以鼓励市场吃掉我们的买单，同时降低我们卖出的意愿
         adjusted_buys = [
             round_to_tick_size(price - skew_offset, self.tick_size)
             for price in buy_prices
@@ -678,33 +679,33 @@ class PerpetualMarketMaker(MarketMaker):
         logger.info(f"偏移计算: 净持仓 {net:.3f} | 偏移系数 {self.inventory_skew:.2f} | 偏移量 {skew_offset:.4f}")
         logger.info(f"调整后挂单: 买 {adjusted_buys[0]:.3f} | 卖 {adjusted_sells[0]:.3f}")
 
-        # 風控：確保調整後買賣價沒有交叉
+        # 风控：确保调整后买卖价没有交叉
         if adjusted_buys[0] >= adjusted_sells[0]:
-            logger.warning("報價調整後買賣價交叉或價差過小，恢復原始報價。買: %s, 賣: %s", adjusted_buys[0], adjusted_sells[0])
+            logger.warning("报价调整后买卖价交叉或价差过小，恢复原始报价。买: %s, 卖: %s", adjusted_buys[0], adjusted_sells[0])
             return buy_prices, sell_prices
 
         return adjusted_buys, adjusted_sells
 
     # ------------------------------------------------------------------
-    # 其他輔助方法 (核心修改)
+    # 其他辅助方法 (核心修改)
     # ------------------------------------------------------------------
     def set_target_position(self, target: float, threshold: Optional[float] = None) -> None:
-        """更新目標持倉量 (絕對值) 及觸發閾值。"""
+        """更新目标持仓量 (绝对值) 及触发阈值。"""
         self.target_position = abs(target)
         if threshold is not None:
             self.position_threshold = max(threshold, self.min_order_size)
         logger.info(
-            "更新目標持倉量: %s (閾值: %s)",
+            "更新目标持仓量: %s (阈值: %s)",
             format_balance(self.target_position),
             format_balance(self.position_threshold),
         )
         self._update_position_state()
 
     def set_max_position(self, max_position: float) -> None:
-        """更新最大允許倉位。"""
+        """更新最大允许仓位。"""
         self.max_position = max(abs(max_position), self.min_order_size)
         logger.info(
-            "更新最大倉位限制: %s",
+            "更新最大仓位限制: %s",
             format_balance(self.max_position),
         )
         self._update_position_state()

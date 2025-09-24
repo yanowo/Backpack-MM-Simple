@@ -1,5 +1,5 @@
 """
-鍵盤處理模塊 - 提供跨平台鍵盤輸入處理
+键盘处理模块 - 提供跨平台键盘输入处理
 """
 import os
 import sys
@@ -7,40 +7,40 @@ import threading
 import time
 from typing import Callable, Any
 
-# 嘗試導入適合的鍵盤處理庫
+# 尝试导入适合的键盘处理库
 try:
     # Windows平台
     import msvcrt
     
     def get_key():
         """
-        Windows下獲取按鍵
+        Windows下获取按键
         """
         if msvcrt.kbhit():
             key = msvcrt.getch()
-            # 將bytes轉換為字符串
+            # 将bytes转换为字符串
             key_decoded = key.decode('utf-8', errors='ignore')
             
-            # 處理特殊按鍵
-            if key == b'\xe0':  # 擴展按鍵
+            # 处理特殊按键
+            if key == b'\xe0':  # 扩展按键
                 key = msvcrt.getch()
-                if key == b'H':  # 上箭頭
+                if key == b'H':  # 上箭头
                     return "up"
-                elif key == b'P':  # 下箭頭
+                elif key == b'P':  # 下箭头
                     return "down"
-                elif key == b'K':  # 左箭頭
+                elif key == b'K':  # 左箭头
                     return "left"
-                elif key == b'M':  # 右箭頭
+                elif key == b'M':  # 右箭头
                     return "right"
                 else:
                     return None
-            elif key == b'\r':  # 回車鍵
+            elif key == b'\r':  # 回车键
                 return "enter"
-            elif key == b'\x08':  # 退格鍵
+            elif key == b'\x08':  # 退格键
                 return "backspace"
-            elif key == b'\x1b':  # ESC鍵
+            elif key == b'\x1b':  # ESC键
                 return "escape"
-            elif key == b'\t':  # Tab鍵
+            elif key == b'\t':  # Tab键
                 return "tab"
             else:
                 return key_decoded
@@ -57,21 +57,21 @@ except ImportError:
         
         def get_key():
             """
-            Unix下獲取按鍵
+            Unix下获取按键
             """
-            # 設置為非阻塞模式
+            # 设置为非阻塞模式
             fd = sys.stdin.fileno()
             old_settings = termios.tcgetattr(fd)
             try:
                 tty.setraw(fd)
-                # 檢查是否有輸入
+                # 检查是否有输入
                 if select.select([sys.stdin], [], [], 0)[0]:
                     key = sys.stdin.read(1)
                     
-                    # 處理特殊按鍵
-                    if key == '\x1b':  # ESC鍵可能是特殊按鍵的開始
+                    # 处理特殊按键
+                    if key == '\x1b':  # ESC键可能是特殊按键的开始
                         next_key = sys.stdin.read(1) if select.select([sys.stdin], [], [], 0.1)[0] else None
-                        if next_key == '[':  # 箭頭按鍵的序列
+                        if next_key == '[':  # 箭头按键的序列
                             key = sys.stdin.read(1) if select.select([sys.stdin], [], [], 0.1)[0] else None
                             if key == 'A':
                                 return "up"
@@ -82,11 +82,11 @@ except ImportError:
                             elif key == 'D':
                                 return "left"
                         return "escape"
-                    elif key == '\r':  # 回車鍵
+                    elif key == '\r':  # 回车键
                         return "enter"
-                    elif key == '\x7f':  # 退格鍵
+                    elif key == '\x7f':  # 退格键
                         return "backspace"
-                    elif key == '\t':  # Tab鍵
+                    elif key == '\t':  # Tab键
                         return "tab"
                     else:
                         return key
@@ -97,10 +97,10 @@ except ImportError:
         WINDOWS = False
         
     except (ImportError, AttributeError):
-        # 無法使用特定平台的庫，創建簡單替代方案
+        # 无法使用特定平台的库，创建简单替代方案
         def get_key():
             """
-            簡單的輸入捕獲（非實時）
+            简单的输入捕获（非实时）
             """
             if sys.stdin.isatty():
                 if select.select([sys.stdin], [], [], 0)[0]:
@@ -112,14 +112,14 @@ except ImportError:
 
 class KeyboardHandler:
     """
-    跨平台的鍵盤處理類
+    跨平台的键盘处理类
     """
     def __init__(self, callback: Callable[[str], Any]):
         """
-        初始化鍵盤處理器
+        初始化键盘处理器
         
         Args:
-            callback: 按鍵處理回調函數
+            callback: 按键处理回调函数
         """
         self.callback = callback
         self.running = False
@@ -127,7 +127,7 @@ class KeyboardHandler:
     
     def start(self):
         """
-        啟動鍵盤監聽
+        启动键盘监听
         """
         self.running = True
         self.thread = threading.Thread(target=self._listen_keyboard, daemon=True)
@@ -135,7 +135,7 @@ class KeyboardHandler:
     
     def stop(self):
         """
-        停止鍵盤監聽
+        停止键盘监听
         """
         self.running = False
         if self.thread and self.thread.is_alive():
@@ -143,7 +143,7 @@ class KeyboardHandler:
     
     def _listen_keyboard(self):
         """
-        監聽鍵盤輸入
+        监听键盘输入
         """
         while self.running:
             key = get_key()
@@ -151,16 +151,16 @@ class KeyboardHandler:
                 self.callback(key)
             time.sleep(0.01)  # 降低CPU使用率
 
-# 直接測試
+# 直接测试
 if __name__ == "__main__":
     def key_callback(key):
-        print(f"按下鍵: {key}")
+        print(f"按下键: {key}")
         if key == 'q':
             print("退出...")
             return False
         return True
     
-    print("按鍵測試 (按 'q' 退出)...")
+    print("按键测试 (按 'q' 退出)...")
     
     handler = KeyboardHandler(key_callback)
     handler.start()

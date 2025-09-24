@@ -14,7 +14,7 @@ import functools
 
 @dataclass
 class OrderResult:
-    """標準化訂單執行結果"""
+    """标准化订单执行结果"""
     success: bool
     order_id: Optional[str] = None
     side: Optional[str] = None
@@ -25,7 +25,7 @@ class OrderResult:
 
 @dataclass
 class OrderInfo:
-    """標準化訂單信息"""
+    """标准化订单信息"""
     order_id: str
     side: str
     size: Decimal
@@ -37,7 +37,7 @@ class OrderInfo:
 
 @dataclass
 class TickerInfo:
-    """標準化行情信息"""
+    """标准化行情信息"""
     symbol: str
     last_price: Decimal
     bid_price: Optional[Decimal] = None
@@ -49,7 +49,7 @@ class TickerInfo:
 
 @dataclass
 class BalanceInfo:
-    """標準化餘額信息"""
+    """标准化余额信息"""
     asset: str
     available: Decimal
     locked: Decimal
@@ -58,7 +58,7 @@ class BalanceInfo:
 
 @dataclass
 class PositionInfo:
-    """標準化持倉信息"""
+    """标准化持仓信息"""
     symbol: str
     side: str  # "LONG", "SHORT", "FLAT"
     size: Decimal
@@ -70,7 +70,7 @@ class PositionInfo:
 
 @dataclass
 class MarketInfo:
-    """標準化市場信息"""
+    """标准化市场信息"""
     symbol: str
     base_asset: str
     quote_asset: str
@@ -84,14 +84,14 @@ class MarketInfo:
 
 @dataclass
 class OrderBookLevel:
-    """標準化訂單簿層級"""
+    """标准化订单簿层级"""
     price: Decimal
     quantity: Decimal
 
 
 @dataclass
 class OrderBookInfo:
-    """標準化訂單簿信息"""
+    """标准化订单簿信息"""
     symbol: str
     bids: List[OrderBookLevel]
     asks: List[OrderBookLevel]
@@ -100,7 +100,7 @@ class OrderBookInfo:
 
 @dataclass
 class KlineInfo:
-    """標準化K線信息"""
+    """标准化K线信息"""
     open_time: int
     close_time: int
     open_price: Decimal
@@ -113,7 +113,7 @@ class KlineInfo:
 
 @dataclass
 class TradeInfo:
-    """標準化交易信息"""
+    """标准化交易信息"""
     trade_id: str
     order_id: str
     symbol: str
@@ -126,10 +126,10 @@ class TradeInfo:
     is_maker: bool
 
 
-# 統一的響應格式
+# 统一的响应格式
 @dataclass
 class ApiResponse:
-    """標準化API響應格式"""
+    """标准化API响应格式"""
     success: bool
     data: Optional[Any] = None
     error_code: Optional[str] = None
@@ -207,7 +207,7 @@ class BaseExchangeClient(ABC):
 
     # ---- Generic high-level methods with standardized return types ----
     def get_deposit_address(self, blockchain: str) -> ApiResponse:
-        """獲取充值地址
+        """获取充值地址
         
         Returns:
             ApiResponse with data containing address info
@@ -215,7 +215,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_balance(self) -> ApiResponse:
-        """獲取賬户餘額
+        """获取账户余额
         
         Returns:
             ApiResponse with data: List[BalanceInfo]
@@ -223,7 +223,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_collateral(self, subaccount_id: Optional[str] = None) -> ApiResponse:
-        """獲取抵押品餘額
+        """获取抵押品余额
         
         Returns:
             ApiResponse with data: List[BalanceInfo]
@@ -231,7 +231,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def execute_order(self, order_details: Dict[str, Any]) -> ApiResponse:
-        """執行訂單
+        """执行订单
         
         Returns:
             ApiResponse with data: OrderResult
@@ -239,7 +239,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_open_orders(self, symbol: Optional[str] = None) -> ApiResponse:
-        """獲取開放訂單
+        """获取开放订单
         
         Returns:
             ApiResponse with data: List[OrderInfo]
@@ -247,7 +247,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def cancel_all_orders(self, symbol: str) -> ApiResponse:
-        """取消所有訂單
+        """取消所有订单
         
         Returns:
             ApiResponse with data containing cancellation info
@@ -255,7 +255,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def cancel_order(self, order_id: str, symbol: str) -> ApiResponse:
-        """取消指定訂單
+        """取消指定订单
         
         Returns:
             ApiResponse with data containing cancellation info
@@ -263,7 +263,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_ticker(self, symbol: str) -> ApiResponse:
-        """獲取行情信息
+        """获取行情信息
         
         Returns:
             ApiResponse with data: TickerInfo
@@ -271,7 +271,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_markets(self) -> ApiResponse:
-        """獲取市場信息
+        """获取市场信息
         
         Returns:
             ApiResponse with data: List[MarketInfo]
@@ -279,7 +279,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_order_book(self, symbol: str, limit: int = 20) -> ApiResponse:
-        """獲取訂單簿
+        """获取订单簿
         
         Returns:
             ApiResponse with data: OrderBookInfo
@@ -287,7 +287,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100) -> ApiResponse:
-        """獲取成交歷史
+        """获取成交历史
         
         Returns:
             ApiResponse with data: List[TradeInfo]
@@ -295,7 +295,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> ApiResponse:
-        """獲取K線數據
+        """获取K线数据
         
         Returns:
             ApiResponse with data: List[KlineInfo]
@@ -303,7 +303,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_market_limits(self, symbol: str) -> ApiResponse:
-        """獲取市場限制信息
+        """获取市场限制信息
         
         Returns:
             ApiResponse with data: MarketInfo
@@ -311,7 +311,7 @@ class BaseExchangeClient(ABC):
         return ApiResponse(success=False, error_message="Not implemented")
 
     def get_positions(self, symbol: Optional[str] = None) -> ApiResponse:
-        """獲取持倉信息
+        """获取持仓信息
         
         Returns:
             ApiResponse with data: List[PositionInfo]
@@ -321,7 +321,7 @@ class BaseExchangeClient(ABC):
     # ---- Utility methods for format conversion ----
     def _convert_to_standardized_response(self, raw_data: Any, success: bool = True, 
                                         error_message: Optional[str] = None) -> ApiResponse:
-        """將原始響應轉換為標準化格式"""
+        """将原始响应转换为标准化格式"""
         return ApiResponse(
             success=success,
             data=raw_data if success else None,

@@ -4,7 +4,7 @@
 import os
 from dotenv import load_dotenv
 
-# 載入環境變數
+# 载入环境变数
 load_dotenv()
 
 # API配置
@@ -16,8 +16,8 @@ WS_URL = "wss://ws.backpack.exchange"
 API_VERSION = "v1"
 DEFAULT_WINDOW = "5000"
 
-# 數據庫配置
+# 数据库配置
 DB_PATH = 'orders.db'
 
-# 日誌配置
+# 日志配置
 LOG_FILE = "market_maker.log"

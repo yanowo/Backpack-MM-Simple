@@ -1,15 +1,15 @@
 """
-交互式面板包 - 提供圖形化操作界面
+交互式面板包 - 提供图形化操作界面
 """
 
 # 版本信息
 __version__ = "1.0.0"
 
-# 導出主要的類和函數
+# 导出主要的类和函数
 from panel.interactive_panel import InteractivePanel
 from panel.key_handler import KeyboardHandler
 
-# 導出設定相關的函數
+# 导出设定相关的函数
 from panel.settings import (
     get_setting,
     set_setting,
