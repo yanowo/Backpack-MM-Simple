@@ -8,6 +8,8 @@ from typing import Dict, List, Tuple, Optional, Union, Any
 from concurrent.futures import ThreadPoolExecutor
 
 from api.bp_client import BPClient
+from api.websea_client import WebseaClient
+from api.aster_client import AsterClient
 from ws_client.client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
@@ -57,8 +59,10 @@ class MarketMaker:
         # 初始化交易所客户端
         if exchange == 'backpack':
             self.client = BPClient(self.exchange_config)
-        elif exchange == 'xx':
-            ...
+        elif exchange == 'websea':
+            self.client = WebseaClient(self.exchange_config)
+        elif exchange == 'aster':
+            self.client = AsterClient(self.exchange_config)
         else:
             raise ValueError(f"不支持的交易所: {exchange}")
             
@@ -127,7 +131,12 @@ class MarketMaker:
         if exchange == 'backpack':
             self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True, proxy=self.ws_proxy)
             self.ws.connect()
-        elif exchange == 'xx':
+        elif exchange == 'websea':
+            # Websea 使用轮询方式获取订单更新
+            self.ws = None
+            # 设置订单状态更新处理器 - 使用通用回调，缩短轮询间隔以更及时捕获成交
+            self.client.setup_order_update_handler(self.on_order_update, poll_interval=1.5)
+        elif exchange == 'xxx':
             ...
             self.ws = None
         else:
@@ -294,7 +303,14 @@ class MarketMaker:
     def _initialize_websocket(self):
         """等待WebSocket連接建立並進行初始化訂閲"""
         if self.ws is None:
-            logger.info("使用 REST API 模式（無 WebSocket）")
+            logger.info("使用 REST API 模式（无 WebSocket）")
+            # 对于websea，启动订单轮询
+            if self.exchange == 'websea' and hasattr(self.client, 'start_order_polling'):
+                try:
+                    self.client.start_order_polling()
+                    logger.info("Websea订单轮询已启动")
+                except Exception as e:
+                    logger.warning(f"无法立即启动订单轮询: {e}")
             return
             
         wait_time = 0
@@ -398,8 +414,8 @@ class MarketMaker:
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
-            # 如果使用 xx 沒有 WebSocket，直接返回 True
-            if self.exchange == 'xx':
+            # 如果使用 websea、aster 或其他純 REST 交易所，直接返回 True
+            if self.exchange in ['websea', 'aster']:
                 return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
@@ -416,6 +432,11 @@ class MarketMaker:
     def _recreate_websocket(self):
         """重新創建WebSocket連接"""
         try:
+            # websea、aster 和部分自定義交易所不使用 WebSocket
+            if self.exchange in ['websea', 'xx', 'aster']:
+                logger.info(f"{self.exchange} 交易所不使用 WebSocket")
+                return True
+                
             logger.info("重新創建WebSocket連接...")
             
             # 安全關閉現有連接
@@ -587,10 +608,11 @@ class MarketMaker:
                     
                 except Exception as e:
                     logger.error(f"處理訂單成交消息時出錯: {e}")
+                    import traceback
                     traceback.print_exc()
     
     def on_order_update(self, order_data):
-        """處理所有交易所的訂單更新消息 - 統一接口"""
+        """处理所有交易所的订单更新消息 - 统一接口"""
         try:
             order_id = order_data.get('order_id')
             side = order_data.get('side', '').lower()
@@ -598,31 +620,31 @@ class MarketMaker:
             filled_size = float(order_data.get('filled_size', '0'))
             price = float(order_data.get('price', '0'))
             
-            # 簡化日誌輸出 - 只記錄重要的狀態變化
+            # 简化日志输出 - 只记录重要的状态变化
             if status in ('FILLED', 'PARTIALLY_FILLED', 'filled', 'partial_filled'):
                 if filled_size > 0:
-                    direction = "買入" if side == 'buy' else "賣出"
+                    direction = "买入" if side == 'buy' else "卖出"
                     logger.info(f"*** 成交通知: {direction} {filled_size:.3f} SOL @ {price:.3f} USDT ({status}) ***")
                 
-            # 通用處理邏輯 - 處理成交的訂單
+            # 通用处理逻辑 - 处理成交的订单
             if status in ('FILLED', 'PARTIALLY_FILLED', 'filled', 'partial_filled') and filled_size > 0:
-                # 模擬訂單成交數據格式
-                is_maker = True  # 限價單通常是 maker
+                # 模拟订单成交数据格式
+                is_maker = True  # 限价单通常是 maker
                 
-                # 準備訂單數據用於數據庫記錄
+                # 准备订单数据用于数据库记录
                 order_data_db = {
                     'order_id': order_id,
                     'symbol': self.symbol,
-                    'side': 'Bid' if side == 'buy' else 'Ask',  # 轉換為數據庫格式
+                    'side': 'Bid' if side == 'buy' else 'Ask',  # 转换为数据库格式
                     'quantity': filled_size,
                     'price': price,
                     'maker': is_maker,
-                    'fee': 0.0,  # 手續費可能需要單獨查詢
+                    'fee': 0.0,  # 手续费可能需要单独查询
                     'fee_asset': self.quote_asset,
                     'trade_type': 'market_making'
                 }
                 
-                # 更新統計
+                # 更新统计
                 if side == 'buy':
                     self.total_bought += filled_size
                     if is_maker:
@@ -644,36 +666,37 @@ class MarketMaker:
                     self.sell_trades.append((price, filled_size))
                     self.session_sell_trades.append((price, filled_size))
                 
-                # 異步插入數據庫
+                # 异步插入数据库
                 def safe_insert_order():
                     try:
                         self.db.insert_order(order_data_db)
                     except Exception as db_err:
-                        logger.error(f"插入訂單數據時出錯: {db_err}")
+                        logger.error(f"插入订单数据时出错: {db_err}")
                 
                 self.executor.submit(safe_insert_order)
                 
-                # 更新利潤計算
+                # 更新利润计算
                 def update_profit():
                     try:
                         profit = self._calculate_db_profit()
                         self.total_profit = profit
                     except Exception as e:
-                        logger.error(f"更新利潤計算時出錯: {e}")
+                        logger.error(f"更新利润计算时出错: {e}")
                 
                 self.executor.submit(update_profit)
                 
-                # 執行統計報告
+                # 执行统计报告
                 session_profit = self._calculate_session_profit()
                 
-                logger.info(f"累計利潤: {self.total_profit:.8f} {self.quote_asset}")
-                logger.info(f"本次執行利潤: {session_profit:.8f} {self.quote_asset}")
-                logger.info(f"總買入: {self.total_bought} {self.base_asset}, 總賣出: {self.total_sold} {self.base_asset}")
+                logger.info(f"累计利润: {self.total_profit:.8f} {self.quote_asset}")
+                logger.info(f"本次执行利润: {session_profit:.8f} {self.quote_asset}")
+                logger.info(f"总买入: {self.total_bought} {self.base_asset}, 总卖出: {self.total_sold} {self.base_asset}")
                 
                 self.trades_executed += 1
                 
         except Exception as e:
-            logger.error(f"處理訂單更新時出錯: {e}")
+            logger.error(f"处理订单更新时出错: {e}")
+            import traceback
             traceback.print_exc()
     
     def _calculate_db_profit(self):
@@ -947,27 +970,41 @@ class MarketMaker:
             logger.info(f"使用的價差: {actual_spread_pct:.4f}% (目標: {spread_percentage}%), 絕對價差: {actual_spread}")
             
             # 計算梯度訂單價格
-            buy_prices = []
-            sell_prices = []
-            
-            # 優化梯度分佈：較小的梯度以提高成交率
+            buy_prices: List[float] = []
+            sell_prices: List[float] = []
+
+            spacing_factor = 1.0  # 越大代表越分散
+            steps = max(1, self.max_orders - 1)
+
             for i in range(self.max_orders):
-                # 非線性遞增的梯度，靠近中間的訂單梯度小，越遠離中間梯度越大
-                gradient_factor = (i ** 1.5) * 1.5
-                
-                buy_adjustment = gradient_factor * self.tick_size
-                sell_adjustment = gradient_factor * self.tick_size
-                
-                buy_price = round_to_tick_size(base_buy_price - buy_adjustment, self.tick_size)
-                sell_price = round_to_tick_size(base_sell_price + sell_adjustment, self.tick_size)
-                
+                if i == 0:
+                    multiplier = 1.0
+                else:
+                    level_ratio = i / steps
+                    multiplier = 1.0 + spacing_factor * level_ratio
+
+                buy_target = mid_price - (exact_spread / 2) * multiplier
+                sell_target = mid_price + (exact_spread / 2) * multiplier
+
+                buy_price = round_to_tick_size(buy_target, self.tick_size)
+                sell_price = round_to_tick_size(sell_target, self.tick_size)
+
+                if i > 0 and buy_price >= buy_prices[-1]:
+                    buy_price = round_to_tick_size(buy_prices[-1] - self.tick_size, self.tick_size)
+
+                if i > 0 and sell_price <= sell_prices[-1]:
+                    sell_price = round_to_tick_size(sell_prices[-1] + self.tick_size, self.tick_size)
+
                 buy_prices.append(buy_price)
                 sell_prices.append(sell_price)
-            
+
             final_spread = sell_prices[0] - buy_prices[0]
             final_spread_pct = (final_spread / mid_price) * 100
             logger.info(f"最終價差: {final_spread_pct:.4f}% (最低賣價 {sell_prices[0]} - 最高買價 {buy_prices[0]} = {final_spread})")
-            
+
+            logger.debug("買單價位梯度: %s", buy_prices)
+            logger.debug("賣單價位梯度: %s", sell_prices)
+
             return buy_prices, sell_prices
         
         except Exception as e:
@@ -1234,6 +1271,7 @@ class MarketMaker:
             
             logger.info(f"計算訂單數量: 買單 {format_balance(buy_quantity)} {self.base_asset}, 賣單 {format_balance(sell_quantity)} {self.base_asset}")
         else:
+            # 真实的 SOL 数量
             buy_quantity = max(self.min_order_size, round_to_precision(self.order_quantity, self.base_precision))
             sell_quantity = max(self.min_order_size, round_to_precision(self.order_quantity, self.base_precision))
         
@@ -1320,6 +1358,7 @@ class MarketMaker:
             if isinstance(res, dict) and "error" in res:
                 logger.error(f"賣單失敗: {res['error']}")
             else:
+                # TODO 不确定这个是什么
                 logger.info(f"賣單成功: 價格 {p_used}, 數量 {qty}")
                 self.active_sell_orders.append(res)
                 self.orders_placed += 1
@@ -1626,6 +1665,14 @@ class MarketMaker:
         """執行做市策略"""
         logger.info(f"開始運行做市策略: {self.symbol}")
         logger.info(f"運行時間: {duration_seconds} 秒, 間隔: {interval_seconds} 秒")
+        
+        # 为websea启动订单轮询（如果还没有启动）
+        if self.exchange == 'websea' and hasattr(self.client, 'start_order_polling'):
+            try:
+                self.client.start_order_polling()
+                logger.info("确保Websea订单轮询已启动")
+            except Exception as e:
+                logger.debug(f"订单轮询启动状态: {e}")
         
         # 打印重平設置
         logger.info(f"重平功能: {'開啟' if self.enable_rebalance else '關閉'}")

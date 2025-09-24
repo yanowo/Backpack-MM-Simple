@@ -20,7 +20,7 @@ def parse_arguments():
     parser.add_argument('--cli', action='store_true', help='啟動命令行界面')
     
     # 基本參數
-    parser.add_argument('--exchange', type=str, choices=['backpack', 'xx'], default='backpack', help='交易所選擇 (backpack 或 xx)')
+    parser.add_argument('--exchange', type=str, choices=['backpack', 'websea', 'aster'], default='backpack', help='交易所選擇 (backpack, websea 或 aster)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--ws-proxy', type=str, help='WebSocket Proxy (可選，默認使用環境變數或配置文件)')
@@ -73,9 +73,9 @@ def main():
     
     exchange = args.exchange
     if exchange == 'backpack':
-        api_key = os.getenv('API_KEY')
-        secret_key = os.getenv('SECRET_KEY')
-        ws_proxy = os.getenv('PROXY_WEBSOCKET')
+        api_key = os.getenv('BACKPACK_KEY')
+        secret_key = os.getenv('BACKPACK_SECRET')
+        ws_proxy = os.getenv('BACKPACK_PROXY_WEBSOCKET')
         base_url = os.getenv('BASE_URL', 'https://api.backpack.work')
         exchange_config = {
             'api_key': api_key,
@@ -84,12 +84,26 @@ def main():
             'api_version': 'v1',
             'default_window': '5000'
         }
-    elif exchange == 'xx':
-        """
-        這裡是 xx 交易所的配置
-        """
+    elif exchange == 'websea':
+        api_key = os.getenv('WEBSEA_TOKEN')
+        secret_key = os.getenv('WEBSEA_SECRET')
+        ws_proxy = os.getenv('WEBSEA_PROXY_WEBSOCKET')  # 添加 ws_proxy 定义
+        base_url = os.getenv('WEBSEA_BASE_URL', 'https://coapi.websea.com')
+        exchange_config = {
+            'ticker': args.symbol,
+            'leverage': 10,
+            'is_full': 2  # 全仓模式
+        }
+    elif exchange == 'aster':
+        api_key = os.getenv('ASTER_API_KEY')
+        secret_key = os.getenv('ASTER_SECRET_KEY')
+        ws_proxy = os.getenv('ASTER_PROXY_WEBSOCKET')
+        exchange_config = {
+            'api_key': api_key,
+            'secret_key': secret_key,
+        }
     else:
-        logger.error("不支持的交易所，請選擇 'backpack' 或 'xx'")
+        logger.error("不支持的交易所，請選擇 'backpack', 'websea' 或 'aster'")
         sys.exit(1)
 
     
