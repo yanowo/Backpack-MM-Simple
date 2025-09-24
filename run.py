@@ -20,7 +20,7 @@ def parse_arguments():
     parser.add_argument('--cli', action='store_true', help='启动命令行界面')
     
     # 基本参数
-    parser.add_argument('--exchange', type=str, choices=['backpack', 'xx'], default='backpack', help='交易所选择 (backpack 或 xx)')
+    parser.add_argument('--exchange', type=str, choices=['backpack', 'websea', 'aster'], default='backpack', help='交易所選擇 (backpack, websea 或 aster)')
     parser.add_argument('--api-key', type=str, help='API Key (可选，默认使用环境变数或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可选，默认使用环境变数或配置文件)')
     parser.add_argument('--ws-proxy', type=str, help='WebSocket Proxy (可选，默认使用环境变数或配置文件)')

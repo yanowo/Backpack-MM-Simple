@@ -272,19 +272,16 @@ class PerpetualMarketMaker(MarketMaker):
 
     def _update_position_state(self) -> None:
         """更新仓位相关统计。"""
-        net = self.get_net_position()  # 现在这会从API获取实际仓位
+        net, _, position_info = self._get_position_snapshot()
         current_price = self.get_current_price()
         direction = "FLAT"
         avg_entry = 0.0
         unrealized = 0.0
-
-        # 尝试从API获取更准确的信息
-        position_info = self._get_actual_position_info()
         
         if position_info:
             # 使用API返回的精确信息
-            avg_entry = float(position_info.get("entryPrice", 0))
-            unrealized = float(position_info.get("pnlUnrealized", 0))
+            avg_entry = float(position_info.get("entryPrice", 0) or 0)
+            unrealized = float(position_info.get("pnlUnrealized", 0) or 0)
         else:
             # 使用本地计算作为备用
             if net > 0:
@@ -459,7 +456,7 @@ class PerpetualMarketMaker(MarketMaker):
         client_id: Optional[str] = None,
     ) -> bool:
         """平仓操作。"""
-        net = self.get_net_position()  # 使用API获取实际仓位
+        net, _, position_info = self._get_position_snapshot()
         if math.isclose(net, 0.0, abs_tol=self.min_order_size / 10):
             logger.info("实际仓位为零，无需平仓")
             return False
@@ -528,7 +525,7 @@ class PerpetualMarketMaker(MarketMaker):
     # ------------------------------------------------------------------
     def need_rebalance(self) -> bool:
         """判断是否需要仓位调整 (仅减仓)。"""
-        net = self.get_net_position()
+        net, current_size, _ = self._get_position_snapshot()
         current_size = abs(net)
 
         if current_size > self.max_position:
@@ -555,8 +552,7 @@ class PerpetualMarketMaker(MarketMaker):
 
     def manage_positions(self) -> bool:
         """根据持仓量状态主动调整，此函数只负责减仓以控制风险。"""
-        net = self.get_net_position()
-        current_size = abs(net)
+        net, current_size, position_info = self._get_position_snapshot()
         desired_size = self.target_position
 
         logger.debug(

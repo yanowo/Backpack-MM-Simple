@@ -402,21 +402,21 @@ class MarketMaker:
             traceback.print_exc()
     
     def check_ws_connection(self):
-        """检查并恢复WebSocket连接"""
+        """檢查並恢復WebSocket連接"""
         if not self.ws:
-            # 如果使用 xx 没有 WebSocket，直接返回 True
-            if self.exchange == 'xx':
+            # 如果使用 websea、aster 或其他純 REST 交易所，直接返回 True
+            if self.exchange in ['websea', 'aster']:
                 return True
-            logger.warning("WebSocket对象不存在，尝试重新创建...")
+            logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
-            
+
         ws_connected = self.ws.is_connected()
-        
+
         if not ws_connected and not getattr(self.ws, 'reconnecting', False):
-            logger.warning("WebSocket连接已断开，触发重连...")
-            # 使用 WebSocket 自己的重连机制
+            logger.warning("WebSocket連接已斷開，觸發重連...")
+            # 使用 WebSocket 自己的重連機制
             self.ws.check_and_reconnect_if_needed()
-        
+
         return self.ws.is_connected() if self.ws else False
     
     def _recreate_websocket(self):
