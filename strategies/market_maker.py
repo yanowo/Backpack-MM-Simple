@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from api.bp_client import BPClient
 from api.websea_client import WebseaClient
+from api.aster_client import AsterClient
 from ws_client.client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
@@ -17,7 +18,6 @@ import traceback
 
 logger = setup_logger("market_maker")
 
-def format_balance(value, decimals=8, threshold=1e-8) -> str:
 def format_balance(value, decimals=8, threshold=1e-8) -> str:
     """
     格式化餘額顯示，避免科學記號
@@ -61,8 +61,8 @@ class MarketMaker:
             self.client = BPClient(self.exchange_config)
         elif exchange == 'websea':
             self.client = WebseaClient(self.exchange_config)
-        elif exchange == 'xxx':
-            ...
+        elif exchange == 'aster':
+            self.client = AsterClient(self.exchange_config)
         else:
             raise ValueError(f"不支持的交易所: {exchange}")
             
@@ -414,8 +414,8 @@ class MarketMaker:
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
-            # 如果使用 websea 或 xx 没有 WebSocket，直接返回 True
-            if self.exchange in ['websea', 'xx']:
+            # 如果使用 websea、aster 或其他純 REST 交易所，直接返回 True
+            if self.exchange in ['websea', 'aster']:
                 return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
@@ -432,8 +432,8 @@ class MarketMaker:
     def _recreate_websocket(self):
         """重新創建WebSocket連接"""
         try:
-            # websea 和 xx 不使用 WebSocket
-            if self.exchange in ['websea', 'xx']:
+            # websea、aster 和部分自定義交易所不使用 WebSocket
+            if self.exchange in ['websea', 'xx', 'aster']:
                 logger.info(f"{self.exchange} 交易所不使用 WebSocket")
                 return True
                 
@@ -970,27 +970,41 @@ class MarketMaker:
             logger.info(f"使用的價差: {actual_spread_pct:.4f}% (目標: {spread_percentage}%), 絕對價差: {actual_spread}")
             
             # 計算梯度訂單價格
-            buy_prices = []
-            sell_prices = []
-            
-            # 優化梯度分佈：較小的梯度以提高成交率
+            buy_prices: List[float] = []
+            sell_prices: List[float] = []
+
+            spacing_factor = 1.0  # 越大代表越分散
+            steps = max(1, self.max_orders - 1)
+
             for i in range(self.max_orders):
-                # 非線性遞增的梯度，靠近中間的訂單梯度小，越遠離中間梯度越大
-                gradient_factor = (i ** 1.5) * 1.5
-                
-                buy_adjustment = gradient_factor * self.tick_size
-                sell_adjustment = gradient_factor * self.tick_size
-                
-                buy_price = round_to_tick_size(base_buy_price - buy_adjustment, self.tick_size)
-                sell_price = round_to_tick_size(base_sell_price + sell_adjustment, self.tick_size)
-                
+                if i == 0:
+                    multiplier = 1.0
+                else:
+                    level_ratio = i / steps
+                    multiplier = 1.0 + spacing_factor * level_ratio
+
+                buy_target = mid_price - (exact_spread / 2) * multiplier
+                sell_target = mid_price + (exact_spread / 2) * multiplier
+
+                buy_price = round_to_tick_size(buy_target, self.tick_size)
+                sell_price = round_to_tick_size(sell_target, self.tick_size)
+
+                if i > 0 and buy_price >= buy_prices[-1]:
+                    buy_price = round_to_tick_size(buy_prices[-1] - self.tick_size, self.tick_size)
+
+                if i > 0 and sell_price <= sell_prices[-1]:
+                    sell_price = round_to_tick_size(sell_prices[-1] + self.tick_size, self.tick_size)
+
                 buy_prices.append(buy_price)
                 sell_prices.append(sell_price)
-            
+
             final_spread = sell_prices[0] - buy_prices[0]
             final_spread_pct = (final_spread / mid_price) * 100
             logger.info(f"最終價差: {final_spread_pct:.4f}% (最低賣價 {sell_prices[0]} - 最高買價 {buy_prices[0]} = {final_spread})")
-            
+
+            logger.debug("買單價位梯度: %s", buy_prices)
+            logger.debug("賣單價位梯度: %s", sell_prices)
+
             return buy_prices, sell_prices
         
         except Exception as e:
