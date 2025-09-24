@@ -1,53 +1,52 @@
 # Backpack Exchange 做市交易程序
 
-這是一個針對 Backpack Exchange 的加密貨幣做市交易程序。該程序提供自動化做市功能，通過維持買賣價差賺取利潤。
+针对加密货币做市交易的通用架构。该程序提供自动化做市功能，通过维持买卖价差赚取利润。
 
-Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.exchange/refer/yan)
+Twitter：[0xYuCry](https://x.com/0xYuCry)
 
-Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
+## 功能特点
 
-**使用本程式運行 MM 策略 可獲得 10~30% 自返傭 (每週由官方自動發放)**
-
-## 功能特點
-
-- **多交易所架構**：支援 Backpack、未來可擴展至其他交易所
-- **自動化做市策略**：智能價差管理和訂單調整
-- **永續合約做市**：倉位風險管理與風險中性機制
-- **智能重平衡系統**：自動維持資產配置比例
-- **增強日誌系統**：詳細的市場狀態和策略追蹤
-- **WebSocket 實時連接**：即時市場數據和訂單更新
-- **命令行界面**：靈活的參數配置和策略執行
+- **多交易所架构**：支援 Backpack、未来可扩展至其他交易所
+- **自动化做市策略**：智能价差管理和订单调整
+- **永续合约做市**：仓位风险管理与风险中性机制
+- **智能重平衡系统**：自动维持资产配置比例
+- **增强日志系统**：详细的市场状态和策略追踪
+- **WebSocket 实时连接**：即时市场数据和订单更新
+- **命令行界面**：灵活的参数配置和策略执行
 - **交互式面板**：用户友好的操作介面
 
-*2025.09.22 更新：新增多交易所架構和倉位管理優化，增強日誌系統提供更清晰的市場狀態追蹤。*
+*2025.09.23 更新：新增多 Aster 交易所支持*
+*2025.09.22 更新：新增多交易所架构和仓位管理优化，增强日志系统提供更清晰的市场状态追踪。*
 
-## 項目結構
+## 项目结构
 
 ```
 lemon_trader/
 │
-├── api/                  # API相關模塊
+├── api/                  # API相关模块
 │   ├── __init__.py
-│   ├── auth.py           # API認證和簽名相關
-│   ├── base_client.py    # 抽象基礎客户端 (支持繼承開發接入任意交易所)
-│   └── bp_client.py      # Backpack Exchange 客户端
+│   ├── auth.py           # API认证和签名相关
+│   ├── base_client.py    # 抽象基础客户端 (支持继承开发接入任意交易所)
+│   ├── bp_client.py      # Backpack Exchange 客户端
+│   ├── aster_client.py   # aster 交易所客户端
+│   └── websea_client.py  # websea 交易所客户端
 │
-├── websocket/            # WebSocket模塊
+├── websocket/            # WebSocket模块
 │   ├── __init__.py
 │   └── client.py         # WebSocket客户端
 │
-├── database/             # 數據庫模塊
+├── database/             # 数据库模块
 │   ├── __init__.py
-│   └── db.py             # 數據庫操作
+│   └── db.py             # 数据库操作
 │
-├── strategies/           # 策略模塊
+├── strategies/           # 策略模块
 │   ├── __init__.py
-│   ├── market_maker.py   # 做市策略
-│   └── perp_market_maker.py   # 合約做市策略
+│   ├── market_maker.py   # Backpack 永续做市策略
+│   └── perp_market_maker.py   # 永续合约做市策略
 │
-├── utils/                # 工具模塊
+├── utils/                # 工具模块
 │   ├── __init__.py
-│   └── helpers.py        # 輔助函數
+│   └── helpers.py        # 辅助函数
 │
 ├── cli/                  # 命令行界面
 │   ├── __init__.py
@@ -55,284 +54,178 @@ lemon_trader/
 │
 ├── panel/                # 交互式面板
 │   ├── __init__.py
-│   └── interactive_panel.py  # 交互式面板實現
+│   └── interactive_panel.py  # 交互式面板实现
 │
 ├── config.py             # 配置文件
-├── logger.py             # 日誌配置
-├── run.py                # 統一入口文件
-└── README.md             # 説明文檔
+├── logger.py             # 日志配置
+├── run.py                # 统一入口文件
+└── README.md             # 说明文档
 ```
 
-## 環境要求
+## 环境要求
 
 - Python 3.8 或更高版本
-- 所需第三方庫：
-  - nacl (用於API簽名)
+- 所需第三方库：
+  - nacl (用于API签名)
   - requests
   - websocket-client
   - numpy
   - python-dotenv
 
-## 安裝
+## 安装
 
-1. 克隆或下載此代碼庫:
+1. 克隆或下载此代码库:
 
 ```bash
-git clone https://github.com/yanowo/Backpack-MM-Simple.git
-cd Backpack-MM-Simple
+git clone https://github.com/SoYuCry/MarketMakerForCrypto.git
+cd MarketMakerForCrypto
 ```
 
-2. 安裝依賴:
+2. 安装依赖:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. 設置環境變數:
+3. 设置环境变数:
 
-創建 `.env` 文件並添加:
+复制 `.env.example` 为 `.env` 并添加:
 
 ```
-API_KEY=your_api_key
-SECRET_KEY=your_secret_key
-PROXY_WEBSOCKET=http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
+# Backpack Exchange
+BACKPACK_KEY=your_backpack_api_key
+BACKPACK_SECRET=your_backpack_secret_key
+BACKPACK_PROXY_WEBSOCKET=
+BASE_URL=https://api.backpack.work
+
+# Websea Exchange
+WEBSEA_TOKEN=your_websea_token
+WEBSEA_SECRET=your_websea_secret
+WEBSEA_BASE_URL=https://coapi.websea.com
+
+# Aster Exchange
+ASTER_API_KEY=your_aster_api_key
+ASTER_SECRET_KEY=your_aster_secret_key
 ```
 
 ## 使用方法
 
-### 統一入口 (推薦)
-
 ```bash
-# 啟動交互式面板
-python run.py --panel
 
-# 啟動命令行界面 (推薦)
-python run.py --cli  
+### 永续做市运行示例
 
-# 直接運行做市策略
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
+#### Backpack 永续做市
+```bash
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.05 \
+  --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 \
+  --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
 ```
 
-### 命令行參數
+#### Aster 永续做市
+```bash
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.05 \
+  --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 \
+  --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
+```
 
-#### 基本參數
-- `--api-key`: API 密鑰 (可選，默認使用環境變數)
-- `--secret-key`: API 密鑰 (可選，默認使用環境變數)
-- `--exchange`: 交易所選擇 (默認: backpack)
-- `--ws-proxy`: Websocket 代理 (可選，默認使用環境變數)
-- `--cli`: 啟動命令行界面
-- `--panel`: 啟動交互式面板
+### 命令行参数
 
-#### 做市參數
-- `--symbol`: 交易對 (例如: SOL_USDC)
-- `--spread`: 價差百分比 (例如: 0.5)
-- `--quantity`: 訂單數量 (可選)
-- `--max-orders`: 每側最大訂單數量 (默認: 3)
-- `--duration`: 運行時間（秒）(默認: 3600)
-- `--interval`: 更新間隔（秒）(默認: 60)
-- `--market-type`: 市場類型 (`spot` 或 `perp`)
-- `--target-position`: 永續合約目標淨倉位 (僅 `perp` 模式)
-- `--max-position`: 永續合約最大允許淨倉 (僅 `perp` 模式)
-- `--position-threshold`: 永續倉位調整觸發值 (僅 `perp` 模式)
-- `--inventory-skew`: 永續做市報價偏移係數 (0-1，僅 `perp` 模式)
+#### 基本参数
+- `--api-key`: API 密钥 (可选，默认使用环境变数)
+- `--secret-key`: API 密钥 (可选，默认使用环境变数)
+- `--exchange`: 交易所选择 (默认: backpack)
+- `--ws-proxy`: Websocket 代理 (可选，默认使用环境变数)
+- `--cli`: 启动命令行界面
+- `--panel`: 启动交互式面板
 
-#### 重平設置參數
-- `--enable-rebalance`: 開啟重平功能
-- `--disable-rebalance`: 關閉重平功能
-- `--base-asset-target`: 基礎資產目標比例 (0-100，默認: 30)
-- `--rebalance-threshold`: 重平觸發閾值 (>0，默認: 15)
+#### 做市参数
+- `--symbol`: 交易对 (仅永续，例如: SOL_USDC_PERP)
+- `--spread`: 价差百分比 (例如: 0.5)
+- `--quantity`: 订单数量 (可选)
+- `--max-orders`: 每侧最大订单数量 (默认: 3)
+- `--duration`: 运行时间（秒）(默认: 3600)
+- `--interval`: 更新间隔（秒）(默认: 60)
+- `--market-type`: 市场类型 (`spot` 或 `perp`)
+- `--target-position`: 永续合约目标净仓位 (仅 `perp` 模式)
+- `--max-position`: 永续合约最大允许净仓 (仅 `perp` 模式)
+- `--position-threshold`: 永续仓位调整触发值 (仅 `perp` 模式)
+- `--inventory-skew`: 永续做市报价偏移系数 (0-1，仅 `perp` 模式)
 
-### 永續合約做市
+#### 重平设置参数
+- `--enable-rebalance`: 开启重平功能
+- `--disable-rebalance`: 关闭重平功能
+- `--base-asset-target`: 基础资产目标比例 (0-100，默认: 30)
+- `--rebalance-threshold`: 重平触发阈值 (>0，默认: 15)
+
+### 永续合约做市
 
 
-#### 倉位管理邏輯優化
+#### 仓位管理逻辑优化
 
-| 當前倉位 | 目標倉位 | 閾值 | 最大倉位 | 執行動作 |
+| 当前仓位 | 目标仓位 | 阈值 | 最大仓位 | 执行动作 |
 |---------|---------|------|---------|---------|
-| 0.1 SOL | 0 SOL | 0.2 SOL | 0.4 SOL | 無操作（在目標範圍內） |
-| 0.25 SOL | 0 SOL | 0.2 SOL | 0.4 SOL | 減倉 0.05 SOL（只平掉超出閾值線的部分） |
-| 0.5 SOL | 0 SOL | 0.2 SOL | 0.4 SOL | 風控平倉 0.1 SOL（降到最大倉位限制內） |
+| 0.1 SOL | 0 SOL | 0.2 SOL | 0.4 SOL | 无操作（在目标范围内） |
+| 0.25 SOL | 0 SOL | 0.2 SOL | 0.4 SOL | 减仓 0.05 SOL（只平掉超出阈值线的部分） |
+| 0.5 SOL | 0 SOL | 0.2 SOL | 0.4 SOL | 风控平仓 0.1 SOL（降到最大仓位限制内） |
 
-#### 增強日誌輸出範例
+#### 增强日志输出范例
 
 ```
-=== 市場狀態 ===
-盤口: Bid 239.379 | Ask 239.447 | 價差 0.068 (0.028%)
-中間價: 239.408
-持倉: 空頭 6.000 SOL | 目標: 1.0 | 上限: 1.0
+=== 市场状态 ===
+盘口: Bid 239.379 | Ask 239.447 | 价差 0.068 (0.028%)
+中间价: 239.408
+持仓: 空头 6.000 SOL | 目标: 1.0 | 上限: 1.0
 
-=== 價格計算 ===
-原始掛單: 買 238.800 | 賣 239.996
-偏移計算: 淨持倉 -6.000 | 偏移係數 0.00 | 偏移量 0.0000
-調整後掛單: 買 238.800 | 賣 239.996
+=== 价格计算 ===
+原始挂单: 买 238.800 | 卖 239.996
+偏移计算: 净持仓 -6.000 | 偏移系数 0.00 | 偏移量 0.0000
+调整后挂单: 买 238.800 | 卖 239.996
 
-=== 本次執行總結 ===
-成交: 買入 0.200 SOL | 賣出 0.150 SOL
-本次盈虧: 2.4500 USDT (手續費: 0.1200)
-累計盈虧: 15.2300 USDT | 未實現: -1.8900 USDT
-活躍訂單: 買 238.800 | 賣 239.996 | 價差 1.196 (0.50%)
+=== 本次执行总结 ===
+成交: 买入 0.200 SOL | 卖出 0.150 SOL
+本次盈亏: 2.4500 USDT (手续费: 0.1200)
+累计盈亏: 15.2300 USDT | 未实现: -1.8900 USDT
+活跃订单: 买 238.800 | 卖 239.996 | 价差 1.196 (0.50%)
 ```
 
-#### 啟動永續做市範例
 
-```bash
-# 基本永續做市 (Backpack)
-python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.2 --max-orders 3 --target-position 0 --max-position 0.4 --position-threshold 0.2 --inventory-skew 0 --duration 99999999 --interval 15
-```
+#### 永续合约参数详解
 
-#### 永續合約參數詳解
+- `target_position`：**目标持仓量**（绝对值）。设置您希望维持的库存大小，策略会在持仓**超过**此目标时进行减仓，而非主动开仓达到目标。
+- `max_position`：**最大持仓量**。仓位的硬性上限，超出后会立即强制平仓，是最高优先级的风控机制。
+- `position_threshold`：**仓位调整阈值**。当 `当前持仓 > target_position + threshold` 时触发减仓操作。
+- `inventory_skew`：**风险中性系数** (0-1)。根据净仓位自动调整报价：
+  - 持有多单时：报价下移，吸引卖单成交
+  - 持有空单时：报价上移，吸引买单成交
+  - 目标：持续将净仓位推向 `0`，降低方向性风险
 
-- `target_position`：**目標持倉量**（絕對值）。設置您希望維持的庫存大小，策略會在持倉**超過**此目標時進行減倉，而非主動開倉達到目標。
-- `max_position`：**最大持倉量**。倉位的硬性上限，超出後會立即強制平倉，是最高優先級的風控機制。
-- `position_threshold`：**倉位調整閾值**。當 `當前持倉 > target_position + threshold` 時觸發減倉操作。
-- `inventory_skew`：**風險中性係數** (0-1)。根據淨倉位自動調整報價：
-  - 持有多單時：報價下移，吸引賣單成交
-  - 持有空單時：報價上移，吸引買單成交
-  - 目標：持續將淨倉位推向 `0`，降低方向性風險
 
-## 重平衡功能詳解
+## 注意事项
 
-### 什麼是重平衡？
+### 一般注意事项
+- 交易涉及风险，请谨慎使用
+- 建议先在小资金上测试策略效果
+- 定期检查交易统计以评估策略表现
 
-重平衡功能用於維持資產配置的平衡，避免因市場波動導致的資產比例失衡。例如，如果您設置基礎資產目標比例為30%，當基礎資產比例因價格波動偏離目標過多時，程序會自動執行交易來恢復平衡。
+### 重平功能注意事项
+- **手续费成本**: 重平衡会产生交易手续费，过于频繁的重平衡可能影响整体收益
+- **阈值设置**: 过低的阈值可能导致频繁重平衡；过高的阈值可能无法及时控制风险
+- **市场环境**: 根据市场波动率调整重平参数，高波动率时建议使用更保守的设置
+- **资金效率**: 确保有足够的可用余额或抵押品支持重平衡操作
+- **监控建议**: 定期检查重平衡执行情况和效果，根据需要调整参数
 
-### 重平設置參數説明
+### 最佳实践建议
 
-1. **重平功能開關**: 控制是否啟用自動重平衡
-2. **基礎資產目標比例**: 基礎資產應佔總資產的百分比 (0-100%)
-3. **重平觸發閾值**: 當實際比例偏離目標比例超過此閾值時觸發重平衡
+1. **新手用户**: 建议从默认设置开始 (30% 基础资产，15% 阈值)
+2. **保守策略**: 使用较低的基础资产比例 (20-25%) 和较低的阈值 (10-12%)
+3. **激进策略**: 可以使用较高的基础资产比例 (35-40%) 和较高的阈值 (20-25%)
+4. **测试验证**: 先在小资金上测试不同的重平设置，找到最适合的参数组合
 
-### 重平設置建議
+## 技术架构
 
-根據不同的市場環境，建議使用不同的重平設置：以 SOL 為例
+程式采用模组化设计，支援多交易所扩展：
 
-#### 高波動率市場 (波動率 > 5%)
-```bash
---base-asset-target 20 --rebalance-threshold 10
-```
-- 基礎資產比例: 20-25% (降低風險暴露)
-- 重平閾值: 10-12% (更頻繁重平衡)
-
-#### 中等波動率市場 (波動率 2-5%)
-```bash
---base-asset-target 30 --rebalance-threshold 15
-```
-- 基礎資產比例: 25-35% (標準配置)
-- 重平閾值: 12-18% (適中頻率)
-
-#### 低波動率市場 (波動率 < 2%)
-```bash
---base-asset-target 35 --rebalance-threshold 20
-```
-- 基礎資產比例: 30-40% (可承受更高暴露)
-- 重平閾值: 15-25% (較少重平衡)
-
-### 重平計算示例
-
-假設您設置：
-- 總資產: 1000 USDC
-- 基礎資產目標比例: 30% (SOL)
-- 重平觸發閾值: 15%
-
-**相當於:**
-- 基礎資產 SOL 價值: 300 USDC (30%)
-- 報價資產 USDC 價值: 700 USDC (70%)
-
-**觸發重平衡的情況:**
-- 當 SOL 價值 > 450 USDC (偏差 > 150 USDC = 15%) → 賣出 SOL
-- 當 SOL 價值 < 150 USDC (偏差 > 150 USDC = 15%) → 買入 SOL
-- 在 150-450 USDC 範圍內不會觸發重平衡
-
-## 設定保存
-
-通過面板模式修改的設定會自動保存到 `settings/panel_settings.json` 文件中，下次啟動時會自動加載。
-**注意：Panel 暫時不支援設定重平**
-
-## 運行示例
-
-### 基本做市示例
-
-```bash
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.2 --max-orders 5
-```
-
-### 開啟重平功能示例
-
-```bash
-# 標準重平設置
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.2 --enable-rebalance
-
-# 自定義重平設置
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.2 --enable-rebalance --base-asset-target 25 --rebalance-threshold 12
-
-# 高風險環境設置
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.3 --enable-rebalance --base-asset-target 20 --rebalance-threshold 10
-```
-
-### 關閉重平功能示例
-
-```bash
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.2 --disable-rebalance
-```
-
-### 長時間運行示例
-
-```bash
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.1 --duration 86400 --interval 120 --enable-rebalance --base-asset-target 30
-```
-
-### 完整參數示例
-
-```bash
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.3 --quantity 0.5 --max-orders 3 --duration 7200 --interval 60 --enable-rebalance --base-asset-target 25 --rebalance-threshold 15
-``` 
-
-## 重平功能管理
-
-### 通過 CLI 界面管理
-
-```bash
-python run.py --cli
-```
-
-在 CLI 界面中選擇：
-- `5 - 執行做市策略`: 設置完整的做市和重平參數
-- `8 - 重平設置管理`: 查看重平設置説明和測試配置
-
-### 交互式配置
-
-CLI 界面提供交互式重平配置，包括：
-- 詳細的參數説明
-- 模擬計算示例
-- 智能參數建議
-- 配置驗證
-
-## 注意事項
-
-### 一般注意事項
-- 交易涉及風險，請謹慎使用
-- 建議先在小資金上測試策略效果
-- 定期檢查交易統計以評估策略表現
-
-### 重平功能注意事項
-- **手續費成本**: 重平衡會產生交易手續費，過於頻繁的重平衡可能影響整體收益
-- **閾值設置**: 過低的閾值可能導致頻繁重平衡；過高的閾值可能無法及時控制風險
-- **市場環境**: 根據市場波動率調整重平參數，高波動率時建議使用更保守的設置
-- **資金效率**: 確保有足夠的可用餘額或抵押品支持重平衡操作
-- **監控建議**: 定期檢查重平衡執行情況和效果，根據需要調整參數
-
-### 最佳實踐建議
-
-1. **新手用户**: 建議從默認設置開始 (30% 基礎資產，15% 閾值)
-2. **保守策略**: 使用較低的基礎資產比例 (20-25%) 和較低的閾值 (10-12%)
-3. **激進策略**: 可以使用較高的基礎資產比例 (35-40%) 和較高的閾值 (20-25%)
-4. **測試驗證**: 先在小資金上測試不同的重平設置，找到最適合的參數組合
-
-## 技術架構
-
-程式採用模組化設計，支援多交易所擴展：
-
-- **Base Client 架構**：抽象基礎類別，統一不同交易所的 API 介面
-- **精確倉位管理**：只平掉超出閾值的部分，避免過度平倉風控
-- **分層日誌系統**：市場狀態、策略決策、價格計算、執行結果四層資訊
-- **相容性設計**：支援多種 API 回應格式，強化錯誤處理機制
+- **Base Client 架构**：抽象基础类别，统一不同交易所的 API 介面
+- **精确仓位管理**：只平掉超出阈值的部分，避免过度平仓风控
+- **分层日志系统**：市场状态、策略决策、价格计算、执行结果四层资讯
+- **相容性设计**：支援多种 API 回应格式，强化错误处理机制

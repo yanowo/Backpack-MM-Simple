@@ -1646,6 +1646,13 @@ class MarketMaker:
         """执行做市策略"""
         logger.info(f"开始运行做市策略: {self.symbol}")
         logger.info(f"运行时间: {duration_seconds} 秒, 间隔: {interval_seconds} 秒")
+        # 为websea启动订单轮询（如果还没有启动）
+        if self.exchange == 'websea' and hasattr(self.client, 'start_order_polling'):
+            try:
+                self.client.start_order_polling()
+                logger.info("确保Websea订单轮询已启动")
+            except Exception as e:
+                logger.debug(f"订单轮询启动状态: {e}")
         
         # 打印重平设置
         logger.info(f"重平功能: {'开启' if self.enable_rebalance else '关闭'}")
