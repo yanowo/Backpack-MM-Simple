@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple, Optional, Union, Any
 from concurrent.futures import ThreadPoolExecutor
 
 from api.bp_client import BPClient
+from api.aster_client import AsterClient
 from ws_client.client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
@@ -57,8 +58,8 @@ class MarketMaker:
         # 初始化交易所客户端
         if exchange == 'backpack':
             self.client = BPClient(self.exchange_config)
-        elif exchange == 'xx':
-            ...
+        elif exchange == 'aster':
+            self.client = AsterClient(self.exchange_config)
         else:
             raise ValueError(f"不支持的交易所: {exchange}")
             
@@ -398,8 +399,8 @@ class MarketMaker:
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
-            # 如果使用 xx 沒有 WebSocket，直接返回 True
-            if self.exchange == 'xx':
+            # aster 沒有 WebSocket，直接返回 True
+            if self.exchange == 'aster':
                 return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
@@ -416,7 +417,9 @@ class MarketMaker:
     def _recreate_websocket(self):
         """重新創建WebSocket連接"""
         try:
-            logger.info("重新創建WebSocket連接...")
+            if self.exchange == 'aster':
+                logger.info(f"{self.exchange} 交易所不使用 WebSocket")
+                return True
             
             # 安全關閉現有連接
             if self.ws:
