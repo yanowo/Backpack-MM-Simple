@@ -307,11 +307,12 @@ class PerpetualMarketMaker(MarketMaker):
             "quantity": str(qty),
             "side": side,
             "symbol": self.symbol,
-            "timeInForce": time_in_force if normalized_order_type == "Limit" else "IOC",
             "reduceOnly": reduce_only,
         }
 
         if normalized_order_type == "Limit":
+            # Parameter 'timeInForce' sent when not required in Aster
+            order_details["timeInForce"] = time_in_force
             if price is None:
                 raise ValueError("Limit 訂單需要提供價格")
             price_value = round_to_tick_size(price, self.tick_size)
