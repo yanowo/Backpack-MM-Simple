@@ -17,7 +17,7 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 - **增強日誌系統**：詳細的市場狀態和策略追蹤
 - **WebSocket 實時連接**：即時市場數據和訂單更新
 - **命令行界面**：靈活的參數配置和策略執行
-- **交互式面板**：用戶友善的操作介面
+- **交互式面板**：用户友善的操作介面
 
 *2025.09.25 更新：新增 Aster 交易所支援。*
 
@@ -93,7 +93,7 @@ pip install -r requirements.txt
 
 3. 設置環境變數:
 
-复制 `.env.example` 为 `.env` 并添加:
+複製 `.env.example` 為 `.env` 並添加:
 
 ```
 # Backpack Exchange
@@ -185,16 +185,12 @@ python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 
 
 ```bash
 # BackPack 永續做市
-python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.05 \
-  --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 \
-  --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.05 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
 ```
 
 ```bash
 # Aster 永續做市
-python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.05 \
-  --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 \
-  --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.05 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
 ```
 
 #### 永續合約參數詳解
