@@ -17,7 +17,9 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 - **增強日誌系統**：詳細的市場狀態和策略追蹤
 - **WebSocket 實時連接**：即時市場數據和訂單更新
 - **命令行界面**：靈活的參數配置和策略執行
-- **交互式面板**：用户友好的操作介面
+- **交互式面板**：用戶友善的操作介面
+
+*2025.09.25 更新：新增 Aster 交易所支援。*
 
 *2025.09.22 更新：新增多交易所架構和倉位管理優化，增強日誌系統提供更清晰的市場狀態追蹤。*
 
@@ -30,6 +32,7 @@ lemon_trader/
 │   ├── __init__.py
 │   ├── auth.py           # API認證和簽名相關
 │   ├── base_client.py    # 抽象基礎客户端 (支持繼承開發接入任意交易所)
+│   ├── aster_client.py   # Aster Exchange 客户端
 │   └── bp_client.py      # Backpack Exchange 客户端
 │
 ├── websocket/            # WebSocket模塊
@@ -90,14 +93,19 @@ pip install -r requirements.txt
 
 3. 設置環境變數:
 
-創建 `.env` 文件並添加:
+复制 `.env.example` 为 `.env` 并添加:
 
 ```
-API_KEY=your_api_key
-SECRET_KEY=your_secret_key
-PROXY_WEBSOCKET=http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
-```
+# Backpack Exchange
+BACKPACK_KEY=your_backpack_api_key
+BACKPACK_SECRET=your_backpack_secret_key
+BACKPACK_PROXY_WEBSOCKET=http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
+BASE_URL=https://api.backpack.work
 
+# Aster Exchange
+ASTER_API_KEY=your_aster_api_key
+ASTER_SECRET_KEY=your_aster_secret_key
+```
 ## 使用方法
 
 ### 統一入口 (推薦)
@@ -176,8 +184,17 @@ python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 
 #### 啟動永續做市範例
 
 ```bash
-# 基本永續做市 (Backpack)
-python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.2 --max-orders 3 --target-position 0 --max-position 0.4 --position-threshold 0.2 --inventory-skew 0 --duration 99999999 --interval 15
+# BackPack 永續做市
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.05 \
+  --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 \
+  --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
+```
+
+```bash
+# Aster 永續做市
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.05 \
+  --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 \
+  --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
 ```
 
 #### 永續合約參數詳解
