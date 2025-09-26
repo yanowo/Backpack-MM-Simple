@@ -2,6 +2,7 @@
 CLI命令模塊，提供命令行交互功能
 """
 import time
+import os  # 導入 os 模塊以讀取環境變數
 from datetime import datetime
 
 from api.bp_client import BPClient
@@ -252,6 +253,29 @@ def configure_rebalance_settings():
 
 def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     """執行做市策略命令"""
+    # [整合功能] 1. 增加交易所選擇
+    exchange_input = input("請選擇交易所 (backpack/aster，默認 backpack): ").strip().lower()
+    exchange = exchange_input if exchange_input in ('backpack', 'aster') else 'backpack'
+    print(f"已選擇交易所: {exchange}")
+
+    # [整合功能] 2. 根據選擇配置交易所信息
+    if exchange == 'backpack':
+        exchange_config = {
+            'api_key': api_key,
+            'secret_key': secret_key,
+            'base_url': os.getenv('BASE_URL', 'https://api.backpack.work'),
+            'api_version': 'v1',
+            'default_window': '5000'
+        }
+    elif exchange == 'aster':
+        exchange_config = {
+            'api_key': api_key,
+            'secret_key': secret_key,
+        }
+    else:
+        print("錯誤：不支持的交易所。")
+        return
+
     market_type_input = input("請選擇市場類型 (spot/perp，默認 spot): ").strip().lower()
     market_type = market_type_input if market_type_input in ("spot", "perp") else "spot"
 
@@ -317,10 +341,10 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
 
     try:
         db = Database()
-        exchange_config = {
-            'api_key': api_key,
-            'secret_key': secret_key
-        }
+        # 原有的 exchange_config 創建邏輯已被新的動態配置取代
+							   
+									
+		 
 
         if market_type == "perp":
             market_maker = PerpetualMarketMaker(
@@ -336,6 +360,8 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                 position_threshold=position_threshold,
                 inventory_skew=inventory_skew,
                 ws_proxy=ws_proxy,
+                # [整合功能] 3. 傳遞交易所參數
+                exchange=exchange,
                 exchange_config=exchange_config
             )
         else:
@@ -351,6 +377,8 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                 base_asset_target_percentage=base_asset_target_percentage,
                 rebalance_threshold=rebalance_threshold,
                 ws_proxy=ws_proxy,
+                # [整合功能] 3. 傳遞交易所參數
+                exchange=exchange,
                 exchange_config=exchange_config
             )
 
