@@ -314,7 +314,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
             position_threshold = float(threshold_input) if threshold_input else 0.1
 
             skew_input = input("倉位偏移調整係數 (0-1，默認 0.0): ").strip()
-            inventory_skew = float(skew_input) if skew_input else 0.25
+            inventory_skew = float(skew_input) if skew_input else 0.0
 
             if max_position <= 0:
                 raise ValueError("最大持倉量必須大於0")
