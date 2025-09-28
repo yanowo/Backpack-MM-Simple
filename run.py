@@ -37,6 +37,8 @@ def parse_arguments():
     parser.add_argument('--max-position', type=float, default=1.0, help='永續合約最大允許倉位(絕對值)')
     parser.add_argument('--position-threshold', type=float, default=0.1, help='永續倉位調整觸發值')
     parser.add_argument('--inventory-skew', type=float, default=0.0, help='永續倉位偏移調整係數 (0-1)')
+    parser.add_argument('--stop-loss', type=float, help='永續倉位止損觸發值 (以報價資產計價)')
+    parser.add_argument('--take-profit', type=float, help='永續倉位止盈觸發值 (以報價資產計價)')
     
     # 重平設置參數
     parser.add_argument('--enable-rebalance', action='store_true', help='開啟重平功能')
@@ -136,7 +138,6 @@ def main():
                 logger.info(f"  最大持倉量: {args.max_position}")
                 logger.info(f"  倉位觸發值: {args.position_threshold}")
                 logger.info(f"  報價偏移係數: {args.inventory_skew}")
-
                 market_maker = PerpetualMarketMaker(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -148,10 +149,17 @@ def main():
                     max_position=args.max_position,
                     position_threshold=args.position_threshold,
                     inventory_skew=args.inventory_skew,
+                    stop_loss=args.stop_loss,
+                    take_profit=args.take_profit,
                     ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config
                 )
+
+                if args.stop_loss is not None:
+                    logger.info(f"  止損閾值: {args.stop_loss} {market_maker.quote_asset}")
+                if args.take_profit is not None:
+                    logger.info(f"  止盈閾值: {args.take_profit} {market_maker.quote_asset}")
             else:
                 logger.info("啟動現貨做市模式")
                 enable_rebalance = True  # 默認開啟
