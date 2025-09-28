@@ -139,6 +139,8 @@ python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 
 - `--max-position`: 永續合約最大允許淨倉 (僅 `perp` 模式)
 - `--position-threshold`: 永續倉位調整觸發值 (僅 `perp` 模式)
 - `--inventory-skew`: 永續做市報價偏移係數 (0-1，僅 `perp` 模式)
+- `--stop-loss`: 以報價資產計價的未實現止損閾值 (僅 `perp` 模式)
+- `--take-profit`: 以報價資產計價的未實現止盈閾值 (僅 `perp` 模式)
 
 #### 重平設置參數
 - `--enable-rebalance`: 開啟重平功能
@@ -181,12 +183,12 @@ python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 
 
 ```bash
 # BackPack 永續做市
-python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.05 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.05 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 --position-threshold 0.4 --inventory-skew 0 --stop-loss 25 --take-profit 50 --duration 999999999 --interval 10
 ```
 
 ```bash
 # Aster 永續做市
-python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.05 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 --position-threshold 0.4 --inventory-skew 0 --duration 999999999 --interval 10
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.05 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 --position-threshold 0.4 --inventory-skew 0 --stop-loss 25 --take-profit 50 --duration 999999999 --interval 10
 ```
 
 #### 永續合約參數詳解
@@ -198,6 +200,19 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.05
   - 持有多單時：報價下移，吸引賣單成交
   - 持有空單時：報價上移，吸引買單成交
   - 目標：持續將淨倉位推向 `0`，降低方向性風險
+- `stop_loss`：**未實現止損閾值**。當倉位的未實現虧損達到設定值時，自動取消掛單並以市價平倉，防止虧損擴大；平倉成功後策略會立即恢復掛單。
+- `take_profit`：**未實現止盈閾值**。當倉位未實現利潤達到設定值時，自動鎖定收益並平倉退出；平倉成功後策略會持續運行，等待下一次機會。
+
+> ℹ️ 止損/止盈閾值以報價資產（如 USDC、USDT）為單位。僅當持倉存在且未實現盈虧超過設定值時才會觸發。
+
+##### 止損/止盈觸發流程示例
+
+假設您對 SOL_USDC_PERP 設置 `stop_loss=25`、`take_profit=50`：
+
+1. 當前持有 0.8 SOL 多頭倉位，未實現虧損擴大到 **-27 USDC**。
+2. 策略偵測到虧損超過 25 USDC 閾值，立即**取消所有未成交掛單**並以市價賣出平倉。
+3. 平倉成功後，日誌會提示「止損觸發，已以市價平倉」，接著策略重新計算報價並繼續掛單，整個流程無需人工介入。
+4. 若之後行情好轉並達成 `take_profit=50` 的設定，流程相同，策略會自動鎖定利潤並持續運作。
 
 ## 重平衡功能詳解
 

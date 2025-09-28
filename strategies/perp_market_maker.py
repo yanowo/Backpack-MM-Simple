@@ -31,6 +31,8 @@ class PerpetualMarketMaker(MarketMaker):
         position_threshold: float = 0.1,
         inventory_skew: float = 0.0,
         leverage: float = 1.0,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
         ws_proxy: Optional[str] = None,
         exchange: str = 'backpack',
         exchange_config: Optional[Dict[str, Any]] = None,
@@ -67,6 +69,9 @@ class PerpetualMarketMaker(MarketMaker):
         self.position_threshold = max(position_threshold, self.min_order_size)
         self.inventory_skew = max(0.0, min(1.0, inventory_skew))
         self.leverage = max(1.0, leverage)
+        self.stop_loss = abs(stop_loss) if stop_loss and stop_loss > 0 else None
+        self.take_profit = abs(take_profit) if take_profit and take_profit > 0 else None
+        self.last_protective_action: Optional[str] = None
 
         self.position_state: Dict[str, Any] = {
             "net": 0.0,
@@ -86,6 +91,19 @@ class PerpetualMarketMaker(MarketMaker):
             format_balance(self.max_position),
             format_balance(self.position_threshold),
         )
+
+        if self.stop_loss is not None:
+            logger.info(
+                "設定未實現止損觸發值: %s %s",
+                format_balance(self.stop_loss),
+                self.quote_asset,
+            )
+        if self.take_profit is not None:
+            logger.info(
+                "設定未實現止盈觸發值: %s %s",
+                format_balance(self.take_profit),
+                self.quote_asset,
+            )
         self._update_position_state()
 
     def on_ws_message(self, stream, data):
@@ -157,27 +175,38 @@ class PerpetualMarketMaker(MarketMaker):
             return self.total_bought - self.total_sold
 
     def _get_actual_position_info(self) -> Dict[str, Any]:
-        """獲取完整的倉位信息。"""
+        """獲取完整的倉位信息"""
         try:
+            # 嘗試查詢特定symbol的倉位
             result = self.client.get_positions(self.symbol)
             
+            # 如果特定symbol查詢失敗，嘗試查詢所有倉位
             if isinstance(result, dict) and "error" in result:
-                error_msg = result["error"]
-                # 404 錯誤表示沒有倉位，返回空字典
-                if "404" in error_msg or "RESOURCE_NOT_FOUND" in error_msg:
-                    logger.debug("未找到 %s 的倉位信息(404)", self.symbol)
-                    return {}
-                else:
-                    logger.error("查詢倉位信息失敗: %s", error_msg)
-                    return {}
+                logger.warning(f"特定symbol查詢失敗: {result['error']}")
+                logger.info("嘗試查詢所有倉位...")
+                result = self.client.get_positions()
                 
+                # 從所有倉位中篩選當前symbol
+                if isinstance(result, list):
+                    for pos in result:
+                        if pos.get('symbol') == self.symbol:
+                            logger.info(f"從所有倉位中找到 {self.symbol}")
+                            return pos
+                    logger.warning(f"在所有倉位中未找到 {self.symbol}")
+                    return {}
+            
             if not isinstance(result, list) or not result:
+                logger.info("API返回空倉位列表")
                 return {}
             
-            return result[0]  # 返回第一個（也是唯一的）倉位信息
+            position_data = result[0]
+            
+
+            
+            return position_data
             
         except Exception as e:
-            logger.error("獲取倉位信息時發生錯誤: %s", e)
+            logger.error(f"獲取倉位信息時發生錯誤: {e}")
             return {}
 
     def _calculate_average_short_entry(self) -> float:
@@ -267,12 +296,89 @@ class PerpetualMarketMaker(MarketMaker):
     def run(self, duration_seconds=3600, interval_seconds=60):
         """執行永續合約做市策略"""
         logger.info(f"開始運行永續合約做市策略: {self.symbol}")
-        
+
         # 重置本次執行的總成交量統計
         self.session_total_volume_quote = 0.0
-        
+
         # 調用父類的 run 方法
         super().run(duration_seconds, interval_seconds)
+
+    def check_stop_conditions(self, realized_pnl, unrealized_pnl, session_realized_pnl) -> bool:
+        """強制更新倉位狀態並檢查止損止盈"""
+        if self.stop_loss is None and self.take_profit is None:
+            return False
+
+        # 強制更新倉位狀態
+        self._update_position_state()
+        position_state = self.get_position_state()
+        
+        net = float(position_state.get("net", 0.0))
+        if math.isclose(net, 0.0, abs_tol=self.min_order_size / 10):
+            logger.debug("沒有活躍倉位，跳過止損止盈檢查")
+            return False
+
+        # 獲取未實現盈虧
+        unrealized = float(position_state.get("unrealized", 0.0))
+        
+        # 如果API未實現盈虧為0但有倉位，手動計算
+        if unrealized == 0.0 and net != 0.0:
+            current_price = self.get_current_price()
+            entry_price = float(position_state.get("avg_entry", 0.0))
+            
+            if current_price and entry_price:
+                if net > 0:  # 多頭
+                    calculated_pnl = (current_price - entry_price) * net
+                else:  # 空頭
+                    calculated_pnl = (entry_price - current_price) * abs(net)
+                
+                logger.warning(f"API未實現盈虧為0，手動計算: {calculated_pnl:.4f}")
+                unrealized = calculated_pnl
+
+        trigger_label = None
+        trigger_threshold = None
+
+        # 檢查止損止盈條件
+        if self.stop_loss is not None and unrealized <= -self.stop_loss:
+            trigger_label = "止損"
+            trigger_threshold = -self.stop_loss
+        elif self.take_profit is not None and unrealized >= self.take_profit:
+            trigger_label = "止盈"
+            trigger_threshold = self.take_profit
+
+        # 記錄檢查狀態
+        logger.info(f"止損止盈檢查: 淨倉位={net:.3f}, 未實現盈虧={unrealized:.4f}, "
+                f"止損={-self.stop_loss if self.stop_loss else 'N/A'}, "
+                f"止盈={self.take_profit if self.take_profit else 'N/A'}")
+
+        if not trigger_label:
+            return False
+
+        logger.warning(f"*** {trigger_label}條件觸發! ***")
+        logger.warning(f"未實現盈虧: {unrealized:.4f} {self.quote_asset}")
+        logger.warning(f"觸發閾值: {trigger_threshold:.4f} {self.quote_asset}")
+
+        # 執行緊急平倉
+        try:
+            logger.info("執行緊急平倉...")
+            self.cancel_existing_orders()
+            close_success = self.close_position(order_type="Market")
+
+            if close_success:
+                self.last_protective_action = (
+                    f"{trigger_label}觸發，已執行緊急平倉 "
+                    f"(未實現盈虧 {unrealized:.4f} {self.quote_asset})"
+                )
+                logger.warning(f"緊急平倉成功: {self.last_protective_action}")
+                return False  # 平倉後繼續運行
+            else:
+                self.stop_reason = f"{trigger_label}觸發但平倉失敗，請立即檢查倉位！"
+                logger.error(self.stop_reason)
+                return True  # 停止策略
+
+        except Exception as e:
+            logger.error(f"執行緊急平倉時出錯: {e}")
+            self.stop_reason = f"{trigger_label}觸發，平倉過程中出現錯誤: {e}"
+            return True
 
     # ------------------------------------------------------------------
     # 下單相關 (此處函數未變動)

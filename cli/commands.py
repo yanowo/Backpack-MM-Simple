@@ -316,12 +316,22 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
             skew_input = input("倉位偏移調整係數 (0-1，默認 0.0): ").strip()
             inventory_skew = float(skew_input) if skew_input else 0.0
 
+            stop_loss_input = input("未實現止損閾值 (報價資產金額，留空不啟用): ").strip()
+            stop_loss = float(stop_loss_input) if stop_loss_input else None
+
+            take_profit_input = input("未實現止盈閾值 (報價資產金額，留空不啟用): ").strip()
+            take_profit = float(take_profit_input) if take_profit_input else None
+
             if max_position <= 0:
                 raise ValueError("最大持倉量必須大於0")
             if position_threshold <= 0:
                 raise ValueError("倉位調整觸發值必須大於0")
             if not 0 <= inventory_skew <= 1:
                 raise ValueError("倉位偏移調整係數需介於0-1之間")
+            if stop_loss is not None and stop_loss <= 0:
+                raise ValueError("止損閾值必須大於0")
+            if take_profit is not None and take_profit <= 0:
+                raise ValueError("止盈閾值必須大於0")
         except ValueError:
             print("倉位參數輸入錯誤，取消操作")
             return
@@ -335,6 +345,8 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
         max_position = 0.0
         position_threshold = 0.0
         inventory_skew = 0.0
+        stop_loss = None
+        take_profit = None
 
     duration = int(input("請輸入運行時間(秒) (例如: 3600 表示1小時): "))
     interval = int(input("請輸入更新間隔(秒) (例如: 60 表示1分鐘): "))
@@ -359,6 +371,8 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                 max_position=max_position,
                 position_threshold=position_threshold,
                 inventory_skew=inventory_skew,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
                 ws_proxy=ws_proxy,
                 # [整合功能] 3. 傳遞交易所參數
                 exchange=exchange,

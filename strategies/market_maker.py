@@ -83,7 +83,7 @@ class MarketMaker:
         self.session_maker_sell_volume = 0.0
         self.session_taker_buy_volume = 0.0
         self.session_taker_sell_volume = 0.0
-        
+
         # 初始化市場限制
         self.market_limits = self.client.get_market_limits(symbol)
         if not self.market_limits:
@@ -115,12 +115,16 @@ class MarketMaker:
         # 交易記錄 - 用於計算利潤
         self.buy_trades = []
         self.sell_trades = []
-        
+
         # 利潤統計
         self.total_profit = 0
         self.trades_executed = 0
         self.orders_placed = 0
         self.orders_cancelled = 0
+
+        # 風控狀態
+        self._stop_trading = False
+        self.stop_reason: Optional[str] = None
 
         # 添加代理參數
         self.ws_proxy = ws_proxy
@@ -1624,7 +1628,23 @@ class MarketMaker:
         if f"account.orderUpdate.{self.symbol}" not in self.ws.subscriptions:
             logger.info("重新訂閲私有訂單更新流...")
             self.subscribe_order_updates()
-    
+
+    def check_stop_conditions(self, realized_pnl, unrealized_pnl, session_realized_pnl) -> bool:
+        """檢查是否觸發提前停止條件。
+
+        基類默認不啟用任何風控條件，返回 ``False``。
+
+        Args:
+            realized_pnl (float): 累計已實現盈虧。
+            unrealized_pnl (float): 未實現盈虧。
+            session_realized_pnl (float): 本次執行的已實現盈虧。
+
+        Returns:
+            bool: 是否應該提前停止策略。
+        """
+
+        return False
+
     def run(self, duration_seconds=3600, interval_seconds=60):
         """執行做市策略"""
         logger.info(f"開始運行做市策略: {self.symbol}")
@@ -1726,13 +1746,20 @@ class MarketMaker:
                 logger.info(f"本次執行已實現利潤: {session_realized_pnl:.8f} {self.quote_asset}")
                 logger.info(f"本次執行手續費: {session_fees:.8f} {self.quote_asset}")
                 logger.info(f"本次執行凈利潤: {session_net_pnl:.8f} {self.quote_asset}")
-                
+
+                if self.check_stop_conditions(realized_pnl, unrealized_pnl, session_realized_pnl):
+                    self._stop_trading = True
+                    logger.warning("觸發風控條件，提前結束策略迭代")
+                    break
+
                 wait_time = interval_seconds
                 logger.info(f"等待 {wait_time} 秒後進行下一次迭代...")
                 time.sleep(wait_time)
-                
+
             # 結束運行時打印最終報表
             logger.info("\n=== 做市策略運行結束 ===")
+            if self._stop_trading and self.stop_reason:
+                logger.warning(f"提前停止原因: {self.stop_reason}")
             self.print_trading_stats()
             
             # 打印本次執行的最終統計摘要
