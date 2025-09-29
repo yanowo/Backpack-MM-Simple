@@ -69,7 +69,7 @@ class PerpetualMarketMaker(MarketMaker):
         self.position_threshold = max(position_threshold, self.min_order_size)
         self.inventory_skew = max(0.0, min(1.0, inventory_skew))
         self.leverage = max(1.0, leverage)
-        self.stop_loss = abs(stop_loss) if stop_loss and stop_loss > 0 else None
+        self.stop_loss = abs(stop_loss) if stop_loss not in (None, 0) else None
         self.take_profit = abs(take_profit) if take_profit and take_profit > 0 else None
         self.last_protective_action: Optional[str] = None
 
