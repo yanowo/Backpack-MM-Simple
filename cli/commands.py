@@ -2,10 +2,12 @@
 CLI命令模塊，提供命令行交互功能
 """
 import time
-import os  # 導入 os 模塊以讀取環境變數
+import os
+from typing import Optional
 from datetime import datetime
 
 from api.bp_client import BPClient
+from api.aster_client import AsterClient
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -19,19 +21,66 @@ logger = setup_logger("cli")
 # 緩存客户端實例以提高性能
 _client_cache = {}
 
-def _get_client(api_key=None, secret_key=None):
+def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: Optional[str]):
+    """根據交易所解析並返回對應的 API/Secret Key。"""
+    exchange = (exchange or "backpack").lower()
+
+    if exchange == "aster":
+        api_candidates = [
+            os.getenv("ASTER_API_KEY"),
+            os.getenv("ASTER_KEY"),
+        ]
+        secret_candidates = [
+            os.getenv("ASTER_SECRET_KEY"),
+            os.getenv("ASTER_SECRET"),
+        ]
+    else:
+        api_candidates = [
+            os.getenv("BACKPACK_KEY"),
+            os.getenv("API_KEY"),
+        ]
+        secret_candidates = [
+            os.getenv("BACKPACK_SECRET"),
+            os.getenv("SECRET_KEY"),
+        ]
+
+    resolved_api_key = next((value for value in api_candidates if value), None) or api_key
+    resolved_secret_key = next((value for value in secret_candidates if value), None) or secret_key
+
+    return resolved_api_key, resolved_secret_key
+
+
+def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_config=None):
     """獲取緩存的客户端實例，避免重複創建"""
-    # 為無認證的公開API調用創建一個通用客户端
-    if api_key is None and secret_key is None:
-        cache_key = "public"
-        if cache_key not in _client_cache:
-            _client_cache[cache_key] = BPClient({})
-        return _client_cache[cache_key]
-    
-    # 為認證API調用創建特定的客户端
-    cache_key = f"{api_key}_{secret_key}"
+    exchange = (exchange or 'backpack').lower()
+    if exchange not in ('backpack', 'aster'):
+        raise ValueError(f"不支持的交易所: {exchange}")
+
+    config = dict(exchange_config or {})
+    config_api_key = api_key or config.get('api_key')
+    config_secret_key = secret_key or config.get('secret_key')
+
+    if config_api_key:
+        config['api_key'] = config_api_key
+    else:
+        config.pop('api_key', None)
+
+    if config_secret_key:
+        config['secret_key'] = config_secret_key
+    else:
+        config.pop('secret_key', None)
+
+    cache_suffix = (
+        f"{config.get('api_key', '')}_{config.get('secret_key', '')}"
+        if config.get('api_key') or config.get('secret_key')
+        else 'public'
+    )
+    cache_key = f"{exchange}:{cache_suffix}"
+
     if cache_key not in _client_cache:
-        _client_cache[cache_key] = BPClient({'api_key': api_key, 'secret_key': secret_key})
+        client_cls = BPClient if exchange == 'backpack' else AsterClient
+        _client_cache[cache_key] = client_cls(config)
+
     return _client_cache[cache_key]
 
 
@@ -259,6 +308,12 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     print(f"已選擇交易所: {exchange}")
 
     # [整合功能] 2. 根據選擇配置交易所信息
+    api_key, secret_key = _resolve_api_credentials(exchange, api_key, secret_key)
+
+    if not api_key or not secret_key:
+        print("錯誤：未找到對應交易所的 API Key 或 Secret Key，請先設置環境變數或配置檔案。")
+        return
+
     if exchange == 'backpack':
         exchange_config = {
             'api_key': api_key,
@@ -280,22 +335,20 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     market_type = market_type_input if market_type_input in ("spot", "perp") else "spot"
 
     symbol = input("請輸入要做市的交易對 (例如: SOL_USDC): ")
-    markets_info = _get_client().get_markets()
-    selected_market = None
-    if isinstance(markets_info, list):
-        for market in markets_info:
-            if market.get('symbol') == symbol:
-                selected_market = market
-                break
-
-    if not selected_market:
+    client = _get_client(exchange=exchange, exchange_config=exchange_config)
+    market_limits = client.get_market_limits(symbol)
+    if not market_limits:
         print(f"交易對 {symbol} 不存在或不可交易")
         return
 
+    base_asset = market_limits.get('base_asset') or symbol
+    quote_asset = market_limits.get('quote_asset') or ''
+    market_desc = f"{symbol}" if not quote_asset else f"{symbol} ({base_asset}/{quote_asset})"
+
     if market_type == "spot":
-        print(f"已選擇現貨市場 {symbol}")
+        print(f"已選擇現貨市場 {market_desc}")
     else:
-        print(f"已選擇永續合約市場 {symbol}")
+        print(f"已選擇永續合約市場 {market_desc}")
 
     spread_percentage = float(input("請輸入價差百分比 (例如: 0.5 表示0.5%): "))
     quantity_input = input("請輸入每個訂單的數量 (留空則自動根據餘額計算): ")
