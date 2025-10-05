@@ -11,6 +11,7 @@ from api.auth import create_signature
 from api.bp_client import BPClient
 from utils.helpers import calculate_volatility
 from logger import setup_logger
+from urllib.parse import urlparse
 
 logger = setup_logger("backpack_ws")
 
@@ -178,41 +179,46 @@ class BackpackWebSocket:
     def ws_run_forever(self):
         """WebSocket運行循環 - 修復版本"""
         try:
-            # 確保在運行前檢查socket狀態
             if hasattr(self.ws, 'sock') and self.ws.sock and self.ws.sock.connected:
                 logger.debug("發現socket已經打開，跳過run_forever")
                 return
 
-            proxy_type = None
-            http_proxy_auth = None
             http_proxy_host = None
             http_proxy_port = None
-            
-            if self.proxy and 3 <= len(self.proxy.split(":")) <= 4:
-                arrs = self.proxy.split(":")
-                proxy_type = arrs[0]
-                arrs[1] = arrs[1][2:]  # 去掉 //
-                if len(arrs) == 3:
-                    http_proxy_host = arrs[1]
-                else:
-                    password, http_proxy_host = arrs[2].split("@")
-                    http_proxy_auth = (arrs[1], password)
-                http_proxy_port = arrs[-1]
+            http_proxy_auth = None
+            proxy_type = None
 
-            # 添加ping_interval和ping_timeout參數
+            if self.proxy:
+                # 使用標準庫 urlparse 進行可靠的解析
+                parsed_proxy = urlparse(self.proxy)
+                
+                # 建立安全的日誌訊息，隱藏密碼
+                safe_proxy_display = f"{parsed_proxy.scheme}://{parsed_proxy.hostname}:{parsed_proxy.port}"
+                if parsed_proxy.username:
+                    safe_proxy_display = f"{parsed_proxy.scheme}://{parsed_proxy.username}:***@{parsed_proxy.hostname}:{parsed_proxy.port}"
+
+                logger.info(f"正在使用 WebSocket 代理: {safe_proxy_display}")
+
+                http_proxy_host = parsed_proxy.hostname
+                http_proxy_port = parsed_proxy.port
+                if parsed_proxy.username and parsed_proxy.password:
+                    http_proxy_auth = (parsed_proxy.username, parsed_proxy.password)
+                # 支援 http, socks4, socks5 代理
+                proxy_type = parsed_proxy.scheme if parsed_proxy.scheme in ['http', 'socks4', 'socks5'] else 'http'
+                
+            # 將解析後的參數傳遞給 run_forever
             self.ws.run_forever(
-                ping_interval=self.heartbeat_interval, 
-                ping_timeout=10, 
-                http_proxy_auth=http_proxy_auth, 
-                http_proxy_host=http_proxy_host, 
-                http_proxy_port=http_proxy_port, 
+                ping_interval=self.heartbeat_interval,
+                ping_timeout=10,
+                http_proxy_host=http_proxy_host,
+                http_proxy_port=http_proxy_port,
+                http_proxy_auth=http_proxy_auth,
                 proxy_type=proxy_type
             )
 
         except Exception as e:
             logger.error(f"WebSocket運行時出錯: {e}")
         finally:
-            # 移除可能導致遞歸調用的重連邏輯
             logger.debug("WebSocket run_forever 執行結束")
     
     def on_pong(self, ws, message):
