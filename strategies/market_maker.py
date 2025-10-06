@@ -3,6 +3,7 @@
 """
 import time
 import threading
+import unicodedata
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Union, Any
 from concurrent.futures import ThreadPoolExecutor
@@ -910,7 +911,7 @@ class MarketMaker:
             if not bids or not asks:
                 return None, None
             
-            highest_bid = float(bids[-1][0]) if bids else None
+            highest_bid = float(bids[0][0]) if bids else None
             lowest_ask = float(asks[0][0]) if asks else None
             
             return highest_bid, lowest_ask
@@ -1469,38 +1470,213 @@ class MarketMaker:
         
         logger.info(f"當前活躍訂單: 買單 {len(self.active_buy_orders)} 個, 賣單 {len(self.active_sell_orders)} 個")
     
-    def estimate_profit(self):
-        """簡化的利潤統計"""
-        # 計算總的PnL和本次執行的PnL
-        realized_pnl, unrealized_pnl, total_fees, net_pnl, session_realized_pnl, session_fees, session_net_pnl = self.calculate_pnl()
-        
-        # 計算本次執行的成交量
+    def estimate_profit(self, pnl_data=None):
+        """輸出本次迭代的關鍵統計資訊。"""
+        if pnl_data is None:
+            pnl_data = self.calculate_pnl()
+
+        (
+            realized_pnl,
+            unrealized_pnl,
+            total_fees,
+            net_pnl,
+            session_realized_pnl,
+            session_fees,
+            session_net_pnl,
+        ) = pnl_data
+
         session_buy_volume = sum(qty for _, qty in self.session_buy_trades)
         session_sell_volume = sum(qty for _, qty in self.session_sell_trades)
-        
-        # 只輸出關鍵信息
-        logger.info("=== 本次執行總結 ===")
+
+        sections: List[Tuple[str, List[Union[str, Tuple[str, str]]]]] = []
+
         if session_buy_volume > 0 or session_sell_volume > 0:
-            logger.info(f"成交: 買入 {session_buy_volume:.3f} SOL | 賣出 {session_sell_volume:.3f} SOL")
-            logger.info(f"本次盈虧: {session_net_pnl:.4f} USDT (手續費: {session_fees:.4f})")
+            session_rows: List[Union[str, Tuple[str, str]]] = [
+                ("成交量", f"買入 {session_buy_volume:.3f} {self.base_asset} | 賣出 {session_sell_volume:.3f} {self.base_asset}"),
+                (
+                    "盈虧",
+                    f"已實現 {session_realized_pnl:.4f} {self.quote_asset} | 凈利潤 {session_net_pnl:.4f} {self.quote_asset} (手續費 {session_fees:.4f} {self.quote_asset})",
+                ),
+                ("Maker成交量", f"買 {self.session_maker_buy_volume:.3f} {self.base_asset} | 賣 {self.session_maker_sell_volume:.3f} {self.base_asset}"),
+                ("Taker成交量", f"買 {self.session_taker_buy_volume:.3f} {self.base_asset} | 賣 {self.session_taker_sell_volume:.3f} {self.base_asset}"),
+            ]
         else:
-            logger.info("成交: 無")
-        
-        logger.info(f"累計盈虧: {net_pnl:.4f} USDT | 未實現: {unrealized_pnl:.4f} USDT")
-        
-        # 活躍訂單狀態
+            session_rows = [
+                "本次迭代沒有成交記錄",
+                (
+                    "盈虧",
+                    f"已實現 {session_realized_pnl:.4f} {self.quote_asset} | 凈利潤 {session_net_pnl:.4f} {self.quote_asset} (手續費 {session_fees:.4f} {self.quote_asset})",
+                ),
+                ("Maker成交量", f"買 {self.session_maker_buy_volume:.3f} {self.base_asset} | 賣 {self.session_maker_sell_volume:.3f} {self.base_asset}"),
+                ("Taker成交量", f"買 {self.session_taker_buy_volume:.3f} {self.base_asset} | 賣 {self.session_taker_sell_volume:.3f} {self.base_asset}"),
+            ]
+
+        sections.append(("本次執行", session_rows))
+
+        sections.append(
+            (
+                "累計表現",
+                [
+                    ("累計盈虧", f"{net_pnl:.4f} {self.quote_asset}"),
+                    ("未實現盈虧", f"{unrealized_pnl:.4f} {self.quote_asset}"),
+                    ("累計手續費", f"{total_fees:.4f} {self.quote_asset}"),
+                ],
+            )
+        )
+
+        sections.append(
+            (
+                "交易計數",
+                [
+                    ("成交次數", f"{self.trades_executed} 次"),
+                    ("下單次數", f"{self.orders_placed} 次"),
+                    ("取消次數", f"{self.orders_cancelled} 次"),
+                ],
+            )
+        )
+
+        sections.append(
+            (
+                "成交概況",
+                [
+                    ("總成交量", f"買 {self.total_bought:.3f} {self.base_asset} | 賣 {self.total_sold:.3f} {self.base_asset}"),
+                    ("Maker總量", f"買 {self.maker_buy_volume:.3f} {self.base_asset} | 賣 {self.maker_sell_volume:.3f} {self.base_asset}"),
+                    ("Taker總量", f"買 {self.taker_buy_volume:.3f} {self.base_asset} | 賣 {self.taker_sell_volume:.3f} {self.base_asset}"),
+                ],
+            )
+        )
+
         if self.active_buy_orders and self.active_sell_orders:
             buy_price = float(self.active_buy_orders[0].get('price', 0))
             sell_price = float(self.active_sell_orders[0].get('price', 0))
             spread = sell_price - buy_price
             spread_pct = (spread / buy_price * 100) if buy_price > 0 else 0
-            logger.info(f"活躍訂單: 買 {buy_price:.3f} | 賣 {sell_price:.3f} | 價差 {spread:.3f} ({spread_pct:.3f}%)")
+            order_line = f"買 {buy_price:.3f} | 賣 {sell_price:.3f} | 價差 {spread:.3f} ({spread_pct:.3f}%)"
         else:
             active_buy_count = len(self.active_buy_orders)
             active_sell_count = len(self.active_sell_orders)
-            logger.info(f"活躍訂單: 買單 {active_buy_count} | 賣單 {active_sell_count}")
-            
-        logger.info("=" * 40)
+            order_line = f"買單 {active_buy_count} | 賣單 {active_sell_count}"
+
+        sections.append(
+            (
+                "市場狀態",
+                [
+                    ("活躍訂單", order_line),
+                    ("WebSocket狀態", "已連接" if self.ws and self.ws.is_connected() else "未連接"),
+                ],
+            )
+        )
+
+        extra_sections = self._get_extra_summary_sections()
+        if extra_sections:
+            sections.extend(extra_sections)
+
+        self._log_boxed_summary("做市統計總結", sections)
+
+    def _get_extra_summary_sections(self) -> List[Tuple[str, List[Union[str, Tuple[str, str]]]]]:
+        """提供子類擴展的統計輸出。"""
+        return []
+
+    def _log_boxed_summary(self, title: str, sections: List[Tuple[str, List[Union[str, Tuple[str, str]]]]]):
+        """以框線格式輸出統計資訊。"""
+        inner_width = 74
+        border_top = f"┌{'─' * inner_width}┐"
+        border_section = f"├{'─' * inner_width}┤"
+        border_bottom = f"└{'─' * inner_width}┘"
+
+        logger.info(border_top)
+        self._log_box_text(title, inner_width, align="center")
+
+        for index, (section_title, rows) in enumerate(sections):
+            logger.info(border_section)
+            self._log_box_text(f"▸ {section_title}", inner_width)
+
+            for row in rows:
+                if isinstance(row, tuple):
+                    label, value = row
+                    self._log_box_key_value(label, value, inner_width)
+                else:
+                    self._log_box_text(str(row), inner_width)
+
+        logger.info(border_bottom)
+
+    def _log_box_text(self, text: str, inner_width: int, align: str = "left"):
+        """在框線內輸出單行或多行文字。"""
+        if align == "center":
+            logger.info(f"│ {self._center_display(text, inner_width)} │")
+            return
+
+        for line in self._wrap_display_text(text, inner_width):
+            logger.info(f"│ {self._pad_display(line, inner_width)} │")
+
+    def _log_box_key_value(self, label: str, value: str, inner_width: int):
+        """以鍵值形式輸出內容，並處理換行。"""
+        label_display = f"{label}："
+        label_width = 18
+        label_field = self._pad_display(label_display, label_width)
+        value_width = max(10, inner_width - label_width - 1)
+        empty_label = self._pad_display("", label_width)
+
+        wrapped_values = self._wrap_display_text(value, value_width)
+        for index, chunk in enumerate(wrapped_values):
+            chunk_field = self._pad_display(chunk, value_width)
+            if index == 0:
+                line = f"{label_field} {chunk_field}"
+            else:
+                line = f"{empty_label} {chunk_field}"
+            logger.info(f"│ {line} │")
+
+    def _display_width(self, text: str) -> int:
+        """計算字串的可視寬度，處理全形與半形字符。"""
+        width = 0
+        for char in text:
+            east_asian_width = unicodedata.east_asian_width(char)
+            if east_asian_width in ("F", "W", "A"):
+                width += 2
+            else:
+                width += 1
+        return width
+
+    def _pad_display(self, text: str, width: int) -> str:
+        """將字串填充至指定的顯示寬度。"""
+        padding = max(0, width - self._display_width(text))
+        return f"{text}{' ' * padding}"
+
+    def _center_display(self, text: str, width: int) -> str:
+        """以顯示寬度為基準進行置中。"""
+        text_width = self._display_width(text)
+        if text_width >= width:
+            return text
+        total_padding = width - text_width
+        left = total_padding // 2
+        right = total_padding - left
+        return f"{' ' * left}{text}{' ' * right}"
+
+    def _wrap_display_text(self, text: str, width: int) -> List[str]:
+        """根據顯示寬度換行。"""
+        if not text:
+            return [""]
+
+        lines: List[str] = []
+        current = ""
+        current_width = 0
+
+        for char in text:
+            char_width = self._display_width(char)
+            if current and current_width + char_width > width:
+                lines.append(current)
+                current = char
+                current_width = char_width
+            else:
+                current += char
+                current_width += char_width
+
+        if current:
+            lines.append(current)
+        else:
+            lines.append("")
+
+        return lines
     
     def print_trading_stats(self):
         """打印交易統計報表"""
@@ -1710,42 +1886,25 @@ class MarketMaker:
                 
                 # 下限價單
                 self.place_limit_orders()
-                
-                # 估算利潤
-                self.estimate_profit()
-                
+
+                # 計算PnL並輸出簡化統計
+                pnl_data = self.calculate_pnl()
+                self.estimate_profit(pnl_data)
+
                 # 定期打印交易統計報表
                 if current_time - last_report_time >= report_interval:
                     self.print_trading_stats()
                     last_report_time = current_time
-                
-                # 計算總的PnL和本次執行的PnL
-                realized_pnl, unrealized_pnl, total_fees, net_pnl, session_realized_pnl, session_fees, session_net_pnl = self.calculate_pnl()
-                
-                logger.info(f"\n統計信息:")
-                logger.info(f"總交易次數: {self.trades_executed}")
-                logger.info(f"總下單次數: {self.orders_placed}")
-                logger.info(f"總取消訂單次數: {self.orders_cancelled}")
-                logger.info(f"買入總量: {self.total_bought} {self.base_asset}")
-                logger.info(f"賣出總量: {self.total_sold} {self.base_asset}")
-                logger.info(f"Maker買入: {self.maker_buy_volume} {self.base_asset}, Maker賣出: {self.maker_sell_volume} {self.base_asset}")
-                logger.info(f"Taker買入: {self.taker_buy_volume} {self.base_asset}, Taker賣出: {self.taker_sell_volume} {self.base_asset}")
-                logger.info(f"總手續費: {total_fees:.8f} {self.quote_asset}")
-                logger.info(f"已實現利潤: {realized_pnl:.8f} {self.quote_asset}")
-                logger.info(f"凈利潤: {net_pnl:.8f} {self.quote_asset}")
-                logger.info(f"未實現利潤: {unrealized_pnl:.8f} {self.quote_asset}")
-                logger.info(f"WebSocket連接狀態: {'已連接' if self.ws and self.ws.is_connected() else '未連接'}")
-                
-                # 打印本次執行的統計數據
-                logger.info(f"\n---本次執行統計---")
-                session_buy_volume = sum(qty for _, qty in self.session_buy_trades)
-                session_sell_volume = sum(qty for _, qty in self.session_sell_trades)
-                logger.info(f"買入量: {session_buy_volume} {self.base_asset}, 賣出量: {session_sell_volume} {self.base_asset}")
-                logger.info(f"Maker買入: {self.session_maker_buy_volume} {self.base_asset}, Maker賣出: {self.session_maker_sell_volume} {self.base_asset}")
-                logger.info(f"Taker買入: {self.session_taker_buy_volume} {self.base_asset}, Taker賣出: {self.session_taker_sell_volume} {self.base_asset}")
-                logger.info(f"本次執行已實現利潤: {session_realized_pnl:.8f} {self.quote_asset}")
-                logger.info(f"本次執行手續費: {session_fees:.8f} {self.quote_asset}")
-                logger.info(f"本次執行凈利潤: {session_net_pnl:.8f} {self.quote_asset}")
+
+                (
+                    realized_pnl,
+                    unrealized_pnl,
+                    _total_fees,
+                    _net_pnl,
+                    session_realized_pnl,
+                    _session_fees,
+                    _session_net_pnl,
+                ) = pnl_data
 
                 if self.check_stop_conditions(realized_pnl, unrealized_pnl, session_realized_pnl):
                     self._stop_trading = True

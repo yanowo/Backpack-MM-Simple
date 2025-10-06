@@ -4,7 +4,7 @@ API請求客户端模塊
 import json
 import time
 import requests
-from typing import Dict, Any
+from typing import Dict, Any, Iterable, List, Optional, Tuple
 from .auth import create_signature
 from config import API_URL, API_VERSION, DEFAULT_WINDOW
 from logger import setup_logger
@@ -206,7 +206,20 @@ class BPClient(BaseExchangeClient):
         """獲取市場價格"""
         endpoint = f"/api/{API_VERSION}/ticker"
         params = {"symbol": symbol}
-        return self.make_request("GET", endpoint, params=params)
+        response = self.make_request("GET", endpoint, params=params)
+
+        if not isinstance(response, dict) or "error" in response:
+            return response
+
+        parsed = self._parse_ticker_snapshot(response)
+        if not parsed:
+            return {"error": "無法解析ticker數據"}
+
+        symbol_value = self._extract_from_payload(response, ("symbol", "s"))
+        if symbol_value:
+            parsed.setdefault("symbol", symbol_value)
+
+        return parsed
 
     def get_markets(self):
         """獲取所有交易對信息"""
@@ -217,7 +230,116 @@ class BPClient(BaseExchangeClient):
         """獲取市場深度"""
         endpoint = f"/api/{API_VERSION}/depth"
         params = {"symbol": symbol, "limit": str(limit)}
-        return self.make_request("GET", endpoint, params=params)
+        response = self.make_request("GET", endpoint, params=params)
+
+        if not isinstance(response, dict) or "error" in response:
+            return response
+
+        bids, asks = self._parse_order_book_snapshot(response)
+        result = {
+            "bids": bids,
+            "asks": asks,
+        }
+
+        # 保留部分關鍵欄位，方便上層使用
+        timestamp = self._extract_from_payload(response, ("ts", "timestamp", "time"))
+        if timestamp is not None:
+            result["timestamp"] = timestamp
+
+        sequence = self._extract_from_payload(response, ("sequence", "seq", "lastUpdateId"))
+        if sequence is not None:
+            result["sequence"] = sequence
+
+        symbol_value = self._extract_from_payload(response, ("symbol", "s"))
+        if symbol_value:
+            result["symbol"] = symbol_value
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Snapshot parsing helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_from_payload(payload: Dict[str, Any], keys: Iterable[str]) -> Optional[Any]:
+        """從payload中提取指定鍵的值，支持在data節點下查找"""
+        data = payload.get("data") if isinstance(payload, dict) else None
+        for key in keys:
+            if isinstance(payload, dict) and key in payload and payload[key] not in (None, ""):
+                return payload[key]
+            if isinstance(data, dict) and key in data and data[key] not in (None, ""):
+                return data[key]
+        return None
+
+    @classmethod
+    def _parse_order_book_snapshot(cls, payload: Dict[str, Any]) -> Tuple[List[List[float]], List[List[float]]]:
+        """根據官方 API 規範解析訂單簿資料結構"""
+        if not isinstance(payload, dict):
+            return [], []
+
+        data = payload.get("data", payload)
+        bids_raw = data.get("bids", []) or []
+        asks_raw = data.get("asks", []) or []
+
+        def _normalise_level(level: Any) -> Optional[List[float]]:
+            if isinstance(level, dict):
+                price = cls._extract_from_payload(level, ("price", "px", "p"))
+                quantity = cls._extract_from_payload(level, ("size", "quantity", "q", "sz"))
+            elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                price, quantity = level[0], level[1]
+            else:
+                return None
+
+            try:
+                return [float(price), float(quantity)]
+            except (TypeError, ValueError):
+                return None
+
+        bids = [item for item in (_normalise_level(level) for level in bids_raw) if item]
+        asks = [item for item in (_normalise_level(level) for level in asks_raw) if item]
+
+        bids.sort(key=lambda x: x[0], reverse=True)
+        asks.sort(key=lambda x: x[0])
+        return bids, asks
+
+    @classmethod
+    def _parse_ticker_snapshot(cls, payload: Dict[str, Any]) -> Dict[str, Optional[str]]:
+        """根據官方 API 規範解析 ticker 響應"""
+        if not isinstance(payload, dict):
+            return {}
+
+        data = payload.get("data", payload)
+
+        def _safe_float(value: Any) -> Optional[float]:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        bid = _safe_float(cls._extract_from_payload(data, ("bidPrice", "bestBidPrice", "bid", "bestBid", "buy")))
+        ask = _safe_float(cls._extract_from_payload(data, ("askPrice", "bestAskPrice", "ask", "bestAsk", "sell")))
+        last = _safe_float(cls._extract_from_payload(data, ("lastPrice", "price", "last", "close", "markPrice")))
+
+        result: Dict[str, Optional[str]] = {}
+        if bid is not None:
+            result["bidPrice"] = f"{bid}"
+            result["bestBidPrice"] = result["bidPrice"]
+        if ask is not None:
+            result["askPrice"] = f"{ask}"
+            result["bestAskPrice"] = result["askPrice"]
+        if last is not None:
+            result["lastPrice"] = f"{last}"
+            result["price"] = result["lastPrice"]
+
+        volume = cls._extract_from_payload(data, ("volume", "baseVolume", "quoteVolume"))
+        if volume is not None:
+            result["volume"] = str(volume)
+
+        change = cls._extract_from_payload(data, ("change24h", "priceChangePercent", "change"))
+        if change is not None:
+            result["change24h"] = str(change)
+
+        return result
 
     def get_fill_history(self, symbol=None, limit=100):
         """獲取歷史成交記錄"""
