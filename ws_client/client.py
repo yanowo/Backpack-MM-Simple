@@ -4,8 +4,9 @@ WebSocket客户端模塊
 import json
 import time
 import threading
+from collections import deque
+from typing import Dict, Any, Optional, Callable
 import websocket as ws
-from typing import Dict, List, Tuple, Any, Optional, Callable
 from config import WS_URL, DEFAULT_WINDOW
 from api.auth import create_signature
 from api.bp_client import BPClient
@@ -49,6 +50,7 @@ class BackpackWebSocket:
         self.max_reconnect_delay = 30
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 10
+        self.reconnect_cooldown_until = 0.0
         self.running = False
         self.ws_thread = None
         
@@ -72,12 +74,282 @@ class BackpackWebSocket:
         # 添加重連中標誌，避免多次重連
         self.reconnecting = False
 
+        # API 備援方案相關屬性
+        self.api_fallback_thread = None
+        self.api_fallback_active = False
+        self.api_poll_interval = 2  # 秒
+
+        # REST 訂單更新追蹤
+        self._fallback_bootstrapped = False
+        self._seen_fill_ids = deque(maxlen=200)
+        self._seen_fill_id_set = set()
+        self._last_fill_timestamp = 0
+
     def _get_client(self):
         """獲取緩存的客户端實例，避免重複創建"""
         cache_key = "public"
         if cache_key not in self._client_cache:
-            self._client_cache[cache_key] = BPClient({})
+            self._client_cache[cache_key] = BPClient({
+                "api_key": self.api_key,
+                "secret_key": self.secret_key,
+            })
         return self._client_cache[cache_key]
+    
+    def _start_api_fallback(self):
+        """啟動使用 REST API 的備援模式"""
+        if self.api_fallback_active:
+            return
+
+        logger.warning("WebSocket 異常，啟動 API 備援模式以持續獲取數據")
+        self.api_fallback_active = True
+        self._fallback_bootstrapped = False
+        self.api_fallback_thread = threading.Thread(target=self._api_fallback_loop, daemon=True)
+        self.api_fallback_thread.start()
+
+    def _stop_api_fallback(self):
+        """停止 REST API 備援模式"""
+        if not self.api_fallback_active:
+            return
+
+        self.api_fallback_active = False
+
+        if self.api_fallback_thread and self.api_fallback_thread.is_alive():
+            try:
+                self.api_fallback_thread.join(timeout=1)
+            except Exception:
+                pass
+
+        self.api_fallback_thread = None
+
+    def _api_fallback_loop(self):
+        """循環透過 REST API 更新行情資訊"""
+        client = self._get_client()
+
+        while self.running and self.api_fallback_active:
+            try:
+                order_book = client.get_order_book(self.symbol, 50)
+                ticker = client.get_ticker(self.symbol)
+                fills = client.get_fill_history(self.symbol, limit=100)
+
+                if isinstance(order_book, dict) and "error" not in order_book:
+                    bids = order_book.get("bids", [])
+                    asks = order_book.get("asks", [])
+
+                    if bids or asks:
+                        self.orderbook = {"bids": bids, "asks": asks}
+
+                        if bids:
+                            self.bid_price = bids[0][0]
+                        if asks:
+                            self.ask_price = asks[0][0]
+
+                        if self.on_message_callback:
+                            depth_event = {
+                                "b": [[str(price), str(quantity)] for price, quantity in bids],
+                                "a": [[str(price), str(quantity)] for price, quantity in asks],
+                                "source": "api"
+                            }
+                            self.on_message_callback(f"depth.{self.symbol}", depth_event)
+
+                if isinstance(ticker, dict) and "error" not in ticker:
+                    bid_raw = ticker.get("bidPrice") or ticker.get("bestBidPrice")
+                    ask_raw = ticker.get("askPrice") or ticker.get("bestAskPrice")
+                    last_raw = ticker.get("lastPrice") or ticker.get("price")
+
+                    def _safe_float(value):
+                        try:
+                            return float(value)
+                        except (TypeError, ValueError):
+                            return None
+
+                    bid = _safe_float(bid_raw)
+                    ask = _safe_float(ask_raw)
+                    last = _safe_float(last_raw)
+
+                    if bid is not None:
+                        self.bid_price = bid
+                    if ask is not None:
+                        self.ask_price = ask
+                    if last is not None:
+                        self.last_price = last
+                        self.add_price_to_history(self.last_price)
+
+                    if self.on_message_callback:
+                        ticker_event = {
+                            "b": str(self.bid_price) if self.bid_price is not None else None,
+                            "a": str(self.ask_price) if self.ask_price is not None else None,
+                            "p": str(self.last_price) if self.last_price is not None else None,
+                            "source": "api"
+                        }
+                        self.on_message_callback(f"bookTicker.{self.symbol}", ticker_event)
+
+                # 若仍未獲得價格資訊，嘗試以訂單簿估算
+                if self.last_price is None and self.bid_price and self.ask_price:
+                    self.last_price = (self.bid_price + self.ask_price) / 2
+                    self.add_price_to_history(self.last_price)
+
+                # 透過 REST 補充訂單成交通知
+                normalised_fills = self._normalise_fill_history_response(fills)
+                if normalised_fills:
+                    self._process_rest_fill_updates(normalised_fills)
+
+            except Exception as e:
+                logger.error(f"API 備援獲取數據時出錯: {e}")
+
+            # 控制輪詢頻率，避免觸發限速
+            time.sleep(self.api_poll_interval)
+
+    def _normalise_fill_history_response(self, response):
+        """解析 REST 回傳的成交列表"""
+        if isinstance(response, dict) and "error" in response:
+            return []
+
+        data = response
+        if isinstance(response, dict):
+            data = response.get("data", response)
+            if isinstance(data, dict):
+                for key in ("fills", "items", "rows", "records", "list"):
+                    value = data.get(key)
+                    if isinstance(value, list):
+                        data = value
+                        break
+        if not isinstance(data, list):
+            return []
+
+        fills = []
+
+        def _extract(entry: Dict[str, Any], *keys):
+            for key in keys:
+                if key in entry and entry[key] not in (None, ""):
+                    return entry[key]
+            return None
+
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+
+            fill_id = _extract(entry, "id", "fillId", "fill_id", "tradeId", "trade_id", "executionId", "execution_id", "t")
+            order_id = _extract(entry, "orderId", "order_id", "i")
+            side = _extract(entry, "side", "S")
+            price = _extract(entry, "price", "p", "L")
+            quantity = _extract(entry, "size", "quantity", "qty", "q", "l")
+            fee = _extract(entry, "fee", "commission", "n")
+            fee_asset = _extract(entry, "feeAsset", "commissionAsset", "N")
+            maker_flag = _extract(entry, "isMaker", "maker", "m")
+            timestamp = _extract(entry, "timestamp", "time", "ts", "T")
+
+            try:
+                price = float(price) if price is not None else None
+            except (TypeError, ValueError):
+                price = None
+
+            try:
+                quantity = float(quantity) if quantity is not None else None
+            except (TypeError, ValueError):
+                quantity = None
+
+            try:
+                fee = float(fee) if fee is not None else 0.0
+            except (TypeError, ValueError):
+                fee = 0.0
+
+            try:
+                timestamp = int(timestamp)
+            except (TypeError, ValueError):
+                timestamp = 0
+
+            if not fill_id and timestamp:
+                fill_id = str(timestamp)
+
+            fills.append({
+                "fill_id": str(fill_id) if fill_id is not None else None,
+                "order_id": str(order_id) if order_id is not None else None,
+                "side": side,
+                "price": price,
+                "quantity": quantity,
+                "fee": fee,
+                "fee_asset": fee_asset,
+                "is_maker": bool(maker_flag) if isinstance(maker_flag, bool) else str(maker_flag).lower() in ("true", "1", "yes"),
+                "timestamp": timestamp,
+            })
+
+        return [fill for fill in fills if fill["order_id"] and fill["quantity"]]
+
+    def _process_rest_fill_updates(self, fills):
+        """處理 REST 備援獲取到的成交資訊"""
+        fills = sorted(fills, key=lambda item: item.get("timestamp", 0))
+
+        if not self._fallback_bootstrapped:
+            for fill in fills:
+                self._register_fill_seen(fill)
+            self._fallback_bootstrapped = True
+            return
+
+        for fill in fills:
+            if self._is_new_fill(fill):
+                self._register_fill_seen(fill)
+                self._emit_rest_order_fill(fill)
+
+    def _is_new_fill(self, fill: Dict[str, Any]) -> bool:
+        fill_id = fill.get("fill_id")
+        timestamp = fill.get("timestamp", 0)
+
+        if fill_id and fill_id in self._seen_fill_id_set:
+            return False
+
+        if timestamp and timestamp <= self._last_fill_timestamp and not fill_id:
+            return False
+
+        return True
+
+    def _register_fill_seen(self, fill: Dict[str, Any]):
+        fill_id = fill.get("fill_id")
+        timestamp = fill.get("timestamp", 0)
+
+        if fill_id:
+            if len(self._seen_fill_ids) >= self._seen_fill_ids.maxlen:
+                oldest = self._seen_fill_ids.popleft()
+                if oldest in self._seen_fill_id_set:
+                    self._seen_fill_id_set.remove(oldest)
+            self._seen_fill_ids.append(fill_id)
+            self._seen_fill_id_set.add(fill_id)
+
+        if timestamp:
+            self._last_fill_timestamp = max(self._last_fill_timestamp, timestamp)
+
+    def _emit_rest_order_fill(self, fill: Dict[str, Any]):
+        if not self.on_message_callback:
+            return
+
+        side = (fill.get("side") or "").lower()
+        if side in ("buy", "bid"):
+            ws_side = "Bid"
+        elif side in ("sell", "ask"):
+            ws_side = "Ask"
+        else:
+            ws_side = side.upper() if side else None
+
+        if ws_side is None:
+            return
+
+        event = {
+            "e": "orderFill",
+            "S": ws_side,
+            "l": str(fill.get("quantity", "0")),
+            "L": str(fill.get("price", "0")),
+            "i": fill.get("order_id"),
+            "m": fill.get("is_maker", True),
+            "n": str(fill.get("fee", 0.0)),
+            "N": fill.get("fee_asset"),
+            "t": fill.get("fill_id"),
+            "source": "api-fallback",
+        }
+
+        logger.info(
+            f"REST備援檢測到成交: 訂單 {event['i']} | 方向 {event['S']} | 數量 {event['l']} | 價格 {event['L']}"
+        )
+
+        self.on_message_callback(f"account.orderUpdate.{self.symbol}", event)
 
     def initialize_orderbook(self):
         """通過REST API獲取訂單簿初始快照"""
@@ -89,14 +361,9 @@ class BackpackWebSocket:
                 return False
             
             # 重置並填充orderbook數據結構
-            self.orderbook = {
-                "bids": [[float(price), float(quantity)] for price, quantity in order_book.get('bids', [])],
-                "asks": [[float(price), float(quantity)] for price, quantity in order_book.get('asks', [])]
-            }
-            
-            # 按價格排序
-            self.orderbook["bids"] = sorted(self.orderbook["bids"], key=lambda x: x[0], reverse=True)
-            self.orderbook["asks"] = sorted(self.orderbook["asks"], key=lambda x: x[0])
+            bids = order_book.get("bids", [])
+            asks = order_book.get("asks", [])
+            self.orderbook = {"bids": bids, "asks": asks}
             
             logger.info(f"訂單簿初始化成功: {len(self.orderbook['bids'])} 個買單, {len(self.orderbook['asks'])} 個賣單")
             
@@ -147,6 +414,15 @@ class BackpackWebSocket:
     
     def _trigger_reconnect(self):
         """非阻塞觸發重連"""
+        current_time = time.time()
+        if self.reconnect_cooldown_until and current_time < self.reconnect_cooldown_until:
+            logger.debug("重連尚在冷卻期，跳過此次請求")
+            return
+
+        if self.reconnect_cooldown_until and current_time >= self.reconnect_cooldown_until:
+            self.reconnect_attempts = 0
+            self.reconnect_cooldown_until = 0.0
+
         if not self.reconnecting:
             self.reconnect()
         
@@ -155,6 +431,7 @@ class BackpackWebSocket:
         try:
             self.running = True
             self.reconnect_attempts = 0
+            self.reconnect_cooldown_until = 0.0
             self.reconnecting = False
             ws.enableTrace(False)
             self.ws = ws.WebSocketApp(
@@ -175,6 +452,7 @@ class BackpackWebSocket:
             self.start_heartbeat()
         except Exception as e:
             logger.error(f"初始化WebSocket連接時出錯: {e}")
+            self._start_api_fallback()
     
     def ws_run_forever(self):
         """WebSocket運行循環 - 修復版本"""
@@ -231,10 +509,20 @@ class BackpackWebSocket:
         if self.reconnecting:
             logger.debug("重連已在進行中，跳過此次重連請求")
             return False
-            
+
+        current_time = time.time()
+        if self.reconnect_cooldown_until and current_time < self.reconnect_cooldown_until:
+            logger.debug("重連尚未解除冷卻，跳過此次重連請求")
+            return False
+
         with self.ws_lock:
             if not self.running or self.reconnect_attempts >= self.max_reconnect_attempts:
-                logger.warning(f"重連次數超過上限 ({self.max_reconnect_attempts})，停止重連")
+                logger.warning(f"重連次數超過上限 ({self.max_reconnect_attempts})，暫停自動重連")
+                cooldown_seconds = max(self.max_reconnect_delay * 2, 60)
+                self.reconnect_cooldown_until = time.time() + cooldown_seconds
+                self.last_heartbeat = time.time()
+                logger.warning(f"已啟動 {cooldown_seconds} 秒冷卻，將繼續使用備援模式")
+                self._start_api_fallback()
                 return False
 
             self.reconnecting = True
@@ -271,10 +559,11 @@ class BackpackWebSocket:
                 self.ws_thread = threading.Thread(target=self.ws_run_forever)
                 self.ws_thread.daemon = True
                 self.ws_thread.start()
-                
+
                 # 更新最後心跳時間，避免重連後立即觸發心跳檢測
                 self.last_heartbeat = time.time()
-                
+                self.reconnect_cooldown_until = 0.0
+
                 logger.info(f"第 {self.reconnect_attempts} 次重連已啟動")
                 
                 self.reconnecting = False
@@ -283,6 +572,7 @@ class BackpackWebSocket:
             except Exception as e:
                 logger.error(f"重連過程中發生錯誤: {e}")
                 self.reconnecting = False
+                self._start_api_fallback()
                 return False
     
     def _force_close_connection(self):
@@ -347,6 +637,9 @@ class BackpackWebSocket:
         self.reconnecting = False
         self.last_heartbeat = time.time()
         
+        # 停止 API 備援模式
+        self._stop_api_fallback()
+
         # 添加短暫延遲確保連接穩定
         time.sleep(0.5)
         
@@ -533,6 +826,8 @@ class BackpackWebSocket:
         """處理WebSocket錯誤"""
         logger.error(f"WebSocket發生錯誤: {error}")
         self.last_heartbeat = 0  # 強制觸發重連
+
+        self._start_api_fallback()
     
     def on_close(self, ws, close_status_code, close_msg):
         """處理WebSocket關閉"""
@@ -550,10 +845,12 @@ class BackpackWebSocket:
         
         if close_status_code == 1000 or getattr(ws, '_closed_by_me', False):
             logger.info("WebSocket正常關閉，不進行重連")
+            self._start_api_fallback()
         elif previous_connected and self.running and self.auto_reconnect and not self.reconnecting:
             logger.info("WebSocket非正常關閉，將自動重連")
             # 使用線程觸發重連，避免在回調中直接重連
             threading.Thread(target=self._trigger_reconnect, daemon=True).start()
+            self._start_api_fallback()
     
     def close(self):
         """完全關閉WebSocket連接"""
@@ -561,6 +858,7 @@ class BackpackWebSocket:
         self.running = False
         self.connected = False
         self.reconnecting = False
+        self.reconnect_cooldown_until = 0.0
         
         # 停止心跳檢測線程
         if self.heartbeat_thread and self.heartbeat_thread.is_alive():
@@ -575,6 +873,9 @@ class BackpackWebSocket:
         
         # 重置訂閴狀態
         self.subscriptions = []
+
+        # 確保停止 API 備援
+        self._stop_api_fallback()
         
         logger.info("WebSocket連接已完全關閉")
     
@@ -638,7 +939,13 @@ class BackpackWebSocket:
     
     def check_and_reconnect_if_needed(self):
         """檢查連接狀態並在需要時重連 - 供外部調用"""
+        if self.reconnect_cooldown_until and time.time() < self.reconnect_cooldown_until:
+            return self.is_connected()
+
         if not self.is_connected() and not self.reconnecting:
             logger.info("外部檢查發現連接斷開，觸發重連...")
             threading.Thread(target=self._trigger_reconnect, daemon=True).start()
+            self._start_api_fallback()
+
         return self.is_connected()
+

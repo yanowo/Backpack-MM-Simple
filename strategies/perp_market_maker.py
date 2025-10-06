@@ -283,15 +283,19 @@ class PerpetualMarketMaker(MarketMaker):
         self._update_position_state()
         return self.position_state
 
-    def estimate_profit(self):
-        """覆蓋父類方法，添加總成交量統計顯示"""
-        # 先調用父類的方法
-        super().estimate_profit()
-        
-        # 然後添加總成交量統計顯示
-        logger.info(f"\n---永續合約總成交量統計---")
-        logger.info(f"累計總成交量: {self.total_volume_quote:.2f} {self.quote_asset}")
-        logger.info(f"本次執行總成交量: {self.session_total_volume_quote:.2f} {self.quote_asset}")
+    def _get_extra_summary_sections(self):
+        """輸出永續合約特有的成交量統計。"""
+        sections = list(super()._get_extra_summary_sections())
+        sections.append(
+            (
+                "永續合約成交量",
+                [
+                    ("累計總成交量", f"{self.total_volume_quote:.2f} {self.quote_asset}"),
+                    ("本次執行成交量", f"{self.session_total_volume_quote:.2f} {self.quote_asset}"),
+                ],
+            )
+        )
+        return sections
 
     def run(self, duration_seconds=3600, interval_seconds=60):
         """執行永續合約做市策略"""
