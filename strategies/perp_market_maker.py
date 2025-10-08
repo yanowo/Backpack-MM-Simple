@@ -107,30 +107,31 @@ class PerpetualMarketMaker(MarketMaker):
         self._update_position_state()
 
     def on_ws_message(self, stream, data):
-        """處理WebSocket消息回調 - 添加總成交量統計"""
-        # 先調用父類的消息處理
+        """處理WebSocket消息回調 - 保持父類處理流程"""
         super().on_ws_message(stream, data)
-        
-        # 添加總成交量統計
-        if stream.startswith("account.orderUpdate."):
-            event_type = data.get('e')
-            
-            if event_type == 'orderFill':
-                try:
-                    quantity = float(data.get('l', '0'))  # 成交數量
-                    price = float(data.get('L', '0'))     # 成交價格
-                    
-                    # 計算成交額（以報價資產計價）
-                    trade_volume = quantity * price
-                    
-                    # 更新總成交量統計
-                    self.total_volume_quote += trade_volume
-                    self.session_total_volume_quote += trade_volume
-                    
-                    logger.debug(f"更新總成交量: +{trade_volume:.2f} {self.quote_asset}, 累計: {self.total_volume_quote:.2f}")
-                    
-                except Exception as e:
-                    logger.error(f"更新總成交量統計時出錯: {e}")
+
+    def _after_fill_processed(self, fill_info: Dict[str, Any]) -> None:
+        """更新永續合約成交量統計"""
+        price = fill_info.get('price')
+        quantity = fill_info.get('quantity')
+
+        if price is None or quantity is None:
+            return
+
+        try:
+            trade_volume = float(price) * float(quantity)
+        except (TypeError, ValueError):
+            return
+
+        self.total_volume_quote += trade_volume
+        self.session_total_volume_quote += trade_volume
+
+        logger.debug(
+            "永續合約成交後更新總成交量: +%.2f %s (累計 %.2f)",
+            trade_volume,
+            self.quote_asset,
+            self.total_volume_quote,
+        )
 
     # ------------------------------------------------------------------
     # 基礎資訊與工具方法 (此處函數未變動)
