@@ -4,8 +4,9 @@
 import time
 import threading
 import unicodedata
+from collections import deque
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Union, Any
+from typing import Dict, List, Tuple, Optional, Union, Any, Set, Deque
 from concurrent.futures import ThreadPoolExecutor
 
 from api.bp_client import BPClient
@@ -140,13 +141,23 @@ class MarketMaker:
             self.ws = None  # 不使用WebSocket
         # 執行緒池用於後台任務
         self.executor = ThreadPoolExecutor(max_workers=3)
-        
+
+        # Aster REST 成交流處理狀態
+        self._fill_history_bootstrapped = False
+        self._processed_fill_ids: Set[str] = set()
+        self._recent_fill_ids: Deque[str] = deque(maxlen=500)
+        self._last_fill_timestamp: int = 0
+
         # 等待WebSocket連接建立並進行初始化訂閲
         self._initialize_websocket()
-        
+
         # 載入交易統計和歷史交易
         self._load_trading_stats()
         self._load_recent_trades()
+
+        # 針對 Aster 使用 REST 成交同步
+        if self.exchange == 'aster':
+            self._bootstrap_fill_history()
         
         logger.info(f"初始化做市商: {symbol}")
         logger.info(f"基礎資產: {self.base_asset}, 報價資產: {self.quote_asset}")
@@ -400,7 +411,319 @@ class MarketMaker:
             logger.error(f"載入歷史成交記錄時出錯: {e}")
             import traceback
             traceback.print_exc()
-    
+
+    # ------------------------------------------------------------------
+    # Aster REST 成交同步相關方法
+    # ------------------------------------------------------------------
+    def _bootstrap_fill_history(self) -> None:
+        """初始化 Aster 成交歷史，避免重複計數"""
+        try:
+            self._sync_fill_history(bootstrap=True)
+            logger.info("Aster 成交歷史初始化完成，開始追蹤新成交")
+        except Exception as e:
+            logger.error(f"初始化 Aster 成交歷史時出錯: {e}")
+
+    def _sync_fill_history(self, bootstrap: bool = False) -> None:
+        """透過 REST API 同步最新成交"""
+        if self.exchange != 'aster':
+            return
+
+        try:
+            response = self.client.get_fill_history(self.symbol, limit=200)
+        except Exception as e:
+            logger.error(f"獲取 Aster 成交歷史時出錯: {e}")
+            return
+
+        fills = self._normalize_fill_history_response(response)
+        if not fills:
+            return
+
+        fills.sort(key=lambda item: item.get('timestamp', 0))
+
+        if bootstrap or not self._fill_history_bootstrapped:
+            for fill in fills:
+                self._register_processed_fill(fill.get('fill_id'), fill.get('timestamp', 0))
+            self._fill_history_bootstrapped = True
+            return
+
+        for fill in fills:
+            fill_id = fill.get('fill_id')
+            timestamp = fill.get('timestamp', 0)
+
+            if self._has_seen_fill(fill_id, timestamp):
+                continue
+
+            order_id = fill.get('order_id')
+            side = fill.get('side')
+            quantity = fill.get('quantity')
+            price = fill.get('price')
+
+            if not order_id or quantity is None or price is None:
+                continue
+
+            maker = fill.get('is_maker', True)
+            fee = fill.get('fee', 0.0)
+            fee_asset = fill.get('fee_asset') or self.quote_asset
+
+            normalized_side = None
+            if isinstance(side, str):
+                side_upper = side.upper()
+                if side_upper in ('BUY', 'BID'):
+                    normalized_side = 'Bid'
+                elif side_upper in ('SELL', 'ASK'):
+                    normalized_side = 'Ask'
+
+            if normalized_side is None:
+                continue
+
+            self._register_processed_fill(fill_id, timestamp)
+            self._process_order_fill_event(
+                side=normalized_side,
+                quantity=quantity,
+                price=price,
+                order_id=order_id,
+                maker=maker,
+                fee=fee,
+                fee_asset=fee_asset,
+                trade_id=fill_id,
+                source='rest',
+                timestamp=timestamp,
+                register_processed=False,
+            )
+
+    def _normalize_fill_history_response(self, response) -> List[Dict[str, Any]]:
+        """將 REST API 回傳的成交資料轉換為統一格式"""
+        if isinstance(response, dict) and 'error' in response:
+            logger.error(f"獲取成交歷史失敗: {response['error']}")
+            return []
+
+        data = response
+        if isinstance(response, dict):
+            data = response.get('data', response)
+
+        if not isinstance(data, list):
+            logger.warning(f"成交歷史返回格式異常: {type(data)}")
+            return []
+
+        fills: List[Dict[str, Any]] = []
+
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+
+            fill_id = entry.get('id') or entry.get('tradeId') or entry.get('t')
+            order_id = entry.get('orderId') or entry.get('i')
+            side = entry.get('side') or entry.get('S')
+            price = entry.get('price') or entry.get('p') or entry.get('L')
+            quantity = entry.get('qty') or entry.get('quantity') or entry.get('q') or entry.get('l') or entry.get('size')
+            fee = entry.get('commission') or entry.get('fee') or entry.get('n')
+            fee_asset = entry.get('commissionAsset') or entry.get('feeAsset') or entry.get('N')
+            maker_flag = entry.get('maker') or entry.get('isMaker') or entry.get('m')
+            timestamp = entry.get('time') or entry.get('timestamp') or entry.get('T') or entry.get('ts')
+
+            try:
+                price = float(price) if price is not None else None
+            except (TypeError, ValueError):
+                price = None
+
+            try:
+                quantity = float(quantity) if quantity is not None else None
+            except (TypeError, ValueError):
+                quantity = None
+
+            try:
+                fee_value = float(fee) if fee is not None else 0.0
+            except (TypeError, ValueError):
+                fee_value = 0.0
+
+            try:
+                timestamp_value = int(timestamp) if timestamp is not None else 0
+            except (TypeError, ValueError):
+                timestamp_value = 0
+
+            is_maker = False
+            if isinstance(maker_flag, bool):
+                is_maker = maker_flag
+            elif maker_flag is not None:
+                is_maker = str(maker_flag).lower() in ("true", "1", "yes")
+
+            fills.append({
+                'fill_id': str(fill_id) if fill_id is not None else None,
+                'order_id': str(order_id) if order_id is not None else None,
+                'side': side,
+                'price': price,
+                'quantity': quantity,
+                'fee': fee_value,
+                'fee_asset': fee_asset,
+                'is_maker': is_maker,
+                'timestamp': timestamp_value,
+            })
+
+        return fills
+
+    def _has_seen_fill(self, fill_id: Optional[str], timestamp: int) -> bool:
+        """判斷成交是否已處理"""
+        if fill_id and fill_id in self._processed_fill_ids:
+            return True
+        if (not fill_id or fill_id is None) and timestamp and timestamp <= self._last_fill_timestamp:
+            return True
+        return False
+
+    def _register_processed_fill(self, fill_id: Optional[str], timestamp: int) -> None:
+        """將成交標記為已處理"""
+        if fill_id:
+            if len(self._recent_fill_ids) >= self._recent_fill_ids.maxlen:
+                oldest = self._recent_fill_ids.popleft()
+                if oldest in self._processed_fill_ids:
+                    self._processed_fill_ids.remove(oldest)
+            self._recent_fill_ids.append(fill_id)
+            self._processed_fill_ids.add(fill_id)
+
+        if timestamp:
+            self._last_fill_timestamp = max(self._last_fill_timestamp, timestamp)
+
+    def _process_order_fill_event(
+        self,
+        *,
+        side: str,
+        quantity: float,
+        price: float,
+        order_id: Optional[str],
+        maker: bool,
+        fee: float,
+        fee_asset: Optional[str],
+        trade_id: Optional[str] = None,
+        source: str = 'ws',
+        timestamp: Optional[int] = None,
+        register_processed: bool = True,
+    ) -> None:
+        """統一處理成交事件來源 (WebSocket/REST)"""
+
+        if register_processed:
+            self._register_processed_fill(trade_id, timestamp or 0)
+
+        fee_asset = fee_asset or self.quote_asset
+
+        normalized_side = side
+        if isinstance(side, str):
+            side_upper = side.upper()
+            if side_upper in ("BUY", "BID"):
+                normalized_side = "Bid"
+            elif side_upper in ("SELL", "ASK"):
+                normalized_side = "Ask"
+
+        logger.info(
+            f"訂單成交[{source}]: ID={order_id}, 方向={normalized_side}, 數量={quantity}, 價格={price}, Maker={maker}, 手續費={fee:.8f}"
+        )
+
+        trade_type = 'market_making'
+        if order_id:
+            try:
+                if self.db.is_rebalance_order(order_id, self.symbol):
+                    trade_type = 'rebalance'
+            except Exception as db_err:
+                logger.error(f"檢查重平衡訂單時出錯: {db_err}")
+
+        order_data = {
+            'order_id': order_id,
+            'symbol': self.symbol,
+            'side': normalized_side,
+            'quantity': quantity,
+            'price': price,
+            'maker': maker,
+            'fee': fee,
+            'fee_asset': fee_asset,
+            'trade_type': trade_type,
+        }
+
+        def safe_insert_order():
+            try:
+                self.db.insert_order(order_data)
+            except Exception as db_err:
+                logger.error(f"插入訂單數據時出錯: {db_err}")
+
+        safe_insert_order()
+
+        if normalized_side == 'Bid':
+            self.total_bought += quantity
+            self.buy_trades.append((price, quantity))
+
+            if maker:
+                self.maker_buy_volume += quantity
+                self.session_maker_buy_volume += quantity
+            else:
+                self.taker_buy_volume += quantity
+                self.session_taker_buy_volume += quantity
+
+            self.session_buy_trades.append((price, quantity))
+
+        elif normalized_side == 'Ask':
+            self.total_sold += quantity
+            self.sell_trades.append((price, quantity))
+
+            if maker:
+                self.maker_sell_volume += quantity
+                self.session_maker_sell_volume += quantity
+            else:
+                self.taker_sell_volume += quantity
+                self.session_taker_sell_volume += quantity
+
+            self.session_sell_trades.append((price, quantity))
+
+        self.total_fees += fee
+        self.session_fees += fee
+
+        def safe_update_stats_wrapper():
+            try:
+                self._update_trading_stats()
+            except Exception as e:
+                logger.error(f"更新交易統計時出錯: {e}")
+
+        self.executor.submit(safe_update_stats_wrapper)
+
+        def update_profit():
+            try:
+                profit = self._calculate_db_profit()
+                self.total_profit = profit
+            except Exception as e:
+                logger.error(f"更新利潤計算時出錯: {e}")
+
+        self.executor.submit(update_profit)
+
+        session_profit = self._calculate_session_profit()
+
+        logger.info(f"累計利潤: {self.total_profit:.8f} {self.quote_asset}")
+        logger.info(f"本次執行利潤: {session_profit:.8f} {self.quote_asset}")
+        logger.info(f"本次執行手續費: {self.session_fees:.8f} {self.quote_asset}")
+        logger.info(f"本次執行淨利潤: {(session_profit - self.session_fees):.8f} {self.quote_asset}")
+
+        self.trades_executed += 1
+        logger.info(f"總買入: {self.total_bought} {self.base_asset}, 總賣出: {self.total_sold} {self.base_asset}")
+        logger.info(f"Maker買入: {self.maker_buy_volume} {self.base_asset}, Maker賣出: {self.maker_sell_volume} {self.base_asset}")
+        logger.info(f"Taker買入: {self.taker_buy_volume} {self.base_asset}, Taker賣出: {self.taker_sell_volume} {self.base_asset}")
+
+        fill_info = {
+            'side': normalized_side,
+            'quantity': quantity,
+            'price': price,
+            'order_id': order_id,
+            'maker': maker,
+            'fee': fee,
+            'fee_asset': fee_asset,
+            'trade_id': trade_id,
+            'source': source,
+            'timestamp': timestamp,
+        }
+
+        try:
+            self._after_fill_processed(fill_info)
+        except Exception as hook_error:
+            logger.error(f"成交後置處理時出錯: {hook_error}")
+
+    def _after_fill_processed(self, fill_info: Dict[str, Any]) -> None:
+        """留給子類覆蓋的成交後置處理鉤子"""
+        return
+
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
@@ -481,117 +804,35 @@ class MarketMaker:
             if event_type == 'orderFill':
                 try:
                     side = data.get('S')
-                    quantity = float(data.get('l', '0'))  # 此次成交數量
-                    price = float(data.get('L', '0'))     # 此次成交價格
-                    order_id = data.get('i')             # 訂單 ID
-                    maker = data.get('m', False)         # 是否是 Maker
-                    fee = float(data.get('n', '0'))      # 手續費
-                    fee_asset = data.get('N', '')        # 手續費資產
+                    quantity = float(data.get('l', '0'))
+                    price = float(data.get('L', '0'))
+                    order_id = data.get('i')
+                    maker = data.get('m', False)
+                    fee = float(data.get('n', '0'))
+                    fee_asset = data.get('N', '')
+                    trade_id = data.get('t')
+                    timestamp = data.get('T') or data.get('E')
 
-                    logger.info(f"訂單成交: ID={order_id}, 方向={side}, 數量={quantity}, 價格={price}, Maker={maker}, 手續費={fee:.8f}")
-                    
-                    # 判斷交易類型
-                    trade_type = 'market_making'  # 默認為做市行為
-                    
-                    # 安全地檢查訂單是否是重平衡訂單
-                    try:
-                        is_rebalance = self.db.is_rebalance_order(order_id, self.symbol)
-                        if is_rebalance:
-                            trade_type = 'rebalance'
-                    except Exception as db_err:
-                        logger.error(f"檢查重平衡訂單時出錯: {db_err}")
-                    
-                    # 準備訂單數據
-                    order_data = {
-                        'order_id': order_id,
-                        'symbol': self.symbol,
-                        'side': side,
-                        'quantity': quantity,
-                        'price': price,
-                        'maker': maker,
-                        'fee': fee,
-                        'fee_asset': fee_asset,
-                        'trade_type': trade_type
-                    }
-                    
-                    # 安全地插入數據庫
-                    def safe_insert_order():
+                    trade_id_str = str(trade_id) if trade_id is not None else None
+                    timestamp_int = None
+                    if timestamp is not None:
                         try:
-                            self.db.insert_order(order_data)
-                        except Exception as db_err:
-                            logger.error(f"插入訂單數據時出錯: {db_err}")
-                    
-                    # 直接在當前線程中插入訂單數據，確保先寫入基本數據
-                    safe_insert_order()
-                    
-                    # 更新買賣量和做市商成交量統計
-                    if side == 'Bid':  # 買入
-                        self.total_bought += quantity
-                        self.buy_trades.append((price, quantity))
-                        logger.info(f"買入成交: {quantity} {self.base_asset} @ {price} {self.quote_asset}")
-                        
-                        # 更新做市商成交量
-                        if maker:
-                            self.maker_buy_volume += quantity
-                            self.session_maker_buy_volume += quantity
-                        else:
-                            self.taker_buy_volume += quantity
-                            self.session_taker_buy_volume += quantity
-                        
-                        self.session_buy_trades.append((price, quantity))
-                            
-                    elif side == 'Ask':  # 賣出
-                        self.total_sold += quantity
-                        self.sell_trades.append((price, quantity))
-                        logger.info(f"賣出成交: {quantity} {self.base_asset} @ {price} {self.quote_asset}")
-                        
-                        # 更新做市商成交量
-                        if maker:
-                            self.maker_sell_volume += quantity
-                            self.session_maker_sell_volume += quantity
-                        else:
-                            self.taker_sell_volume += quantity
-                            self.session_taker_sell_volume += quantity
-                            
-                        self.session_sell_trades.append((price, quantity))
-                    
-                    # 更新累計手續費
-                    self.total_fees += fee
-                    self.session_fees += fee
-                        
-                    # 在單獨的線程中更新統計數據，避免阻塞主回調
-                    def safe_update_stats_wrapper():
-                        try:
-                            self._update_trading_stats()
-                        except Exception as e:
-                            logger.error(f"更新交易統計時出錯: {e}")
-                    
-                    self.executor.submit(safe_update_stats_wrapper)
-                    
-                    # 重新計算利潤（基於數據庫記錄）
-                    # 也在單獨的線程中進行計算，避免阻塞
-                    def update_profit():
-                        try:
-                            profit = self._calculate_db_profit()
-                            self.total_profit = profit
-                        except Exception as e:
-                            logger.error(f"更新利潤計算時出錯: {e}")
-                    
-                    self.executor.submit(update_profit)
-                    
-                    # 計算本次執行的簡單利潤（不涉及數據庫查詢）
-                    session_profit = self._calculate_session_profit()
-                    
-                    # 執行簡要統計
-                    logger.info(f"累計利潤: {self.total_profit:.8f} {self.quote_asset}")
-                    logger.info(f"本次執行利潤: {session_profit:.8f} {self.quote_asset}")
-                    logger.info(f"本次執行手續費: {self.session_fees:.8f} {self.quote_asset}")
-                    logger.info(f"本次執行淨利潤: {(session_profit - self.session_fees):.8f} {self.quote_asset}")
-                    
-                    self.trades_executed += 1
-                    logger.info(f"總買入: {self.total_bought} {self.base_asset}, 總賣出: {self.total_sold} {self.base_asset}")
-                    logger.info(f"Maker買入: {self.maker_buy_volume} {self.base_asset}, Maker賣出: {self.maker_sell_volume} {self.base_asset}")
-                    logger.info(f"Taker買入: {self.taker_buy_volume} {self.base_asset}, Taker賣出: {self.taker_sell_volume} {self.base_asset}")
+                            timestamp_int = int(timestamp)
+                        except (TypeError, ValueError):
+                            timestamp_int = None
+
+                    self._process_order_fill_event(
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        order_id=order_id,
+                        maker=bool(maker),
+                        fee=fee,
+                        fee_asset=fee_asset,
+                        trade_id=trade_id_str,
+                        source=data.get('source', 'ws'),
+                        timestamp=timestamp_int,
+                    )
                     
                 except Exception as e:
                     logger.error(f"處理訂單成交消息時出錯: {e}")
@@ -1879,7 +2120,11 @@ class MarketMaker:
                 
                 # 檢查訂單成交情況
                 self.check_order_fills()
-                
+
+                # Aster 使用 REST API 同步最新成交
+                if self.exchange == 'aster':
+                    self._sync_fill_history()
+
                 # 檢查是否需要重平衡倉位
                 if self.need_rebalance():
                     self.rebalance_position()
