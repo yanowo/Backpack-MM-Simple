@@ -3,4 +3,3 @@ requests
 websocket-client
 numpy
 python-dotenv
-rich

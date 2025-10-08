@@ -17,7 +17,7 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 - **增強日誌系統**：詳細的市場狀態和策略追蹤
 - **WebSocket 實時連接**：即時市場數據和訂單更新
 - **命令行界面**：靈活的參數配置和策略執行
-- **交互式面板**：用户友善的操作介面
+- **可選資料庫紀錄**：根據需求啟用或停用資料庫寫入以兼顧效能
 
 ## 項目結構
 
@@ -51,10 +51,6 @@ lemon_trader/
 ├── cli/                  # 命令行界面
 │   ├── __init__.py
 │   └── commands.py       # 命令行命令
-│
-├── panel/                # 交互式面板
-│   ├── __init__.py
-│   └── interactive_panel.py  # 交互式面板實現
 │
 ├── config.py             # 配置文件
 ├── logger.py             # 日誌配置
@@ -101,6 +97,9 @@ BASE_URL=https://api.backpack.work
 # Aster Exchange
 ASTER_API_KEY=your_aster_api_key
 ASTER_SECRET_KEY=your_aster_secret_key
+
+# Optional Features
+# ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
 ```
 ## 使用方法
 
@@ -130,7 +129,8 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 - `--exchange`: 交易所選擇 (默認: backpack)
 - `--ws-proxy`: Websocket 代理 (可選，默認使用環境變數)
 - `--cli`: 啟動命令行界面
-- `--panel`: 啟動交互式面板
+- `--enable-db`: 啟用資料庫寫入 (預設關閉)
+- `--disable-db`: 停用資料庫寫入 (覆寫環境變數設定)
 
 #### 做市參數
 - `--symbol`: 交易對 (例如: SOL_USDC)
@@ -152,6 +152,13 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 - `--disable-rebalance`: 關閉重平功能
 - `--base-asset-target`: 基礎資產目標比例 (0-100，默認: 30)
 - `--rebalance-threshold`: 重平觸發閾值 (>0，默認: 15)
+
+### 資料庫寫入選項
+
+- 預設情況下，程式僅在記憶體中追蹤交易統計，不會寫入 SQLite 資料庫，以降低 I/O 負擔。
+- 透過設定環境變數 `ENABLE_DATABASE=1` 或在啟動命令時加上 `--enable-db` 可啟用資料庫寫入功能。
+- 若要臨時停用資料庫，可使用 `--disable-db` 覆寫設定。
+- 當資料庫功能關閉時，相關的歷史統計/報表選單會顯示為停用狀態。
 
 ### 永續合約做市
 
@@ -271,11 +278,6 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 - 當 SOL 價值 > 450 USDC (偏差 > 150 USDC = 15%) → 賣出 SOL
 - 當 SOL 價值 < 150 USDC (偏差 > 150 USDC = 15%) → 買入 SOL
 - 在 150-450 USDC 範圍內不會觸發重平衡
-
-## 設定保存
-
-通過面板模式修改的設定會自動保存到 `settings/panel_settings.json` 文件中，下次啟動時會自動加載。
-**注意：Panel 暫時不支援設定重平**
 
 ## 運行示例
 

@@ -13,13 +13,14 @@ from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
 from utils.helpers import calculate_volatility
 from database.db import Database
-from config import API_KEY, SECRET_KEY
+from config import API_KEY, SECRET_KEY, ENABLE_DATABASE
 from logger import setup_logger
 
 logger = setup_logger("cli")
 
 # 緩存客户端實例以提高性能
 _client_cache = {}
+USE_DATABASE = ENABLE_DATABASE
 
 def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: Optional[str]):
     """根據交易所解析並返回對應的 API/Secret Key。"""
@@ -405,8 +406,13 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     duration = int(input("請輸入運行時間(秒) (例如: 3600 表示1小時): "))
     interval = int(input("請輸入更新間隔(秒) (例如: 60 表示1分鐘): "))
 
+    if not USE_DATABASE:
+        print("提示: 資料庫寫入已停用，本次執行僅在記憶體中追蹤統計。")
+
+    db = None
     try:
-        db = Database()
+        if USE_DATABASE:
+            db = Database()
         # 原有的 exchange_config 創建邏輯已被新的動態配置取代
 							   
 									
@@ -417,7 +423,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                 api_key=api_key,
                 secret_key=secret_key,
                 symbol=symbol,
-                db_instance=db,
+                db_instance=db if USE_DATABASE else None,
                 base_spread_percentage=spread_percentage,
                 order_quantity=quantity,
                 max_orders=max_orders,
@@ -430,14 +436,15 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                 ws_proxy=ws_proxy,
                 # [整合功能] 3. 傳遞交易所參數
                 exchange=exchange,
-                exchange_config=exchange_config
+                exchange_config=exchange_config,
+                enable_database=USE_DATABASE
             )
         else:
             market_maker = MarketMaker(
                 api_key=api_key,
                 secret_key=secret_key,
                 symbol=symbol,
-                db_instance=db,
+                db_instance=db if USE_DATABASE else None,
                 base_spread_percentage=spread_percentage,
                 order_quantity=quantity,
                 max_orders=max_orders,
@@ -447,7 +454,8 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                 ws_proxy=ws_proxy,
                 # [整合功能] 3. 傳遞交易所參數
                 exchange=exchange,
-                exchange_config=exchange_config
+                exchange_config=exchange_config,
+                enable_database=USE_DATABASE
             )
 
         market_maker.run(duration_seconds=duration, interval_seconds=interval)
@@ -456,6 +464,12 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
         print(f"做市過程中發生錯誤: {str(e)}")
         import traceback
         traceback.print_exc()
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 def rebalance_settings_command():
     """重平設置管理命令"""
@@ -515,8 +529,12 @@ def rebalance_settings_command():
 
 def trading_stats_command(api_key, secret_key):
     """查看交易統計命令"""
+    if not USE_DATABASE:
+        print("資料庫功能已關閉，無法查詢交易統計。請啟用資料庫後再試。")
+        return
+
     symbol = input("請輸入要查看統計的交易對 (例如: SOL_USDC): ")
-    
+
     try:
         # 初始化數據庫
         db = Database()
@@ -606,6 +624,43 @@ def trading_stats_command(api_key, secret_key):
         print(f"查看交易統計時發生錯誤: {str(e)}")
         import traceback
         traceback.print_exc()
+
+
+def toggle_database_command():
+    """互動式切換資料庫寫入功能"""
+    global USE_DATABASE
+
+    status_text = "開啟" if USE_DATABASE else "關閉"
+    print(f"當前資料庫寫入狀態: {status_text}")
+
+    choice = input("是否要啟用資料庫寫入? (y=啟用, n=停用, Enter=維持原狀): ").strip().lower()
+
+    if choice == "":
+        print("設定未變更。")
+        return
+
+    if choice in ("y", "yes", "是"):
+        if USE_DATABASE:
+            print("資料庫寫入已經是開啟狀態。")
+            return
+
+        try:
+            db = Database()
+            db.close()
+            USE_DATABASE = True
+            print("已啟用資料庫寫入，後續操作將紀錄交易資訊。")
+        except Exception as exc:
+            print(f"啟用資料庫寫入失敗: {exc}")
+            print("請確認資料庫設定後再嘗試。")
+    elif choice in ("n", "no", "否"):
+        if not USE_DATABASE:
+            print("資料庫寫入已經是關閉狀態。")
+        else:
+            USE_DATABASE = False
+            print("已停用資料庫寫入，僅保留記憶體內統計資料。")
+    else:
+        print("輸入無效，設定未變更。")
+
 
 def market_analysis_command(api_key, secret_key, ws_proxy=None):
     """市場分析命令"""
@@ -782,8 +837,14 @@ def market_analysis_command(api_key, secret_key, ws_proxy=None):
         import traceback
         traceback.print_exc()
 
-def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None):
+def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_database=ENABLE_DATABASE):
     """主CLI函數"""
+    global USE_DATABASE
+    USE_DATABASE = bool(enable_database)
+
+    if not USE_DATABASE:
+        print("提示: 資料庫寫入功能已關閉，統計與歷史查詢功能將不可用。")
+
     while True:
         print("\n===== Backpack Exchange 交易程序 =====")
         print("1 - 查詢存款地址")
@@ -791,13 +852,16 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None):
         print("3 - 獲取市場信息")
         print("4 - 獲取訂單簿")
         print("5 - 執行現貨/合約做市策略")
-        print("6 - 交易統計報表")
+        stats_label = "6 - 交易統計報表" if USE_DATABASE else "6 - 交易統計報表 (已停用)"
+        print(stats_label)
         print("7 - 市場分析")
         print("8 - 重平設置管理")
+        db_status = "開啟" if USE_DATABASE else "關閉"
+        print(f"D - 切換資料庫寫入 (目前: {db_status})")
         print("9 - 退出")
-        
+
         operation = input("請輸入操作類型: ")
-        
+
         if operation == '1':
             get_address_command(api_key, secret_key)
         elif operation == '2':
@@ -814,6 +878,8 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None):
             market_analysis_command(api_key, secret_key, ws_proxy=ws_proxy)
         elif operation == '8':
             rebalance_settings_command()
+        elif operation.lower() == 'd':
+            toggle_database_command()
         elif operation == '9':
             print("退出程序。")
             break
