@@ -107,14 +107,19 @@ ASTER_SECRET_KEY=your_aster_secret_key
 ### 統一入口 (推薦)
 
 ```bash
-# 啟動交互式面板
-python run.py --panel
 
 # 啟動命令行界面 (推薦)
 python run.py --cli  
 
 # 直接運行做市策略
 python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
+
+# 直接運行 BackPack 永續做市
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
+
+# 直接運行 Aster 永續做市
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
+
 ```
 
 ### 命令行參數
@@ -183,12 +188,12 @@ python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 
 
 ```bash
 # BackPack 永續做市
-python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.05 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 --position-threshold 0.4 --inventory-skew 0 --stop-loss -25 --take-profit 50 --duration 999999999 --interval 10
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
 ```
 
 ```bash
 # Aster 永續做市
-python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.05 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 0.5 --position-threshold 0.4 --inventory-skew 0 --stop-loss -25 --take-profit 50 --duration 999999999 --interval 10
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
 ```
 
 #### 永續合約參數詳解
