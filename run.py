@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 """
 Backpack Exchange 做市交易程序統一入口
-支持命令行模式和麪板模式
+支持命令行模式
 """
 import argparse
 import sys
 import os
+from config import ENABLE_DATABASE
 from logger import setup_logger
 
 # 創建記錄器
@@ -16,7 +17,6 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Backpack Exchange 做市交易程序')
     
     # 模式選擇
-    parser.add_argument('--panel', action='store_true', help='啟動圖形界面面板')
     parser.add_argument('--cli', action='store_true', help='啟動命令行界面')
     
     # 基本參數
@@ -39,6 +39,11 @@ def parse_arguments():
     parser.add_argument('--inventory-skew', type=float, default=0.0, help='永續倉位偏移調整係數 (0-1)')
     parser.add_argument('--stop-loss', type=float, help='永續倉位止損觸發值 (以報價資產計價)')
     parser.add_argument('--take-profit', type=float, help='永續倉位止盈觸發值 (以報價資產計價)')
+
+    # 數據庫選項
+    parser.add_argument('--enable-db', dest='enable_db', action='store_true', help='啟用資料庫寫入功能')
+    parser.add_argument('--disable-db', dest='enable_db', action='store_false', help='停用資料庫寫入功能')
+    parser.set_defaults(enable_db=ENABLE_DATABASE)
     
     # 重平設置參數
     parser.add_argument('--enable-rebalance', action='store_true', help='開啟重平功能')
@@ -105,20 +110,11 @@ def main():
         sys.exit(1)
     
     # 決定執行模式
-    if args.panel:
-        # 啟動圖形界面面板
-        try:
-            from panel.panel_main import run_panel
-            run_panel(api_key=api_key, secret_key=secret_key, default_symbol=args.symbol)
-        except ImportError as e:
-            logger.error(f"啟動面板時出錯，缺少必要的庫: {str(e)}")
-            logger.error("請執行 pip install rich 安裝所需庫")
-            sys.exit(1)
-    elif args.cli:
+    if args.cli:
         # 啟動命令行界面
         try:
             from cli.commands import main_cli
-            main_cli(api_key, secret_key, ws_proxy=ws_proxy)
+            main_cli(api_key, secret_key, ws_proxy=ws_proxy, enable_database=args.enable_db)
         except ImportError as e:
             logger.error(f"啟動命令行界面時出錯: {str(e)}")
             sys.exit(1)
@@ -153,7 +149,8 @@ def main():
                     take_profit=args.take_profit,
                     ws_proxy=ws_proxy,
                     exchange=exchange,
-                    exchange_config=exchange_config
+                    exchange_config=exchange_config,
+                    enable_database=args.enable_db
                 )
 
                 if args.stop_loss is not None:
@@ -196,7 +193,8 @@ def main():
                     rebalance_threshold=rebalance_threshold,
                     ws_proxy=ws_proxy,
                     exchange=exchange,
-                    exchange_config=exchange_config
+                    exchange_config=exchange_config,
+                    enable_database=args.enable_db
                 )
             
             # 執行做市策略
@@ -211,9 +209,11 @@ def main():
     else:
         # 沒有指定執行模式時顯示幫助
         print("請指定執行模式：")
-        print("  --panel   啟動圖形界面面板")
         print("  --cli     啟動命令行界面")
         print("  直接指定  --symbol 和 --spread 參數運行做市策略")
+        print("\n資料庫參數：")
+        print("  --enable-db            啟用資料庫寫入")
+        print("  --disable-db           停用資料庫寫入 (預設)")
         print("\n重平設置參數：")
         print("  --enable-rebalance        開啟重平功能")
         print("  --disable-rebalance       關閉重平功能")

@@ -34,20 +34,21 @@ def format_balance(value, decimals=8, threshold=1e-8) -> str:
 
 class MarketMaker:
     def __init__(
-        self, 
-        api_key, 
-        secret_key, 
-        symbol, 
+        self,
+        api_key,
+        secret_key,
+        symbol,
         db_instance=None,
-        base_spread_percentage=0.2, 
-        order_quantity=None, 
-        max_orders=3, 
+        base_spread_percentage=0.2,
+        order_quantity=None,
+        max_orders=3,
         rebalance_threshold=15.0,
         enable_rebalance=True,
         base_asset_target_percentage=30.0,
         ws_proxy=None,
         exchange='backpack',
-        exchange_config=None
+        exchange_config=None,
+        enable_database=False
     ):
         self.api_key = api_key
         self.secret_key = secret_key
@@ -74,7 +75,21 @@ class MarketMaker:
         self.quote_asset_target_percentage = 100.0 - base_asset_target_percentage
 
         # 初始化數據庫
-        self.db = db_instance if db_instance else Database()
+        self.db_enabled = bool(enable_database)
+        self.db = None
+        if self.db_enabled:
+            self.db = db_instance if db_instance else Database()
+        elif db_instance and hasattr(db_instance, 'close'):
+            try:
+                db_instance.close()
+            except Exception:
+                pass
+
+        if not self.db:
+            self.db_enabled = False
+
+        if not self.db_enabled:
+            logger.info("資料庫寫入功能已關閉，本次執行僅在記憶體中追蹤交易統計。")
         
         # 統計屬性
         self.session_start_time = datetime.now()
@@ -168,7 +183,11 @@ class MarketMaker:
         if self.enable_rebalance:
             logger.info(f"重平目標比例: {self.base_asset_target_percentage}% {self.base_asset} / {self.quote_asset_target_percentage}% {self.quote_asset}")
             logger.info(f"重平觸發閾值: {self.rebalance_threshold}%")
-    
+
+    def _db_available(self) -> bool:
+        """檢查資料庫功能是否啟用且可用。"""
+        return self.db_enabled and self.db is not None
+
     def set_rebalance_settings(self, enable_rebalance=None, base_asset_target_percentage=None, rebalance_threshold=None):
         """
         設置重平參數
@@ -341,9 +360,12 @@ class MarketMaker:
     
     def _load_trading_stats(self):
         """從數據庫加載交易統計數據"""
+        if not self._db_available():
+            logger.debug("資料庫未啟用，跳過交易統計載入。")
+            return
         try:
             today = datetime.now().strftime('%Y-%m-%d')
-            
+
             # 查詢今天的統計數據
             stats = self.db.get_trading_stats(self.symbol, today)
             
@@ -367,6 +389,9 @@ class MarketMaker:
     
     def _load_recent_trades(self):
         """從數據庫加載歷史成交記錄"""
+        if not self._db_available():
+            logger.debug("資料庫未啟用，跳過歷史成交載入。")
+            return
         try:
             # 獲取訂單歷史
             trades = self.db.get_order_history(self.symbol, 1000)
@@ -617,7 +642,7 @@ class MarketMaker:
         )
 
         trade_type = 'market_making'
-        if order_id:
+        if order_id and self._db_available():
             try:
                 if self.db.is_rebalance_order(order_id, self.symbol):
                     trade_type = 'rebalance'
@@ -636,13 +661,14 @@ class MarketMaker:
             'trade_type': trade_type,
         }
 
-        def safe_insert_order():
-            try:
-                self.db.insert_order(order_data)
-            except Exception as db_err:
-                logger.error(f"插入訂單數據時出錯: {db_err}")
+        if self._db_available():
+            def safe_insert_order():
+                try:
+                    self.db.insert_order(order_data)
+                except Exception as db_err:
+                    logger.error(f"插入訂單數據時出錯: {db_err}")
 
-        safe_insert_order()
+            safe_insert_order()
 
         if normalized_side == 'Bid':
             self.total_bought += quantity
@@ -673,22 +699,24 @@ class MarketMaker:
         self.total_fees += fee
         self.session_fees += fee
 
-        def safe_update_stats_wrapper():
-            try:
-                self._update_trading_stats()
-            except Exception as e:
-                logger.error(f"更新交易統計時出錯: {e}")
+        if self._db_available():
+            def safe_update_stats_wrapper():
+                try:
+                    self._update_trading_stats()
+                except Exception as e:
+                    logger.error(f"更新交易統計時出錯: {e}")
 
-        self.executor.submit(safe_update_stats_wrapper)
+            self.executor.submit(safe_update_stats_wrapper)
 
-        def update_profit():
-            try:
-                profit = self._calculate_db_profit()
-                self.total_profit = profit
-            except Exception as e:
-                logger.error(f"更新利潤計算時出錯: {e}")
+        if self._db_available():
+            def update_profit():
+                try:
+                    profit = self._calculate_db_profit()
+                    self.total_profit = profit
+                except Exception as e:
+                    logger.error(f"更新利潤計算時出錯: {e}")
 
-        self.executor.submit(update_profit)
+            self.executor.submit(update_profit)
 
         session_profit = self._calculate_session_profit()
 
@@ -894,23 +922,24 @@ class MarketMaker:
                     self.session_sell_trades.append((price, filled_size))
                 
                 # 異步插入數據庫
-                def safe_insert_order():
-                    try:
-                        self.db.insert_order(order_data_db)
-                    except Exception as db_err:
-                        logger.error(f"插入訂單數據時出錯: {db_err}")
-                
-                self.executor.submit(safe_insert_order)
-                
-                # 更新利潤計算
-                def update_profit():
-                    try:
-                        profit = self._calculate_db_profit()
-                        self.total_profit = profit
-                    except Exception as e:
-                        logger.error(f"更新利潤計算時出錯: {e}")
-                
-                self.executor.submit(update_profit)
+                if self._db_available():
+                    def safe_insert_order():
+                        try:
+                            self.db.insert_order(order_data_db)
+                        except Exception as db_err:
+                            logger.error(f"插入訂單數據時出錯: {db_err}")
+
+                    self.executor.submit(safe_insert_order)
+
+                    # 更新利潤計算
+                    def update_profit():
+                        try:
+                            profit = self._calculate_db_profit()
+                            self.total_profit = profit
+                        except Exception as e:
+                            logger.error(f"更新利潤計算時出錯: {e}")
+
+                    self.executor.submit(update_profit)
                 
                 # 執行統計報告
                 session_profit = self._calculate_session_profit()
@@ -927,6 +956,8 @@ class MarketMaker:
     
     def _calculate_db_profit(self):
         """基於數據庫記錄計算已實現利潤（FIFO方法）"""
+        if not self._db_available():
+            return 0
         try:
             # 獲取訂單歷史，注意這裡將返回一個列表
             order_history = self.db.get_order_history(self.symbol)
@@ -981,6 +1012,8 @@ class MarketMaker:
     
     def _update_trading_stats(self):
         """更新每日交易統計數據"""
+        if not self._db_available():
+            return
         try:
             today = datetime.now().strftime('%Y-%m-%d')
             
@@ -1403,7 +1436,7 @@ class MarketMaker:
         else:
             logger.info(f"重新平衡訂單執行成功")
             # 記錄這是一個重平衡訂單
-            if 'id' in result:
+            if 'id' in result and self._db_available():
                 self.db.record_rebalance_order(result['id'], self.symbol)
         
         logger.info("倉位重新平衡完成")
@@ -1924,67 +1957,69 @@ class MarketMaker:
         try:
             logger.info("\n=== 做市商交易統計 ===")
             logger.info(f"交易對: {self.symbol}")
-            
+
             today = datetime.now().strftime('%Y-%m-%d')
-            
-            # 獲取今天的統計數據
-            today_stats = self.db.get_trading_stats(self.symbol, today)
-            
-            if today_stats and len(today_stats) > 0:
-                stat = today_stats[0]
-                maker_buy = stat['maker_buy_volume']
-                maker_sell = stat['maker_sell_volume']
-                taker_buy = stat['taker_buy_volume']
-                taker_sell = stat['taker_sell_volume']
-                profit = stat['realized_profit']
-                fees = stat['total_fees']
-                net = stat['net_profit']
-                avg_spread = stat['avg_spread']
-                volatility = stat['volatility']
-                
-                total_volume = maker_buy + maker_sell + taker_buy + taker_sell
-                maker_percentage = ((maker_buy + maker_sell) / total_volume * 100) if total_volume > 0 else 0
-                
-                logger.info(f"\n今日統計 ({today}):")
-                logger.info(f"Maker買入量: {maker_buy} {self.base_asset}")
-                logger.info(f"Maker賣出量: {maker_sell} {self.base_asset}")
-                logger.info(f"Taker買入量: {taker_buy} {self.base_asset}")
-                logger.info(f"Taker賣出量: {taker_sell} {self.base_asset}")
-                logger.info(f"總成交量: {total_volume} {self.base_asset}")
-                logger.info(f"Maker佔比: {maker_percentage:.2f}%")
-                logger.info(f"平均價差: {avg_spread:.4f}%")
-                logger.info(f"波動率: {volatility:.4f}%")
-                logger.info(f"毛利潤: {profit:.8f} {self.quote_asset}")
-                logger.info(f"總手續費: {fees:.8f} {self.quote_asset}")
-                logger.info(f"凈利潤: {net:.8f} {self.quote_asset}")
-            
-            # 獲取所有時間的總計
-            all_time_stats = self.db.get_all_time_stats(self.symbol)
-            
-            if all_time_stats:
-                total_maker_buy = all_time_stats['total_maker_buy']
-                total_maker_sell = all_time_stats['total_maker_sell']
-                total_taker_buy = all_time_stats['total_taker_buy']
-                total_taker_sell = all_time_stats['total_taker_sell']
-                total_profit = all_time_stats['total_profit']
-                total_fees = all_time_stats['total_fees']
-                total_net = all_time_stats['total_net_profit']
-                avg_spread = all_time_stats['avg_spread_all_time']
-                
-                total_volume = total_maker_buy + total_maker_sell + total_taker_buy + total_taker_sell
-                maker_percentage = ((total_maker_buy + total_maker_sell) / total_volume * 100) if total_volume > 0 else 0
-                
-                logger.info(f"\n累計統計:")
-                logger.info(f"Maker買入量: {total_maker_buy} {self.base_asset}")
-                logger.info(f"Maker賣出量: {total_maker_sell} {self.base_asset}")
-                logger.info(f"Taker買入量: {total_taker_buy} {self.base_asset}")
-                logger.info(f"Taker賣出量: {total_taker_sell} {self.base_asset}")
-                logger.info(f"總成交量: {total_volume} {self.base_asset}")
-                logger.info(f"Maker佔比: {maker_percentage:.2f}%")
-                logger.info(f"平均價差: {avg_spread:.4f}%")
-                logger.info(f"毛利潤: {total_profit:.8f} {self.quote_asset}")
-                logger.info(f"總手續費: {total_fees:.8f} {self.quote_asset}")
-                logger.info(f"凈利潤: {total_net:.8f} {self.quote_asset}")
+            if self._db_available():
+                # 獲取今天的統計數據
+                today_stats = self.db.get_trading_stats(self.symbol, today)
+
+                if today_stats and len(today_stats) > 0:
+                    stat = today_stats[0]
+                    maker_buy = stat['maker_buy_volume']
+                    maker_sell = stat['maker_sell_volume']
+                    taker_buy = stat['taker_buy_volume']
+                    taker_sell = stat['taker_sell_volume']
+                    profit = stat['realized_profit']
+                    fees = stat['total_fees']
+                    net = stat['net_profit']
+                    avg_spread = stat['avg_spread']
+                    volatility = stat['volatility']
+
+                    total_volume = maker_buy + maker_sell + taker_buy + taker_sell
+                    maker_percentage = ((maker_buy + maker_sell) / total_volume * 100) if total_volume > 0 else 0
+
+                    logger.info(f"\n今日統計 ({today}):")
+                    logger.info(f"Maker買入量: {maker_buy} {self.base_asset}")
+                    logger.info(f"Maker賣出量: {maker_sell} {self.base_asset}")
+                    logger.info(f"Taker買入量: {taker_buy} {self.base_asset}")
+                    logger.info(f"Taker賣出量: {taker_sell} {self.base_asset}")
+                    logger.info(f"總成交量: {total_volume} {self.base_asset}")
+                    logger.info(f"Maker佔比: {maker_percentage:.2f}%")
+                    logger.info(f"平均價差: {avg_spread:.4f}%")
+                    logger.info(f"波動率: {volatility:.4f}%")
+                    logger.info(f"毛利潤: {profit:.8f} {self.quote_asset}")
+                    logger.info(f"總手續費: {fees:.8f} {self.quote_asset}")
+                    logger.info(f"凈利潤: {net:.8f} {self.quote_asset}")
+
+                # 獲取所有時間的總計
+                all_time_stats = self.db.get_all_time_stats(self.symbol)
+
+                if all_time_stats:
+                    total_maker_buy = all_time_stats['total_maker_buy']
+                    total_maker_sell = all_time_stats['total_maker_sell']
+                    total_taker_buy = all_time_stats['total_taker_buy']
+                    total_taker_sell = all_time_stats['total_taker_sell']
+                    total_profit = all_time_stats['total_profit']
+                    total_fees = all_time_stats['total_fees']
+                    total_net = all_time_stats['total_net_profit']
+                    avg_spread = all_time_stats['avg_spread_all_time']
+
+                    total_volume = total_maker_buy + total_maker_sell + total_taker_buy + total_taker_sell
+                    maker_percentage = ((total_maker_buy + total_maker_sell) / total_volume * 100) if total_volume > 0 else 0
+
+                    logger.info(f"\n累計統計:")
+                    logger.info(f"Maker買入量: {total_maker_buy} {self.base_asset}")
+                    logger.info(f"Maker賣出量: {total_maker_sell} {self.base_asset}")
+                    logger.info(f"Taker買入量: {total_taker_buy} {self.base_asset}")
+                    logger.info(f"Taker賣出量: {total_taker_sell} {self.base_asset}")
+                    logger.info(f"總成交量: {total_volume} {self.base_asset}")
+                    logger.info(f"Maker佔比: {maker_percentage:.2f}%")
+                    logger.info(f"平均價差: {avg_spread:.4f}%")
+                    logger.info(f"毛利潤: {total_profit:.8f} {self.quote_asset}")
+                    logger.info(f"總手續費: {total_fees:.8f} {self.quote_asset}")
+                    logger.info(f"凈利潤: {total_net:.8f} {self.quote_asset}")
+            else:
+                logger.info("資料庫功能未啟用，僅顯示本次執行的統計資訊。")
             
             # 添加本次執行的統計
             session_buy_volume = sum(qty for _, qty in self.session_buy_trades)
@@ -2013,14 +2048,15 @@ class MarketMaker:
                 logger.info(f"觸發閾值: {self.rebalance_threshold}%")
                 
             # 查詢前10筆最新成交
-            recent_trades = self.db.get_recent_trades(self.symbol, 10)
-            
-            if recent_trades and len(recent_trades) > 0:
-                logger.info("\n最近10筆成交:")
-                for i, trade in enumerate(recent_trades):
-                    maker_str = "Maker" if trade['maker'] else "Taker"
-                    logger.info(f"{i+1}. {trade['timestamp']} - {trade['side']} {trade['quantity']} @ {trade['price']} ({maker_str}) 手續費: {trade['fee']:.8f}")
-        
+            if self._db_available():
+                recent_trades = self.db.get_recent_trades(self.symbol, 10)
+
+                if recent_trades and len(recent_trades) > 0:
+                    logger.info("\n最近10筆成交:")
+                    for i, trade in enumerate(recent_trades):
+                        maker_str = "Maker" if trade['maker'] else "Taker"
+                        logger.info(f"{i+1}. {trade['timestamp']} - {trade['side']} {trade['quantity']} @ {trade['price']} ({maker_str}) 手續費: {trade['fee']:.8f}")
+
         except Exception as e:
             logger.error(f"打印交易統計時出錯: {e}")
     

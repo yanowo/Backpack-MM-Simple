@@ -18,6 +18,7 @@ DEFAULT_WINDOW = "5000"
 
 # 數據庫配置
 DB_PATH = 'orders.db'
+ENABLE_DATABASE = os.getenv('ENABLE_DATABASE', '0').strip().lower() in {"1", "true", "yes", "on"}
 
 # 日誌配置
 LOG_FILE = "market_maker.log"
