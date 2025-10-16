@@ -51,9 +51,6 @@ class _MakerTakerHedgeMixin:
             if sell_price <= buy_price:
                 logger.warning("價差過窄無法安全掛單，跳過本輪")
                 return
-        else:
-            logger.warning(f"異常：買一價高於賣一價，買一價: {buy_price}, 賣一價: {sell_price}, 跳過本輪")
-            return
 
         buy_qty, sell_qty = self._determine_order_sizes(buy_price, ask_price)
         if buy_qty is None or sell_qty is None:
