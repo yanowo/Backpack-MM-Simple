@@ -12,6 +12,7 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 - **多交易所架構**：支援 Backpack、未來可擴展至其他交易所
 - **自動化做市策略**：智能價差管理和訂單調整
+- **Maker-Taker 對沖策略**：僅在買一/賣一掛單並於成交後以市價單即刻對沖，支援現貨與永續市場
 - **永續合約做市**：倉位風險管理與風險中性機制
 - **智能重平衡系統**：自動維持資產配置比例
 - **增強日誌系統**：詳細的市場狀態和策略追蹤
@@ -113,8 +114,17 @@ python run.py --cli
 # 直接運行做市策略
 python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
 
+# 直接運行 Maker-Taker 對沖現貨
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.1 --strategy maker_hedge --duration 3600 --interval 30
+
 # 直接運行 BackPack 永續做市
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
+
+# 直接運行 Maker-Taker 對沖永續
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 7200 --interval 15
+
+# 直接運行 Aster 永續 Maker-Taker 對沖
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.02 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 15
 
 # 直接運行 Aster 永續做市
 python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
@@ -137,6 +147,7 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 - `--spread`: 價差百分比 (例如: 0.5)
 - `--quantity`: 訂單數量 (可選)
 - `--max-orders`: 每側最大訂單數量 (默認: 3)
+- `--strategy`: 策略選擇 (`standard` 或 `maker_hedge`，可在現貨與永續中使用)
 - `--duration`: 運行時間（秒）(默認: 3600)
 - `--interval`: 更新間隔（秒）(默認: 60)
 - `--market-type`: 市場類型 (`spot` 或 `perp`)
@@ -159,6 +170,14 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 - 透過設定環境變數 `ENABLE_DATABASE=1` 或在啟動命令時加上 `--enable-db` 可啟用資料庫寫入功能。
 - 若要臨時停用資料庫，可使用 `--disable-db` 覆寫設定。
 - 當資料庫功能關閉時，相關的歷史統計/報表選單會顯示為停用狀態。
+
+### Maker-Taker 對沖策略
+
+- 於啟動參數中將 `--strategy` 設定為 `maker_hedge`，或在 CLI 對話式流程中選擇 `maker_hedge`，即可啟用對沖模式。
+- 策略會僅在買一/賣一各保留一張 Post-Only 掛單，成交後立即透過市價單反向對沖，避免持倉累積。
+- 現貨與永續皆支援該策略；永續市價對沖訂單會帶上 `reduceOnly` 以確保僅削減倉位。
+- Aster 永續合約同樣支援 maker-taker 對沖，系統會自動調整訂單欄位以符合交易所限制（例如移除 `postOnly` 與市價單 `timeInForce`）。
+- 其餘參數 (如價差、下單量、永續倉位目標) 仍遵循既有設置邏輯。
 
 ### 永續合約做市
 

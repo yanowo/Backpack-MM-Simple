@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### 新增
+- Maker-Taker 對沖策略現貨/永續通用化，掛單成交後自動以市價減倉。
+- `run.py` 與 CLI 支援 `maker_hedge` 策略選項，可於現貨或永續啟動對沖模式。
+- Maker-Taker 對沖策略適配 Aster 永續交易所，移除不支援的訂單欄位並保留 reduce-only 市價對沖。
+
+### 文檔
+- 更新 README 說明新策略使用方式與命令範例。
+
 ## [1.4.3] - 2025-10-08
 
 ## 新增
