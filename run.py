@@ -39,6 +39,7 @@ def parse_arguments():
     parser.add_argument('--inventory-skew', type=float, default=0.0, help='永續倉位偏移調整係數 (0-1)')
     parser.add_argument('--stop-loss', type=float, help='永續倉位止損觸發值 (以報價資產計價)')
     parser.add_argument('--take-profit', type=float, help='永續倉位止盈觸發值 (以報價資產計價)')
+    parser.add_argument('--strategy', choices=['standard', 'maker_hedge'], default='standard', help='策略選擇 (standard 或 maker_hedge)')
 
     # 數據庫選項
     parser.add_argument('--enable-db', dest='enable_db', action='store_true', help='啟用資料庫寫入功能')
@@ -122,80 +123,117 @@ def main():
         # 如果指定了交易對和價差，直接運行做市策略
         try:
             from strategies.market_maker import MarketMaker
+            from strategies.maker_taker_hedge import MakerTakerHedgeStrategy
             from strategies.perp_market_maker import PerpetualMarketMaker
             
             # 處理重平設置
             market_type = args.market_type
 
+            strategy_name = args.strategy
             if market_type == 'perp':
-                logger.info("啟動永續合約做市模式")
-                logger.info(f"啟動永續合約做市模式 (交易所: {exchange})")
+                logger.info(f"啟動永續合約做市模式 (策略: {strategy_name}, 交易所: {exchange})")
                 logger.info(f"  目標持倉量: {abs(args.target_position)}")
                 logger.info(f"  最大持倉量: {args.max_position}")
                 logger.info(f"  倉位觸發值: {args.position_threshold}")
                 logger.info(f"  報價偏移係數: {args.inventory_skew}")
-                market_maker = PerpetualMarketMaker(
-                    api_key=api_key,
-                    secret_key=secret_key,
-                    symbol=args.symbol,
-                    base_spread_percentage=args.spread,
-                    order_quantity=args.quantity,
-                    max_orders=args.max_orders,
-                    target_position=args.target_position,
-                    max_position=args.max_position,
-                    position_threshold=args.position_threshold,
-                    inventory_skew=args.inventory_skew,
-                    stop_loss=args.stop_loss,
-                    take_profit=args.take_profit,
-                    ws_proxy=ws_proxy,
-                    exchange=exchange,
-                    exchange_config=exchange_config,
-                    enable_database=args.enable_db
-                )
+
+                if strategy_name == 'maker_hedge':
+                    market_maker = MakerTakerHedgeStrategy(
+                        api_key=api_key,
+                        secret_key=secret_key,
+                        symbol=args.symbol,
+                        base_spread_percentage=args.spread,
+                        order_quantity=args.quantity,
+                        target_position=args.target_position,
+                        max_position=args.max_position,
+                        position_threshold=args.position_threshold,
+                        inventory_skew=args.inventory_skew,
+                        stop_loss=args.stop_loss,
+                        take_profit=args.take_profit,
+                        ws_proxy=ws_proxy,
+                        exchange=exchange,
+                        exchange_config=exchange_config,
+                        enable_database=args.enable_db,
+                        market_type='perp'
+                    )
+                else:
+                    market_maker = PerpetualMarketMaker(
+                        api_key=api_key,
+                        secret_key=secret_key,
+                        symbol=args.symbol,
+                        base_spread_percentage=args.spread,
+                        order_quantity=args.quantity,
+                        max_orders=args.max_orders,
+                        target_position=args.target_position,
+                        max_position=args.max_position,
+                        position_threshold=args.position_threshold,
+                        inventory_skew=args.inventory_skew,
+                        stop_loss=args.stop_loss,
+                        take_profit=args.take_profit,
+                        ws_proxy=ws_proxy,
+                        exchange=exchange,
+                        exchange_config=exchange_config,
+                        enable_database=args.enable_db
+                    )
 
                 if args.stop_loss is not None:
                     logger.info(f"  止損閾值: {args.stop_loss} {market_maker.quote_asset}")
                 if args.take_profit is not None:
                     logger.info(f"  止盈閾值: {args.take_profit} {market_maker.quote_asset}")
             else:
-                logger.info("啟動現貨做市模式")
-                enable_rebalance = True  # 默認開啟
-                base_asset_target_percentage = 30.0  # 默認30%
-                rebalance_threshold = 15.0  # 默認15%
+                if strategy_name == 'maker_hedge':
+                    logger.info("啟動 Maker-Taker 對沖現貨模式")
+                    market_maker = MakerTakerHedgeStrategy(
+                        api_key=api_key,
+                        secret_key=secret_key,
+                        symbol=args.symbol,
+                        base_spread_percentage=args.spread,
+                        order_quantity=args.quantity,
+                        ws_proxy=ws_proxy,
+                        exchange=exchange,
+                        exchange_config=exchange_config,
+                        enable_database=args.enable_db,
+                        market_type='spot'
+                    )
+                else:
+                    logger.info("啟動現貨做市模式")
+                    enable_rebalance = True  # 默認開啟
+                    base_asset_target_percentage = 30.0  # 默認30%
+                    rebalance_threshold = 15.0  # 默認15%
 
-                if args.disable_rebalance:
-                    enable_rebalance = False
-                elif args.enable_rebalance:
-                    enable_rebalance = True
+                    if args.disable_rebalance:
+                        enable_rebalance = False
+                    elif args.enable_rebalance:
+                        enable_rebalance = True
 
-                if args.base_asset_target is not None:
-                    base_asset_target_percentage = args.base_asset_target
+                    if args.base_asset_target is not None:
+                        base_asset_target_percentage = args.base_asset_target
 
-                if args.rebalance_threshold is not None:
-                    rebalance_threshold = args.rebalance_threshold
+                    if args.rebalance_threshold is not None:
+                        rebalance_threshold = args.rebalance_threshold
 
-                logger.info(f"重平設置:")
-                logger.info(f"  重平功能: {'開啟' if enable_rebalance else '關閉'}")
-                if enable_rebalance:
-                    quote_asset_target_percentage = 100.0 - base_asset_target_percentage
-                    logger.info(f"  目標比例: {base_asset_target_percentage}% 基礎資產 / {quote_asset_target_percentage}% 報價資產")
-                    logger.info(f"  觸發閾值: {rebalance_threshold}%")
+                    logger.info(f"重平設置:")
+                    logger.info(f"  重平功能: {'開啟' if enable_rebalance else '關閉'}")
+                    if enable_rebalance:
+                        quote_asset_target_percentage = 100.0 - base_asset_target_percentage
+                        logger.info(f"  目標比例: {base_asset_target_percentage}% 基礎資產 / {quote_asset_target_percentage}% 報價資產")
+                        logger.info(f"  觸發閾值: {rebalance_threshold}%")
 
-                market_maker = MarketMaker(
-                    api_key=api_key,
-                    secret_key=secret_key,
-                    symbol=args.symbol,
-                    base_spread_percentage=args.spread,
-                    order_quantity=args.quantity,
-                    max_orders=args.max_orders,
-                    enable_rebalance=enable_rebalance,
-                    base_asset_target_percentage=base_asset_target_percentage,
-                    rebalance_threshold=rebalance_threshold,
-                    ws_proxy=ws_proxy,
-                    exchange=exchange,
-                    exchange_config=exchange_config,
-                    enable_database=args.enable_db
-                )
+                    market_maker = MarketMaker(
+                        api_key=api_key,
+                        secret_key=secret_key,
+                        symbol=args.symbol,
+                        base_spread_percentage=args.spread,
+                        order_quantity=args.quantity,
+                        max_orders=args.max_orders,
+                        enable_rebalance=enable_rebalance,
+                        base_asset_target_percentage=base_asset_target_percentage,
+                        rebalance_threshold=rebalance_threshold,
+                        ws_proxy=ws_proxy,
+                        exchange=exchange,
+                        exchange_config=exchange_config,
+                        enable_database=args.enable_db
+                    )
             
             # 執行做市策略
             market_maker.run(duration_seconds=args.duration, interval_seconds=args.interval)

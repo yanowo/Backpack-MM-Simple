@@ -11,6 +11,7 @@ from api.aster_client import AsterClient
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
+from strategies.maker_taker_hedge import MakerTakerHedgeStrategy
 from utils.helpers import calculate_volatility
 from database.db import Database
 from config import API_KEY, SECRET_KEY, ENABLE_DATABASE
@@ -335,6 +336,10 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     market_type_input = input("請選擇市場類型 (spot/perp，默認 spot): ").strip().lower()
     market_type = market_type_input if market_type_input in ("spot", "perp") else "spot"
 
+    strategy_input = input("請選擇策略 (standard/maker_hedge，默認 standard): ").strip().lower()
+    strategy = strategy_input if strategy_input in ("standard", "maker_hedge") else "standard"
+    print(f"已選擇策略: {strategy}")
+
     symbol = input("請輸入要做市的交易對 (例如: SOL_USDC): ")
     client = _get_client(exchange=exchange, exchange_config=exchange_config)
     market_limits = client.get_market_limits(symbol)
@@ -395,7 +400,12 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
         base_asset_target_percentage = 0.0
         rebalance_threshold = 0.0
     else:
-        enable_rebalance, base_asset_target_percentage, rebalance_threshold = configure_rebalance_settings()
+        if strategy == "maker_hedge":
+            enable_rebalance = False
+            base_asset_target_percentage = 0.0
+            rebalance_threshold = 0.0
+        else:
+            enable_rebalance, base_asset_target_percentage, rebalance_threshold = configure_rebalance_settings()
         target_position = 0.0
         max_position = 0.0
         position_threshold = 0.0
@@ -419,44 +429,78 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
 		 
 
         if market_type == "perp":
-            market_maker = PerpetualMarketMaker(
-                api_key=api_key,
-                secret_key=secret_key,
-                symbol=symbol,
-                db_instance=db if USE_DATABASE else None,
-                base_spread_percentage=spread_percentage,
-                order_quantity=quantity,
-                max_orders=max_orders,
-                target_position=target_position,
-                max_position=max_position,
-                position_threshold=position_threshold,
-                inventory_skew=inventory_skew,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                ws_proxy=ws_proxy,
-                # [整合功能] 3. 傳遞交易所參數
-                exchange=exchange,
-                exchange_config=exchange_config,
-                enable_database=USE_DATABASE
-            )
+            if strategy == "maker_hedge":
+                market_maker = MakerTakerHedgeStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    db_instance=db if USE_DATABASE else None,
+                    base_spread_percentage=spread_percentage,
+                    order_quantity=quantity,
+                    target_position=target_position,
+                    max_position=max_position,
+                    position_threshold=position_threshold,
+                    inventory_skew=inventory_skew,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=USE_DATABASE,
+                    market_type="perp"
+                )
+            else:
+                market_maker = PerpetualMarketMaker(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    db_instance=db if USE_DATABASE else None,
+                    base_spread_percentage=spread_percentage,
+                    order_quantity=quantity,
+                    max_orders=max_orders,
+                    target_position=target_position,
+                    max_position=max_position,
+                    position_threshold=position_threshold,
+                    inventory_skew=inventory_skew,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=USE_DATABASE
+                )
         else:
-            market_maker = MarketMaker(
-                api_key=api_key,
-                secret_key=secret_key,
-                symbol=symbol,
-                db_instance=db if USE_DATABASE else None,
-                base_spread_percentage=spread_percentage,
-                order_quantity=quantity,
-                max_orders=max_orders,
-                enable_rebalance=enable_rebalance,
-                base_asset_target_percentage=base_asset_target_percentage,
-                rebalance_threshold=rebalance_threshold,
-                ws_proxy=ws_proxy,
-                # [整合功能] 3. 傳遞交易所參數
-                exchange=exchange,
-                exchange_config=exchange_config,
-                enable_database=USE_DATABASE
-            )
+            if strategy == "maker_hedge":
+                market_maker = MakerTakerHedgeStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    db_instance=db if USE_DATABASE else None,
+                    base_spread_percentage=spread_percentage,
+                    order_quantity=quantity,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=USE_DATABASE,
+                    market_type="spot"
+                )
+            else:
+                market_maker = MarketMaker(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    db_instance=db if USE_DATABASE else None,
+                    base_spread_percentage=spread_percentage,
+                    order_quantity=quantity,
+                    max_orders=max_orders,
+                    enable_rebalance=enable_rebalance,
+                    base_asset_target_percentage=base_asset_target_percentage,
+                    rebalance_threshold=rebalance_threshold,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=USE_DATABASE
+                )
 
         market_maker.run(duration_seconds=duration, interval_seconds=interval)
 
@@ -851,7 +895,7 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_datab
         print("2 - 查詢餘額")
         print("3 - 獲取市場信息")
         print("4 - 獲取訂單簿")
-        print("5 - 執行現貨/合約做市策略")
+        print("5 - 執行現貨/合約做市策略or對沖")
         stats_label = "6 - 交易統計報表" if USE_DATABASE else "6 - 交易統計報表 (已停用)"
         print(stats_label)
         print("7 - 市場分析")
