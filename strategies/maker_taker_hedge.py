@@ -1,6 +1,7 @@
 """Maker掛單 + Taker對沖策略模組。"""
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from logger import setup_logger
@@ -24,9 +25,19 @@ class _MakerTakerHedgeMixin:
         kwargs["enable_rebalance"] = False
 
         self._hedge_label = hedge_label
+        self._hedge_residuals: Dict[str, float] = {"Bid": 0.0, "Ask": 0.0}
+        self._hedge_position_reference: float = 0.0
+        self._hedge_poll_attempts = 6
+        self._hedge_poll_interval = 0.5
+        self._hedge_flat_tolerance = 1e-8
+
         super().__init__(*args, **kwargs)
 
         self.max_orders = 1
+
+        self._hedge_flat_tolerance = max(getattr(self, "min_order_size", 0.0) / 10, 1e-8)
+        self._initialize_hedge_reference_position()
+
         logger.info("初始化 Maker-Taker 對沖策略 (%s)", self._hedge_label)
 
     # ------------------------------------------------------------------
@@ -157,10 +168,21 @@ class _MakerTakerHedgeMixin:
             return
 
         hedge_side = "Ask" if side == "Bid" else "Bid"
-        hedge_qty = round_to_precision(quantity, self.base_precision)
+
+        previous_residual = self._hedge_residuals.get(hedge_side, 0.0)
+        target_quantity = quantity + previous_residual
+        if target_quantity <= 0:
+            logger.debug("對沖目標數量 <= 0，跳過")
+            return
+
+        hedge_qty = round_to_precision(target_quantity, self.base_precision)
+
         if hedge_qty < self.min_order_size:
-            logger.warning(
-                "成交數量 %.8f 低於最小下單量，跳過對沖", quantity
+            self._hedge_residuals[hedge_side] = target_quantity
+            logger.info(
+                "對沖目標 %.8f 低於最小下單量，累積至下次 (殘留 %.8f)",
+                target_quantity,
+                target_quantity,
             )
             return
 
@@ -169,32 +191,153 @@ class _MakerTakerHedgeMixin:
             format_balance(hedge_qty),
             hedge_side,
         )
-        self._execute_taker_hedge(hedge_side, hedge_qty)
+        residual_delta = self._execute_taker_hedge(hedge_side, hedge_qty)
 
-    def _execute_taker_hedge(self, side: str, quantity: float) -> None:
-        """提交市價單完成對沖。"""
+        if residual_delta is None:
+            # 對沖提交失敗，保留完整目標量
+            self._hedge_residuals[hedge_side] = target_quantity
+            return
 
-        order = {
-            "orderType": "Market",
-            "quantity": str(round_to_precision(quantity, self.base_precision)),
-            "side": side,
-            "symbol": self.symbol,
-        }
+        self._hedge_residuals["Bid"] = 0.0
+        self._hedge_residuals["Ask"] = 0.0
 
-        if getattr(self, "exchange", "backpack") == "backpack":
-            order["timeInForce"] = "IOC"
-            order["autoLendRedeem"] = True
-            order["autoLend"] = True
+        if abs(residual_delta) <= self._hedge_flat_tolerance:
+            logger.info("市價對沖已完成，倉位回到參考水位")
+            return
 
-        if isinstance(self, PerpetualMarketMaker):
-            order["reduceOnly"] = True
+        residual_side = "Ask" if residual_delta > 0 else "Bid"
+        residual_amount = round_to_precision(abs(residual_delta), self.base_precision)
+        self._hedge_residuals[residual_side] = residual_amount
+        logger.warning(
+            "市價對沖後仍剩餘倉位 %.8f，記錄為後續殘量 (方向=%s)",
+            residual_amount,
+            residual_side,
+        )
 
-        logger.info("提交市價對沖訂單: %s %s", side, format_balance(quantity))
-        result = self.client.execute_order(order)
-        if isinstance(result, dict) and "error" in result:
-            logger.error(f"市價對沖失敗: {result['error']}")
-        else:
+    def _execute_taker_hedge(self, side: str, quantity: float) -> Optional[float]:
+        """提交市價單完成對沖，並回傳剩餘倉位差值。"""
+
+        attempt_side = side
+        remaining_quantity = round_to_precision(quantity, self.base_precision)
+        last_delta: Optional[float] = None
+
+        current_delta = self._calculate_position_delta()
+        if current_delta is not None:
+            if abs(current_delta) <= self._hedge_flat_tolerance:
+                latest_position = self._fetch_current_position_reference()
+                if latest_position is not None:
+                    self._hedge_position_reference = latest_position
+                logger.info("目前倉位已接近參考水位，無需對沖")
+                return 0.0
+
+            attempt_side = "Ask" if current_delta > 0 else "Bid"
+            remaining_quantity = round_to_precision(abs(current_delta), self.base_precision)
+            logger.debug(
+                "以實際倉位差 %.8f 重新設定對沖方向為 %s", current_delta, attempt_side
+            )
+
+        for attempt in range(1, 4):
+            if remaining_quantity < self.min_order_size:
+                logger.info(
+                    "剩餘對沖量 %.8f 低於最小下單量，停止提交", remaining_quantity
+                )
+                break
+
+            order = {
+                "orderType": "Market",
+                "quantity": str(remaining_quantity),
+                "side": attempt_side,
+                "symbol": self.symbol,
+            }
+
+            if getattr(self, "exchange", "backpack") == "backpack":
+                order["timeInForce"] = "IOC"
+                order["autoLendRedeem"] = True
+                order["autoLend"] = True
+
+            if isinstance(self, PerpetualMarketMaker):
+                order["reduceOnly"] = True
+
+            logger.info(
+                "提交市價對沖訂單: %s %s (第 %d 次嘗試)",
+                attempt_side,
+                format_balance(remaining_quantity),
+                attempt,
+            )
+            result = self.client.execute_order(order)
+            if isinstance(result, dict) and "error" in result:
+                logger.error(f"市價對沖失敗: {result['error']}")
+                return None
+
             logger.info("市價對沖訂單已提交: %s", result.get("id", "未知ID"))
+
+            last_delta = self._poll_position_delta()
+            if last_delta is None:
+                logger.warning("無法從API/WS獲取最新倉位，保留殘量待下次對沖")
+                return None
+
+            if abs(last_delta) <= self._hedge_flat_tolerance:
+                current_position = self._fetch_current_position_reference()
+                if current_position is not None:
+                    self._hedge_position_reference = current_position
+                return 0.0
+
+            attempt_side = "Ask" if last_delta > 0 else "Bid"
+            remaining_quantity = round_to_precision(abs(last_delta), self.base_precision)
+            logger.warning(
+                "市價對沖後仍有倉位差 %.8f，將再次以市價 %s 對沖",
+                abs(last_delta),
+                attempt_side,
+            )
+
+        return last_delta
+
+    def _poll_position_delta(self) -> Optional[float]:
+        """輪詢API/WS獲取最新倉位差值。"""
+
+        delta: Optional[float] = None
+        for _ in range(self._hedge_poll_attempts):
+            time.sleep(self._hedge_poll_interval)
+            delta = self._calculate_position_delta()
+            if delta is None:
+                continue
+            if abs(delta) <= self._hedge_flat_tolerance:
+                break
+        return delta
+
+    def _initialize_hedge_reference_position(self) -> None:
+        """初始化倉位參考水位。"""
+
+        reference = self._fetch_current_position_reference()
+        if reference is None:
+            reference = 0.0
+        self._hedge_position_reference = reference
+        logger.info("對沖參考倉位初始化為 %.8f", reference)
+
+    def _calculate_position_delta(self) -> Optional[float]:
+        """計算當前倉位相對參考水位的差值。"""
+
+        current = self._fetch_current_position_reference()
+        if current is None:
+            return None
+        return current - self._hedge_position_reference
+
+    def _fetch_current_position_reference(self) -> Optional[float]:
+        """透過API或WS獲取當前倉位指標。"""
+
+        try:
+            if isinstance(self, PerpetualMarketMaker):
+                position_info = self._get_actual_position_info()
+                if not position_info:
+                    return 0.0
+                net_quantity = position_info.get("netQuantity")
+                return float(net_quantity or 0.0)
+
+            _, total = self.get_asset_balance(self.base_asset)
+            return float(total or 0.0)
+        except Exception as exc:
+            logger.error("獲取倉位資訊時發生錯誤: %s", exc)
+            return None
 
     def _build_limit_order(self, side: str, price: float, quantity: float) -> Dict[str, str]:
         """依交易所特性構建單向限價訂單負載。"""
