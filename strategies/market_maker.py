@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from api.bp_client import BPClient
 from api.aster_client import AsterClient
+from api.lighter_client import LighterClient
 from ws_client.client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
@@ -66,6 +67,8 @@ class MarketMaker:
         elif exchange == 'paradex':
             from api.paradex_client import ParadexClient
             self.client = ParadexClient(self.exchange_config)
+        elif exchange == 'lighter':
+            self.client = LighterClient(self.exchange_config)
         else:
             raise ValueError(f"不支持的交易所: {exchange}")
             
@@ -772,6 +775,8 @@ class MarketMaker:
         if not self.ws:
             # aster 和 paradex 沒有 WebSocket，直接返回 True
             if self.exchange in ('aster', 'paradex'):
+                return True
+            if self.exchange == 'lighter':
                 return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
