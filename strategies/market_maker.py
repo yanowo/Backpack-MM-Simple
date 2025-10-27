@@ -100,6 +100,7 @@ class MarketMaker:
         self.session_maker_sell_volume = 0.0
         self.session_taker_buy_volume = 0.0
         self.session_taker_sell_volume = 0.0
+        self.session_quote_volume = 0.0
 
         # 初始化市場限制
         self.market_limits = self.client.get_market_limits(symbol)
@@ -118,6 +119,7 @@ class MarketMaker:
         self.maker_sell_volume = 0
         self.taker_buy_volume = 0
         self.taker_sell_volume = 0
+        self.total_quote_volume = 0.0
         self.total_fees = 0
 
         # 關鍵：在任何可能出錯的代碼之前初始化這些屬性
@@ -402,10 +404,12 @@ class MarketMaker:
                     quantity = float(quantity)
                     price = float(price)
                     fee = float(fee)
-                    
+                    quote_volume = abs(quantity * price)
+
                     if side == 'Bid':  # 買入
                         self.buy_trades.append((price, quantity))
                         self.total_bought += quantity
+                        self.total_quote_volume += quote_volume
                         if maker:
                             self.maker_buy_volume += quantity
                         else:
@@ -413,6 +417,7 @@ class MarketMaker:
                     elif side == 'Ask':  # 賣出
                         self.sell_trades.append((price, quantity))
                         self.total_sold += quantity
+                        self.total_quote_volume += quote_volume
                         if maker:
                             self.maker_sell_volume += quantity
                         else:
@@ -670,6 +675,10 @@ class MarketMaker:
 
             safe_insert_order()
 
+        trade_quote_volume = abs(quantity * price)
+        self.total_quote_volume += trade_quote_volume
+        self.session_quote_volume += trade_quote_volume
+
         if normalized_side == 'Bid':
             self.total_bought += quantity
             self.buy_trades.append((price, quantity))
@@ -900,6 +909,10 @@ class MarketMaker:
                 }
                 
                 # 更新統計
+                quote_volume = abs(filled_size * price)
+                self.total_quote_volume += quote_volume
+                self.session_quote_volume += quote_volume
+
                 if side == 'buy':
                     self.total_bought += filled_size
                     if is_maker:
@@ -954,10 +967,38 @@ class MarketMaker:
             logger.error(f"處理訂單更新時出錯: {e}")
             traceback.print_exc()
     
+    def _calculate_memory_profit(self) -> float:
+        """使用記憶體中的成交記錄計算已實現利潤（FIFO）。"""
+        if not self.buy_trades or not self.sell_trades:
+            return 0.0
+
+        buy_queue: List[Tuple[float, float]] = [
+            (float(price), float(quantity)) for price, quantity in self.buy_trades
+        ]
+        total_profit = 0.0
+
+        for sell_price, sell_quantity in self.sell_trades:
+            remaining_sell = float(sell_quantity)
+            sell_price = float(sell_price)
+
+            while remaining_sell > 0 and buy_queue:
+                buy_price, buy_quantity = buy_queue[0]
+                matched_quantity = min(remaining_sell, buy_quantity)
+
+                total_profit += (sell_price - buy_price) * matched_quantity
+
+                remaining_sell -= matched_quantity
+                if matched_quantity >= buy_quantity:
+                    buy_queue.pop(0)
+                else:
+                    buy_queue[0] = (buy_price, buy_quantity - matched_quantity)
+
+        return total_profit
+
     def _calculate_db_profit(self):
         """基於數據庫記錄計算已實現利潤（FIFO方法）"""
         if not self._db_available():
-            return 0
+            return self._calculate_memory_profit()
         try:
             # 獲取訂單歷史，注意這裡將返回一個列表
             order_history = self.db.get_order_history(self.symbol)
@@ -1774,6 +1815,7 @@ class MarketMaker:
                 ("Maker成交量", f"買 {self.session_maker_buy_volume:.3f} {self.base_asset} | 賣 {self.session_maker_sell_volume:.3f} {self.base_asset}"),
                 ("Taker成交量", f"買 {self.session_taker_buy_volume:.3f} {self.base_asset} | 賣 {self.session_taker_sell_volume:.3f} {self.base_asset}"),
             ]
+            session_rows.insert(1, ("成交額", f"{self.session_quote_volume:.2f} {self.quote_asset}"))
         else:
             session_rows = [
                 "本次迭代沒有成交記錄",
@@ -1809,14 +1851,24 @@ class MarketMaker:
             )
         )
 
+        if self.total_quote_volume > 0:
+            wear_rate_value = abs(net_pnl) / self.total_quote_volume * 100
+            wear_rate_display = f"{wear_rate_value:.4f}%"
+        else:
+            wear_rate_display = "N/A"
+
+        trade_rows = [
+            ("總成交量", f"買 {self.total_bought:.3f} {self.base_asset} | 賣 {self.total_sold:.3f} {self.base_asset}"),
+            ("總成交額", f"{self.total_quote_volume:.2f} {self.quote_asset}"),
+            ("Maker總量", f"買 {self.maker_buy_volume:.3f} {self.base_asset} | 賣 {self.maker_sell_volume:.3f} {self.base_asset}"),
+            ("Taker總量", f"買 {self.taker_buy_volume:.3f} {self.base_asset} | 賣 {self.taker_sell_volume:.3f} {self.base_asset}"),
+            ("磨損率", wear_rate_display),
+        ]
+
         sections.append(
             (
                 "成交概況",
-                [
-                    ("總成交量", f"買 {self.total_bought:.3f} {self.base_asset} | 賣 {self.total_sold:.3f} {self.base_asset}"),
-                    ("Maker總量", f"買 {self.maker_buy_volume:.3f} {self.base_asset} | 賣 {self.maker_sell_volume:.3f} {self.base_asset}"),
-                    ("Taker總量", f"買 {self.taker_buy_volume:.3f} {self.base_asset} | 賣 {self.taker_sell_volume:.3f} {self.base_asset}"),
-                ],
+                trade_rows,
             )
         )
 
