@@ -3,3 +3,4 @@ requests
 websocket-client
 numpy
 python-dotenv
+starknet-py

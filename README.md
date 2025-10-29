@@ -1,6 +1,6 @@
-# Backpack Exchange 做市交易程序
+# 加密貨幣做市交易程序
 
-這是一個針對 Backpack Exchange 的加密貨幣做市交易程序。該程序提供自動化做市功能，通過維持買賣價差賺取利潤。
+這是一個支援多交易所的加密貨幣做市交易程序。該程序提供自動化做市功能，通過維持買賣價差賺取利潤。目前支援 **Backpack**、**Aster** 和 **Paradex** 交易所。
 
 Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.exchange/refer/yan)
 
@@ -10,11 +10,13 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 ## 功能特點
 
-- **多交易所架構**：支援 Backpack、未來可擴展至其他交易所
+- **多交易所架構**：支援 Backpack、Aster、Paradex，可擴展至其他交易所
+- **Paradex 整合**：完整支援 Paradex 永續合約交易，包含 JWT 自動更新機制
 - **自動化做市策略**：智能價差管理和訂單調整
 - **Maker-Taker 對沖策略**：僅在買一/賣一掛單並於成交後以市價單即刻對沖，支援現貨與永續市場
 - **永續合約做市**：倉位風險管理與風險中性機制
 - **智能重平衡系統**：自動維持資產配置比例
+- **JWT 自動更新**：Paradex JWT token 自動刷新，避免認證過期
 - **增強日誌系統**：詳細的市場狀態和策略追蹤
 - **WebSocket 實時連接**：即時市場數據和訂單更新
 - **命令行界面**：靈活的參數配置和策略執行
@@ -29,8 +31,9 @@ lemon_trader/
 │   ├── __init__.py
 │   ├── auth.py           # API認證和簽名相關
 │   ├── base_client.py    # 抽象基礎客户端 (支持繼承開發接入任意交易所)
+│   ├── bp_client.py      # Backpack Exchange 客户端
 │   ├── aster_client.py   # Aster Exchange 客户端
-│   └── bp_client.py      # Backpack Exchange 客户端
+│   └── paradex_client.py # Paradex Exchange 客户端 (含 JWT 認證)
 │
 ├── websocket/            # WebSocket模塊
 │   ├── __init__.py
@@ -68,6 +71,7 @@ lemon_trader/
   - websocket-client
   - numpy
   - python-dotenv
+  - eth-account (用於 Paradex JWT 簽名)
 
 ## 安裝
 
@@ -99,6 +103,12 @@ BASE_URL=https://api.backpack.work
 ASTER_API_KEY=your_aster_api_key
 ASTER_SECRET_KEY=your_aster_secret_key
 
+# Paradex Exchange (使用 StarkNet 賬户認證)
+PARADEX_PRIVATE_KEY=your_starknet_private_key
+PARADEX_ACCOUNT_ADDRESS=your_starknet_account_address
+PARADEX_BASE_URL=https://api.prod.paradex.trade/v1
+PARADEX_PROXY_WEBSOCKET=
+
 # Optional Features
 # ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
 ```
@@ -129,14 +139,20 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.02
 # 直接運行 Aster 永續做市
 python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 3600 --interval 10
 
+# 直接運行 Paradex 永續做市
+python run.py --exchange paradex --market-type perp --symbol ETH-USD-PERP --spread 0.02 --quantity 0.01 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
+
+# 直接運行 Paradex Maker-Taker 對沖
+python run.py --exchange paradex --market-type perp --symbol ETH-USD-PERP --spread 0.01 --quantity 0.01 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 15
+
 ```
 
 ### 命令行參數
 
 #### 基本參數
 - `--api-key`: API 密鑰 (可選，默認使用環境變數)
-- `--secret-key`: API 密鑰 (可選，默認使用環境變數)
-- `--exchange`: 交易所選擇 (默認: backpack)
+- `--secret-key`: API 密鑰 (可選，默認使用環境變數；Paradex 使用以太坊私鑰)
+- `--exchange`: 交易所選擇 (支援: `backpack`, `aster`, `paradex`，默認: `backpack`)
 - `--ws-proxy`: Websocket 代理 (可選，默認使用環境變數)
 - `--cli`: 啟動命令行界面
 - `--enable-db`: 啟用資料庫寫入 (預設關閉)

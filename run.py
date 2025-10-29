@@ -6,6 +6,7 @@ Backpack Exchange 做市交易程序統一入口
 import argparse
 import sys
 import os
+from typing import Optional
 from config import ENABLE_DATABASE
 from logger import setup_logger
 
@@ -20,7 +21,7 @@ def parse_arguments():
     parser.add_argument('--cli', action='store_true', help='啟動命令行界面')
     
     # 基本參數
-    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster'], default='backpack', help='交易所選擇 (backpack 或 aster)')
+    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex'], default='backpack', help='交易所選擇 (backpack, aster 或 paradex)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--ws-proxy', type=str, help='WebSocket Proxy (可選，默認使用環境變數或配置文件)')
@@ -80,9 +81,15 @@ def main():
     validate_rebalance_args(args)
     
     exchange = args.exchange
+    api_key = ''
+    secret_key = ''
+    account_address: Optional[str] = None
+    ws_proxy = None
+    exchange_config = {}
+
     if exchange == 'backpack':
-        api_key = os.getenv('BACKPACK_KEY')
-        secret_key = os.getenv('BACKPACK_SECRET')
+        api_key = os.getenv('BACKPACK_KEY', '')
+        secret_key = os.getenv('BACKPACK_SECRET', '')
         ws_proxy = os.getenv('BACKPACK_PROXY_WEBSOCKET')
         base_url = os.getenv('BASE_URL', 'https://api.backpack.work')
         exchange_config = {
@@ -93,29 +100,48 @@ def main():
             'default_window': '5000'
         }
     elif exchange == 'aster':
-        api_key = os.getenv('ASTER_API_KEY')
-        secret_key = os.getenv('ASTER_SECRET_KEY')
+        api_key = os.getenv('ASTER_API_KEY', '')
+        secret_key = os.getenv('ASTER_SECRET_KEY', '')
         ws_proxy = os.getenv('ASTER_PROXY_WEBSOCKET')
         exchange_config = {
             'api_key': api_key,
             'secret_key': secret_key,
         }
+    elif exchange == 'paradex':
+        private_key = os.getenv('PARADEX_PRIVATE_KEY', '')  # StarkNet 私鑰
+        account_address = os.getenv('PARADEX_ACCOUNT_ADDRESS')  # StarkNet 帳戶地址
+        ws_proxy = os.getenv('PARADEX_PROXY_WEBSOCKET')
+        base_url = os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1')
+
+        secret_key = private_key
+        api_key = ''  # Paradex 不需要 API Key
+
+        exchange_config = {
+            'private_key': private_key,
+            'account_address': account_address,
+            'base_url': base_url,
+        }
     else:
-        logger.error("不支持的交易所，請選擇 'backpack' 或 'aster'")
+        logger.error("不支持的交易所，請選擇 'backpack', 'aster' 或 'paradex'")
         sys.exit(1)
 
-    
     # 檢查API密鑰
-    if not api_key or not secret_key:
-        logger.error("缺少API密鑰，請通過命令行參數或環境變量提供")
-        sys.exit(1)
+    if exchange == 'paradex':
+        if not secret_key or not account_address:
+            logger.error("Paradex 需要提供 StarkNet 私鑰與帳戶地址，請確認環境變數已設定")
+            sys.exit(1)
+    else:
+        if not api_key or not secret_key:
+            logger.error("缺少API密鑰，請通過命令行參數或環境變量提供")
+            sys.exit(1)
+
     
     # 決定執行模式
     if args.cli:
         # 啟動命令行界面
         try:
             from cli.commands import main_cli
-            main_cli(api_key, secret_key, ws_proxy=ws_proxy, enable_database=args.enable_db)
+            main_cli(api_key, secret_key, ws_proxy=ws_proxy, enable_database=args.enable_db, exchange=exchange)
         except ImportError as e:
             logger.error(f"啟動命令行界面時出錯: {str(e)}")
             sys.exit(1)
