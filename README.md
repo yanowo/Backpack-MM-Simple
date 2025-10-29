@@ -4,6 +4,8 @@
 
 Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.exchange/refer/yan)
 
+Paradex 註冊連結：[https://app.paradex.trade/r/yanowo](https://app.paradex.trade/r/yanowo)
+
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 **使用本程式運行 MM 策略 可獲得 10~30% 自返傭 (每週由官方自動發放)**
