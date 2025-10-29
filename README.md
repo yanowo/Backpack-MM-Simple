@@ -146,10 +146,10 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 15
 
 # Paradex 永續做市
-python run.py --exchange paradex --market-type perp --symbol ETH-USD-PERP --spread 0.01 --quantity 0.01 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
+python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
 
 # Paradex Maker-Taker 對沖
-python run.py --exchange paradex --market-type perp --symbol ETH-USD-PERP --spread 0.01 --quantity 0.01 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
+python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 
 ```
 
