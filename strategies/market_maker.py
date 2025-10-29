@@ -63,6 +63,9 @@ class MarketMaker:
             self.client = BPClient(self.exchange_config)
         elif exchange == 'aster':
             self.client = AsterClient(self.exchange_config)
+        elif exchange == 'paradex':
+            from api.paradex_client import ParadexClient
+            self.client = ParadexClient(self.exchange_config)
         else:
             raise ValueError(f"不支持的交易所: {exchange}")
             
@@ -758,14 +761,14 @@ class MarketMaker:
             logger.error(f"成交後置處理時出錯: {hook_error}")
 
     def _after_fill_processed(self, fill_info: Dict[str, Any]) -> None:
-        """留給子類覆蓋的成交後置處理鉤子"""
+        """留給子類覆蓋的成交後置處理鈎子"""
         return
 
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
-            # aster 沒有 WebSocket，直接返回 True
-            if self.exchange == 'aster':
+            # aster 和 paradex 沒有 WebSocket，直接返回 True
+            if self.exchange in ('aster', 'paradex'):
                 return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
@@ -845,8 +848,25 @@ class MarketMaker:
                     price = float(data.get('L', '0'))
                     order_id = data.get('i')
                     maker = data.get('m', False)
-                    fee = float(data.get('n', '0'))
-                    fee_asset = data.get('N', '')
+                    
+                    # 解析手續費信息（處理各種可能的字段名）
+                    fee = 0.0
+                    fee_asset = self.quote_asset
+                    fee_fields = [
+                        ('n', 'N'),  # n: fee amount, N: fee asset
+                        ('fee', 'fee_currency'),
+                        ('commission', 'commissionAsset')
+                    ]
+                    for amount_field, asset_field in fee_fields:
+                        fee_amount = data.get(amount_field)
+                        if fee_amount is not None:
+                            try:
+                                fee = float(fee_amount)
+                                fee_asset = data.get(asset_field, self.quote_asset)
+                                break
+                            except (TypeError, ValueError):
+                                continue
+                    
                     trade_id = data.get('t')
                     timestamp = data.get('T') or data.get('E')
 
@@ -857,6 +877,13 @@ class MarketMaker:
                             timestamp_int = int(timestamp)
                         except (TypeError, ValueError):
                             timestamp_int = None
+
+                    logger.info(
+                        f"WebSocket 成交通知: {'買' if side == 'BUY' else '賣'}單成交 "
+                        f"{quantity} @ {price}, "
+                        f"{'Maker' if maker else 'Taker'}, "
+                        f"手續費: {fee} {fee_asset}"
+                    )
 
                     self._process_order_fill_event(
                         side=side,
@@ -1725,66 +1752,96 @@ class MarketMaker:
         self.active_sell_orders = []
     
     def check_order_fills(self):
-        """檢查訂單成交情況"""
         open_orders = self.client.get_open_orders(self.symbol)
-        
         if isinstance(open_orders, dict) and "error" in open_orders:
             logger.error(f"獲取訂單失敗: {open_orders['error']}")
-            return
-        
-        # 獲取當前所有訂單ID
+            return []
         current_order_ids = set()
         if open_orders:
             for order in open_orders:
                 order_id = order.get('id')
                 if order_id:
                     current_order_ids.add(order_id)
-        
-        # 記錄更新前的訂單數量
         prev_buy_orders = len(self.active_buy_orders)
         prev_sell_orders = len(self.active_sell_orders)
-        
-        # 更新活躍訂單列表
+        filled_order_ids = []
+        for order in self.active_buy_orders + self.active_sell_orders:
+            order_id = order.get('id')
+            if order_id and order_id not in current_order_ids:
+                filled_order_ids.append(order_id)
+        filled_trades = []
+        if filled_order_ids:
+            try:
+                recent_fills = self.client.get_fill_history(self.symbol, limit=50)
+                if recent_fills and not (isinstance(recent_fills, dict) and "error" in recent_fills):
+                    if not hasattr(self, '_processed_fill_ids'):
+                        self._processed_fill_ids = set()
+                    for fill in recent_fills:
+                        fill_id = fill.get('id')
+                        fill_order_id = fill.get('order_id')
+                        if fill_id in self._processed_fill_ids:
+                            continue
+                        if fill_order_id in filled_order_ids:
+                            filled_trades.append(fill)
+                            self._processed_fill_ids.add(fill_id)
+                            side = fill.get('side', '').upper()
+                            price = float(fill.get('price', 0))
+                            size = float(fill.get('size', 0))
+                            liquidity = fill.get('liquidity', 'UNKNOWN')
+                            realized_pnl = fill.get('realized_pnl', 0)
+                            is_maker = liquidity.upper() == 'MAKER'
+                            
+                            # 獲取手續費信息
+                            fee = float(fill.get('fee', 0))
+                            fee_currency = fill.get('fee_currency', self.quote_asset)
+                            
+                            # 構建完整的成交資訊
+                            fill_info = {
+                                'side': 'Bid' if side == 'BUY' else 'Ask',
+                                'quantity': size,
+                                'price': price,
+                                'maker': is_maker,
+                                'order_id': fill.get('order_id'),
+                                'trade_id': fill.get('id'),
+                                'realized_pnl': realized_pnl,
+                                'fee': fee,
+                                'fee_currency': fee_currency
+                            }
+                            
+                            logger.info(
+                                f"✓ {'買' if side == 'BUY' else '賣'}單成交 ({liquidity}): "
+                                f"{size} @ {price}, 已實現盈虧: {realized_pnl}, 手續費: {fee} {fee_currency}"
+                            )
+                            
+                            # 觸發成交後處理
+                            self._process_order_fill_event(
+                                side=fill_info['side'],
+                                quantity=fill_info['quantity'],
+                                price=fill_info['price'],
+                                order_id=fill_info['order_id'],
+                                maker=fill_info['maker'],
+                                fee=fee,
+                                fee_asset=fee_currency,
+                                trade_id=fill_info['trade_id'],
+                                source='rest',
+                                timestamp=int(time.time() * 1000)
+                            )
+            except Exception as e:
+                logger.error(f"獲取成交記錄失敗: {e}")
         active_buy_orders = []
         active_sell_orders = []
-        
         if open_orders:
             for order in open_orders:
-                if order.get('side') == 'Bid':
+                if order.get('side') == 'Bid' or order.get('side') == 'BUY':
                     active_buy_orders.append(order)
-                elif order.get('side') == 'Ask':
+                elif order.get('side') == 'Ask' or order.get('side') == 'SELL':
                     active_sell_orders.append(order)
-        
-        # 檢查買單成交
-        filled_buy_orders = []
-        for order in self.active_buy_orders:
-            order_id = order.get('id')
-            if order_id and order_id not in current_order_ids:
-                price = float(order.get('price', 0))
-                quantity = float(order.get('quantity', 0))
-                logger.info(f"買單已成交: {price} x {quantity}")
-                filled_buy_orders.append(order)
-        
-        # 檢查賣單成交
-        filled_sell_orders = []
-        for order in self.active_sell_orders:
-            order_id = order.get('id')
-            if order_id and order_id not in current_order_ids:
-                price = float(order.get('price', 0))
-                quantity = float(order.get('quantity', 0))
-                logger.info(f"賣單已成交: {price} x {quantity}")
-                filled_sell_orders.append(order)
-        
-        # 更新活躍訂單列表
         self.active_buy_orders = active_buy_orders
         self.active_sell_orders = active_sell_orders
-        
-        # 輸出訂單數量變化，方便追蹤
         if prev_buy_orders != len(active_buy_orders) or prev_sell_orders != len(active_sell_orders):
             logger.info(f"訂單數量變更: 買單 {prev_buy_orders} -> {len(active_buy_orders)}, 賣單 {prev_sell_orders} -> {len(active_sell_orders)}")
-        
         logger.info(f"當前活躍訂單: 買單 {len(self.active_buy_orders)} 個, 賣單 {len(self.active_sell_orders)} 個")
-    
+        return filled_trades
     def estimate_profit(self, pnl_data=None):
         """輸出本次迭代的關鍵統計資訊。"""
         if pnl_data is None:

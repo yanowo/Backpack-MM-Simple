@@ -155,17 +155,56 @@ class _MakerTakerHedgeMixin:
     # 成交後置處理
     # ------------------------------------------------------------------
     def _after_fill_processed(self, fill_info: Dict[str, Any]) -> None:
-        """Maker成交後立即以市價對沖。"""
+        """所有成交後立即以市價對沖。"""
 
         super()._after_fill_processed(fill_info)
 
-        if not fill_info.get("maker"):
-            return
-
+        # 獲取成交詳情
         side = fill_info.get("side")
         quantity = float(fill_info.get("quantity", 0) or 0)
+        price = float(fill_info.get("price", 0) or 0)
+        
         if not side or quantity <= 0:
+            logger.warning("成交資訊不完整，跳過對沖")
             return
+            
+        logger.info(f"處理Maker成交：{side} {quantity}@{price}")
+            
+        # 先更新當前倉位引用
+        current_position = self._fetch_current_position_reference()
+        if current_position is not None:
+            self._hedge_position_reference = 0.0  # 將目標倉位設為0
+            logger.info(f"當前倉位：{current_position}")
+            
+            # 根據實際倉位計算對沖量
+            if abs(current_position) > self._hedge_flat_tolerance:
+                hedge_side = "Ask" if current_position > 0 else "Bid"
+                hedge_qty = round_to_precision(abs(current_position), self.base_precision)
+                
+                if hedge_qty >= self.min_order_size:
+                    logger.info(f"根據實際倉位執行對沖：{hedge_side} {hedge_qty}")
+                    
+                    # 提交對沖訂單
+                    order = {
+                        "orderType": "Market",
+                        "quantity": str(hedge_qty),
+                        "side": hedge_side,
+                        "symbol": self.symbol,
+                        "reduceOnly": True  # 確保是對沖訂單
+                    }
+                    
+                    # 執行對沖訂單
+                    result = self.client.execute_order(order)
+                    if isinstance(result, dict) and "error" in result:
+                        logger.error(f"對沖訂單執行失敗: {result['error']}")
+                    else:
+                        logger.info(f"對沖訂單已提交: {result.get('id', 'unknown')}")
+                else:
+                    logger.info(f"當前倉位 {current_position} 小於最小下單量，暫不對沖")
+            else:
+                logger.info("當前倉位接近0，無需對沖")
+        else:
+            logger.error("無法獲取當前倉位，對沖失敗")
 
         hedge_side = "Ask" if side == "Bid" else "Bid"
 
@@ -327,16 +366,53 @@ class _MakerTakerHedgeMixin:
 
         try:
             if isinstance(self, PerpetualMarketMaker):
-                position_info = self._get_actual_position_info()
-                if not position_info:
-                    return 0.0
-                net_quantity = position_info.get("netQuantity")
-                return float(net_quantity or 0.0)
+                # 強制重新獲取倉位信息
+                for attempt in range(3):  # 最多重試3次
+                    positions = self.client.get_positions(self.symbol)
+                    
+                    if isinstance(positions, dict) and "error" in positions:
+                        error_msg = positions.get("error", "")
+                        if "404" in str(error_msg) or "RESOURCE_NOT_FOUND" in str(error_msg):
+                            logger.info("無倉位記錄，當前倉位為0")
+                            return 0.0
+                        logger.error(f"獲取倉位失敗 (嘗試 {attempt + 1}/3): {error_msg}")
+                        if attempt < 2:  # 如果不是最後一次嘗試
+                            time.sleep(0.5)  # 等待500ms後重試
+                            continue
+                        return None
+
+                    if isinstance(positions, list):
+                        if not positions:
+                            logger.info("無倉位記錄，當前倉位為0")
+                            return 0.0
+                            
+                        position = positions[0]
+                        # 嘗試所有可能的字段名
+                        for field in ["netQuantity", "size", "position_size", "amount"]:
+                            if field in position:
+                                net_value = float(position[field] or 0)
+                                logger.info(f"當前倉位 (from {field}): {net_value}")
+                                return net_value
+                                
+                        logger.warning(f"倉位信息中找不到數量字段: {position}")
+                        return 0.0
+                    
+                    logger.error(f"意外的API響應格式: {positions}")
+                    if attempt < 2:
+                        time.sleep(0.5)
+                        continue
+                    return None
+
+                logger.error("多次嘗試後仍無法獲取有效倉位信息")
+                return None
 
             _, total = self.get_asset_balance(self.base_asset)
             return float(total or 0.0)
+            
         except Exception as exc:
             logger.error("獲取倉位資訊時發生錯誤: %s", exc)
+            import traceback
+            logger.error(f"詳細錯誤: {traceback.format_exc()}")
             return None
 
     def _build_limit_order(self, side: str, price: float, quantity: float) -> Dict[str, str]:

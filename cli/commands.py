@@ -8,6 +8,7 @@ from datetime import datetime
 
 from api.bp_client import BPClient
 from api.aster_client import AsterClient
+from api.paradex_client import ParadexClient
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -36,6 +37,16 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
             os.getenv("ASTER_SECRET_KEY"),
             os.getenv("ASTER_SECRET"),
         ]
+    elif exchange == "paradex":
+        # Paradex 使用 StarkNet 認證，不需要傳統的 API Key
+        # 使用 account_address 作為 api_key 的佔位符
+        api_candidates = [
+            os.getenv("PARADEX_ACCOUNT_ADDRESS"),
+        ]
+        secret_candidates = [
+            os.getenv("PARADEX_PRIVATE_KEY"),
+        ]
+        # Paradex 使用 StarkNet 賬户地址和私鑰進行認證
     else:
         api_candidates = [
             os.getenv("BACKPACK_KEY"),
@@ -55,12 +66,12 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
 def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_config=None):
     """獲取緩存的客户端實例，避免重複創建"""
     exchange = (exchange or 'backpack').lower()
-    if exchange not in ('backpack', 'aster'):
+    if exchange not in ('backpack', 'aster', 'paradex'):
         raise ValueError(f"不支持的交易所: {exchange}")
 
     config = dict(exchange_config or {})
     config_api_key = api_key or config.get('api_key')
-    config_secret_key = secret_key or config.get('secret_key')
+    config_secret_key = secret_key or config.get('secret_key') or config.get('private_key')
 
     if config_api_key:
         config['api_key'] = config_api_key
@@ -68,19 +79,28 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
         config.pop('api_key', None)
 
     if config_secret_key:
-        config['secret_key'] = config_secret_key
+        if exchange == 'paradex':
+            config['private_key'] = config_secret_key  # Paradex 使用私钥
+        else:
+            config['secret_key'] = config_secret_key
     else:
         config.pop('secret_key', None)
+        config.pop('private_key', None)
 
     cache_suffix = (
-        f"{config.get('api_key', '')}_{config.get('secret_key', '')}"
-        if config.get('api_key') or config.get('secret_key')
+        f"{config.get('api_key', '')}_{config.get('secret_key', '') or config.get('private_key', '')}"
+        if config.get('api_key') or config.get('secret_key') or config.get('private_key')
         else 'public'
     )
     cache_key = f"{exchange}:{cache_suffix}"
 
     if cache_key not in _client_cache:
-        client_cls = BPClient if exchange == 'backpack' else AsterClient
+        if exchange == 'backpack':
+            client_cls = BPClient
+        elif exchange == 'aster':
+            client_cls = AsterClient
+        else:  # paradex
+            client_cls = ParadexClient
         _client_cache[cache_key] = client_cls(config)
 
     return _client_cache[cache_key]
@@ -305,15 +325,25 @@ def configure_rebalance_settings():
 def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     """執行做市策略命令"""
     # [整合功能] 1. 增加交易所選擇
-    exchange_input = input("請選擇交易所 (backpack/aster，默認 backpack): ").strip().lower()
-    exchange = exchange_input if exchange_input in ('backpack', 'aster') else 'backpack'
+    exchange_input = input("請選擇交易所 (backpack/aster/paradex，默認 backpack): ").strip().lower()
+
+    # 處理交易所選擇
+    if exchange_input in ('backpack', 'aster', 'paradex', ''):
+        exchange = exchange_input if exchange_input else 'backpack'
+    else:
+        print(f"警告: 不識別的交易所 '{exchange_input}'，使用默認 'backpack'")
+        exchange = 'backpack'
+
     print(f"已選擇交易所: {exchange}")
 
     # [整合功能] 2. 根據選擇配置交易所信息
     api_key, secret_key = _resolve_api_credentials(exchange, api_key, secret_key)
 
     if not api_key or not secret_key:
-        print("錯誤：未找到對應交易所的 API Key 或 Secret Key，請先設置環境變數或配置檔案。")
+        if exchange == 'paradex':
+            print("錯誤：未找到 Paradex 的賬户地址或私鑰，請先設置 PARADEX_ACCOUNT_ADDRESS 和 PARADEX_PRIVATE_KEY 環境變數。")
+        else:
+            print("錯誤：未找到對應交易所的 API Key 或 Secret Key，請先設置環境變數或配置檔案。")
         return
 
     if exchange == 'backpack':
@@ -329,15 +359,42 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
             'api_key': api_key,
             'secret_key': secret_key,
         }
+    elif exchange == 'paradex':
+        exchange_config = {
+            'private_key': secret_key,  # Paradex 使用 StarkNet 私钥
+            'account_address': api_key or os.getenv('PARADEX_ACCOUNT_ADDRESS'),  # StarkNet 账户地址
+            'base_url': os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1'),
+        }
     else:
         print("錯誤：不支持的交易所。")
         return
 
+    # 市場類型選擇
     market_type_input = input("請選擇市場類型 (spot/perp，默認 spot): ").strip().lower()
-    market_type = market_type_input if market_type_input in ("spot", "perp") else "spot"
 
+    # 處理常見別名
+    if market_type_input in ("perpetual", "future", "futures", "contract"):
+        print(f"提示: 已識別為永續合約 'perp'")
+        market_type = "perp"
+    elif market_type_input in ("spot", "perp", ""):
+        market_type = market_type_input if market_type_input else "spot"
+    else:
+        print(f"警告: 不識別的市場類型 '{market_type_input}'，使用默認 'spot'")
+        market_type = "spot"
+
+    # 策略選擇（支援拼寫糾正）
     strategy_input = input("請選擇策略 (standard/maker_hedge，默認 standard): ").strip().lower()
-    strategy = strategy_input if strategy_input in ("standard", "maker_hedge") else "standard"
+
+    # 處理常見拼寫錯誤
+    if strategy_input in ("marker_hedge", "make_hedge", "makertaker", "maker-hedge"):
+        print(f"提示: 已自動糾正 '{strategy_input}' -> 'maker_hedge'")
+        strategy = "maker_hedge"
+    elif strategy_input in ("standard", "maker_hedge", ""):
+        strategy = strategy_input if strategy_input else "standard"
+    else:
+        print(f"警告: 不識別的策略 '{strategy_input}'，使用默認策略 'standard'")
+        strategy = "standard"
+
     print(f"已選擇策略: {strategy}")
 
     symbol = input("請輸入要做市的交易對 (例如: SOL_USDC): ")
@@ -881,7 +938,7 @@ def market_analysis_command(api_key, secret_key, ws_proxy=None):
         import traceback
         traceback.print_exc()
 
-def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_database=ENABLE_DATABASE):
+def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_database=ENABLE_DATABASE, exchange='backpack'):
     """主CLI函數"""
     global USE_DATABASE
     USE_DATABASE = bool(enable_database)
@@ -889,8 +946,15 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_datab
     if not USE_DATABASE:
         print("提示: 資料庫寫入功能已關閉，統計與歷史查詢功能將不可用。")
 
+    # 显示当前交易所
+    exchange_display = {
+        'backpack': 'Backpack',
+        'aster': 'Aster',
+        'paradex': 'Paradex'
+    }.get(exchange.lower(), 'Backpack')
+
     while True:
-        print("\n===== Backpack Exchange 交易程序 =====")
+        print(f"\n===== {exchange_display} 交易程序 =====")
         print("1 - 查詢存款地址")
         print("2 - 查詢餘額")
         print("3 - 獲取市場信息")
