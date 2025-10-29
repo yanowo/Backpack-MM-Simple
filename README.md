@@ -68,12 +68,12 @@ lemon_trader/
 
 - Python 3.8 或更高版本
 - 所需第三方庫：
-  - nacl (用於API簽名)
+  - PyNaCl
   - requests
   - websocket-client
   - numpy
   - python-dotenv
-  - eth-account (用於 Paradex JWT 簽名)
+  - starknet-py
 
 ## 安裝
 
@@ -98,7 +98,9 @@ pip install -r requirements.txt
 # Backpack Exchange
 BACKPACK_KEY=your_backpack_api_key
 BACKPACK_SECRET=your_backpack_secret_key
-BACKPACK_PROXY_WEBSOCKET=http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
+
+# WS 代理格式 http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
+BACKPACK_PROXY_WEBSOCKET=
 BASE_URL=https://api.backpack.work
 
 # Aster Exchange
@@ -123,29 +125,31 @@ PARADEX_PROXY_WEBSOCKET=
 # 啟動命令行界面 (推薦)
 python run.py --cli  
 
-# 直接運行做市策略
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
+# 快數啟動方式：
 
-# 直接運行 Maker-Taker 對沖現貨
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.1 --strategy maker_hedge --duration 3600 --interval 30
+# BackPack 現貨做市
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.01 --max-orders 3 --duration 3600 --interval 60
 
-# 直接運行 BackPack 永續做市
+# BackPack Maker-Taker 現貨對沖
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.01 --strategy maker_hedge --duration 3600 --interval 30
+
+# BackPack 永續做市
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 3600 --interval 10
 
-# 直接運行 Maker-Taker 對沖永續
-python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 15
+# BackPack Maker-Taker 永續對沖
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 8
 
-# 直接運行 Aster 永續 Maker-Taker 對沖
-python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.02 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 15
-
-# 直接運行 Aster 永續做市
+# Aster 永續做市
 python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 3600 --interval 10
 
-# 直接運行 Paradex 永續做市
-python run.py --exchange paradex --market-type perp --symbol ETH-USD-PERP --spread 0.02 --quantity 0.01 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
+# Aster Maker-Taker 永續對沖
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 15
 
-# 直接運行 Paradex Maker-Taker 對沖
-python run.py --exchange paradex --market-type perp --symbol ETH-USD-PERP --spread 0.01 --quantity 0.01 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 15
+# Paradex 永續做市
+python run.py --exchange paradex --market-type perp --symbol ETH-USD-PERP --spread 0.01 --quantity 0.01 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
+
+# Paradex Maker-Taker 對沖
+python run.py --exchange paradex --market-type perp --symbol ETH-USD-PERP --spread 0.01 --quantity 0.01 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 
 ```
 
@@ -153,7 +157,7 @@ python run.py --exchange paradex --market-type perp --symbol ETH-USD-PERP --spre
 
 #### 基本參數
 - `--api-key`: API 密鑰 (可選，默認使用環境變數)
-- `--secret-key`: API 密鑰 (可選，默認使用環境變數；Paradex 使用以太坊私鑰)
+- `--secret-key`: API 密鑰 (可選，默認使用環境變數；Paradex 使用` Paradex 帳戶`私鑰)
 - `--exchange`: 交易所選擇 (支援: `backpack`, `aster`, `paradex`，默認: `backpack`)
 - `--ws-proxy`: Websocket 代理 (可選，默認使用環境變數)
 - `--cli`: 啟動命令行界面
