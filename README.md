@@ -4,6 +4,8 @@
 
 Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.exchange/refer/yan)
 
+Asterdex 註冊連結：[https://www.asterdex.com/referral/1a7b6E](https://www.asterdex.com/referral/1a7b6E)
+
 Paradex 註冊連結：[https://app.paradex.trade/r/yanowo](https://app.paradex.trade/r/yanowo)
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
@@ -48,7 +50,8 @@ lemon_trader/
 ├── strategies/           # 策略模塊
 │   ├── __init__.py
 │   ├── market_maker.py   # 做市策略
-│   └── perp_market_maker.py   # 合約做市策略
+│   ├── perp_market_maker.py   # 合約做市策略
+│   └── maker_taker_hedge.py   # 合約對沖策略
 │
 ├── utils/                # 工具模塊
 │   ├── __init__.py
@@ -98,10 +101,11 @@ pip install -r requirements.txt
 # Backpack Exchange
 BACKPACK_KEY=your_backpack_api_key
 BACKPACK_SECRET=your_backpack_secret_key
+BASE_URL=https://api.backpack.work
 
 # WS 代理格式 http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
 BACKPACK_PROXY_WEBSOCKET=
-BASE_URL=https://api.backpack.work
+
 
 # Aster Exchange
 ASTER_API_KEY=your_aster_api_key
@@ -111,6 +115,8 @@ ASTER_SECRET_KEY=your_aster_secret_key
 PARADEX_PRIVATE_KEY=your_starknet_private_key
 PARADEX_ACCOUNT_ADDRESS=your_starknet_account_address
 PARADEX_BASE_URL=https://api.prod.paradex.trade/v1
+
+# WS 代理格式 http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
 PARADEX_PROXY_WEBSOCKET=
 
 # Optional Features
@@ -192,15 +198,77 @@ python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --spre
 - 透過設定環境變數 `ENABLE_DATABASE=1` 或在啟動命令時加上 `--enable-db` 可啟用資料庫寫入功能。
 - 若要臨時停用資料庫，可使用 `--disable-db` 覆寫設定。
 - 當資料庫功能關閉時，相關的歷史統計/報表選單會顯示為停用狀態。
-
+___
 ### Maker-Taker 對沖策略
 
-- 於啟動參數中將 `--strategy` 設定為 `maker_hedge`，或在 CLI 對話式流程中選擇 `maker_hedge`，即可啟用對沖模式。
-- 策略會僅在買一/賣一各保留一張 Post-Only 掛單，成交後立即透過市價單反向對沖，避免持倉累積。
-- 現貨與永續皆支援該策略；永續市價對沖訂單會帶上 `reduceOnly` 以確保僅削減倉位。
-- Aster 永續合約同樣支援 maker-taker 對沖，系統會自動調整訂單欄位以符合交易所限制（例如移除 `postOnly` 與市價單 `timeInForce`）。
-- 其餘參數 (如價差、下單量、永續倉位目標) 仍遵循既有設置邏輯。
 
+
+**案例：永續合約對沖 SOL-USDC-PERP**
+
+```bash
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 86400 --interval 8
+```
+
+**執行情況：**
+```
+[INFO] 初始化 Maker-Taker 對沖策略 (永續合約僅掛買一/賣一)
+[INFO] 對沖參考倉位初始化為 0.00000000
+[INFO] 買單已掛出: 價格 239.45, 數量 0.1
+[INFO] 賣單已掛出: 價格 239.65, 數量 0.1
+[INFO] 處理Maker成交：Ask 0.1@239.65
+[INFO] 偵測到 Maker 成交，準備以市價對沖 0.10000000 Bid
+[INFO] 提交市價對沖訂單: Bid 0.10000000 (第 1 次嘗試) [reduceOnly=True]
+[INFO] 市價對沖訂單已提交: def456
+[INFO] 市價對沖已完成，倉位回到參考水位
+```
+
+**優勢：**
+- 永續合約支持雙向持倉，對沖更靈活
+- `reduceOnly` 確保不會意外開新倉位
+- 可設定止損/止盈參數作為額外保護
+
+#### 常見問題
+
+**Q1: 為什麼對沖後還有小額殘量？**
+
+A: 由於交易所的精度限制，對沖數量可能無法完全匹配成交量。策略會記錄這些殘量（通常 < 最小下單量），並在下次成交時一併處理。
+
+**Q2: 對沖失敗會怎樣？**
+
+A: 若市價對沖訂單提交失敗（如餘額不足、API 錯誤），策略會保留完整對沖目標量至下次嘗試。同時會在日誌中記錄錯誤訊息，便於追蹤問題。
+
+**Q3: 如何選擇合適的 `spread` 參數？**
+
+A: 
+- **高流動性市場** (如 BTC, ETH)：建議 0.01-0.02% (0.0001-0.0002)
+- **中等流動性** (如 SOL, AVAX)：建議 0.02-0.05% (0.0002-0.0005)
+- **低流動性市場**：建議 0.05-0.1% (0.0005-0.001)
+
+**Q4: 對沖策略能用於高波動行情嗎？**
+
+A: 可以，但需注意：
+- 高波動可能導致對沖滑點增加
+- 建議縮短 `interval` (如 5-10 秒) 以更快反應市場變化
+- 適當增加 `spread` 以彌補滑點成本
+
+**Q5: Maker-Taker 策略與標準做市的區別？**
+
+| 特性 | 標準做市 | Maker-Taker 對沖 |
+|------|----------|-----------------|
+| 訂單層數 | 多層 (可配置) | 單層 (買一/賣一) |
+| 持倉風險 | 累積持倉 | 即時對沖，接近零持倉 |
+| 資金利用率 | 較高 | 較低 (僅 5% 資金) |
+| 適合場景 | 趨勢行情、單邊市場 | 震盪行情、追求穩定 |
+| 盈利模式 | 價差 + 持倉升值 | 純價差收益 |
+
+#### 交易所相容性
+
+| 交易所 | 現貨對沖 | 永續對沖 | 特殊處理 |
+|--------|----------|----------|----------|
+| Backpack | ✓ | ✓ | 自動啟用 `autoLendRedeem` |
+| Aster | ✓ | ✓ | 移除 `postOnly` (永續) |
+| Paradex | ✓ | ✓ | JWT 自動刷新 |
+___
 ### 永續合約做市
 
 
@@ -266,6 +334,8 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 2. 策略偵測到虧損超過 25 USDC 閾值，立即**取消所有未成交掛單**並以市價賣出平倉。
 3. 平倉成功後，日誌會提示「止損觸發，已以市價平倉」，接著策略重新計算報價並繼續掛單，整個流程無需人工介入。
 4. 若之後行情好轉並達成 `take_profit=50` 的設定，流程相同，策略會自動鎖定利潤並持續運作。
+
+___
 
 ## 重平衡功能詳解
 
@@ -359,7 +429,7 @@ python run.py --exchange backpack --symbol SOL_USDC --spread 0.1 --duration 8640
 python run.py --exchange backpack --symbol SOL_USDC --spread 0.3 --quantity 0.5 --max-orders 3 --duration 7200 --interval 60 --enable-rebalance --base-asset-target 25 --rebalance-threshold 15
 ``` 
 
-## 重平功能管理
+___
 
 ### 通過 CLI 界面管理
 
