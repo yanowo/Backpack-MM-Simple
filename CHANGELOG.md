@@ -1,13 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [1.5.0] - 2025-10-29
 
 ### 新增
 - **Paradex 交易所集成**：完整支援 Paradex 永續合約交易
   - 實現基於 EIP-712 簽名的 JWT 認證機制
   - 自動 JWT token 刷新功能，提前 5 分鐘自動更新避免過期
   - 支援永續合約做市和 Maker-Taker 對沖策略
-  - 使用以太坊私鑰進行請求簽名
+  - 使用 Paradex 私鑰進行請求簽名
 - Maker-Taker 對沖策略現貨/永續通用化，掛單成交後自動以市價減倉
 - `run.py` 與 CLI 支援 `maker_hedge` 策略選項，可於現貨或永續啟動對沖模式
 - Maker-Taker 對沖策略適配 Aster 永續交易所，移除不支援的訂單欄位並保留 reduce-only 市價對沖
