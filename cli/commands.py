@@ -374,7 +374,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
 
     # 處理常見別名
     if market_type_input in ("perpetual", "future", "futures", "contract"):
-        print(f"提示: 已識別為永續合約 'perp'")
+        print("提示: 已識別為永續合約 'perp'")
         market_type = "perp"
     elif market_type_input in ("spot", "perp", ""):
         market_type = market_type_input if market_type_input else "spot"

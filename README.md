@@ -1,6 +1,6 @@
 # 加密貨幣做市交易程序
 
-這是一個支援多交易所的加密貨幣做市交易程序。該程序提供自動化做市功能，通過維持買賣價差賺取利潤。目前支援 **Backpack**、**Aster** 和 **Paradex** 交易所。
+這是一個支援對沖與做市策略的加密貨幣交易架構，具備多交易所自助接入與自訂策略擴充能力。系統內建自動化做市功能，可透過維持買賣價差獲取穩定收益。目前已支援 Backpack、Aster 和 Paradex 等交易所。
 
 Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.exchange/refer/yan)
 
@@ -203,11 +203,13 @@ ___
 
 
 
-**案例：永續合約對沖 SOL-USDC-PERP**
+#### 啟動永續合約對沖範例
 
 ```bash
+# 以 BackPack 為例
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 86400 --interval 8
 ```
+
 
 **執行情況：**
 ```
@@ -239,9 +241,9 @@ A: 若市價對沖訂單提交失敗（如餘額不足、API 錯誤），策略�
 
 **Q3: 如何選擇合適的 `spread` 參數？**
 
-A: 
+A: 根據市場波動率與深度動態調整參數。
 - **高流動性市場** (如 BTC, ETH)：建議 0.01-0.02% (0.0001-0.0002)
-- **中等流動性** (如 SOL, AVAX)：建議 0.02-0.05% (0.0002-0.0005)
+- **中等流動性市場** (如 SOL, AVAX)：建議 0.02-0.05% (0.0002-0.0005)
 - **低流動性市場**：建議 0.05-0.1% (0.0005-0.001)
 
 **Q4: 對沖策略能用於高波動行情嗎？**
@@ -303,14 +305,10 @@ ___
 #### 啟動永續做市範例
 
 ```bash
-# BackPack 永續做市
+# 以 BackPack 為例
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
 ```
 
-```bash
-# Aster 永續做市
-python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
-```
 
 #### 永續合約參數詳解
 
