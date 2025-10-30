@@ -857,7 +857,6 @@ class ParadexClient(BaseExchangeClient):
                 "netQuantity": str(size),
                 "entryPrice": entry_price,  # 使用 average_entry_price
                 "markPrice": pos.get("mark_price"),  # 注意：API 可能不返回 mark_price
-                "unrealizedPnl": unrealized_pnl,
                 "pnlUnrealized": unrealized_pnl,
                 "liquidationPrice": pos.get("liquidation_price"),
                 "leverage": pos.get("leverage"),
