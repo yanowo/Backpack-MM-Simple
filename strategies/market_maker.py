@@ -98,6 +98,9 @@ class MarketMaker:
         self.session_start_time = datetime.now()
         self.session_buy_trades = []
         self.session_sell_trades = []
+
+        # 停止標誌
+        self._stop_flag = False
         self.session_fees = 0.0
         self.session_maker_buy_volume = 0.0
         self.session_maker_sell_volume = 0.0
@@ -2207,6 +2210,11 @@ class MarketMaker:
 
         return False
 
+    def stop(self):
+        """停止做市策略"""
+        logger.info("收到停止信號，正在停止做市策略...")
+        self._stop_flag = True
+
     def run(self, duration_seconds=3600, interval_seconds=60):
         """執行做市策略"""
         logger.info(f"開始運行做市策略: {self.symbol}")
@@ -2249,7 +2257,7 @@ class MarketMaker:
                 if f"account.orderUpdate.{self.symbol}" not in self.ws.subscriptions:
                     self.subscribe_order_updates()
             
-            while time.time() - start_time < duration_seconds:
+            while time.time() - start_time < duration_seconds and not self._stop_flag:
                 iteration += 1
                 current_time = time.time()
                 logger.info(f"\n=== 第 {iteration} 次迭代 ===")
