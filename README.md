@@ -14,6 +14,7 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 ## 功能特點
 
+- **Web 控制台**：直觀的圖形化界面，實時監控交易狀態和策略表現
 - **多交易所架構**：支援 Backpack、Aster、Paradex，可擴展至其他交易所
 - **Paradex 整合**：完整支援 Paradex 永續合約交易，包含 JWT 自動更新機制
 - **自動化做市策略**：智能價差管理和訂單調整
@@ -22,7 +23,7 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 - **智能重平衡系統**：自動維持資產配置比例
 - **JWT 自動更新**：Paradex JWT token 自動刷新，避免認證過期
 - **增強日誌系統**：詳細的市場狀態和策略追蹤
-- **WebSocket 實時連接**：即時市場數據和訂單更新
+- **WebSocket 實時連接**：即時市場數據和訂單更新（支持策略 WebSocket 和 Web 控制台 WebSocket）
 - **命令行界面**：靈活的參數配置和策略執行
 - **可選資料庫紀錄**：根據需求啟用或停用資料庫寫入以兼顧效能
 
@@ -61,6 +62,13 @@ lemon_trader/
 │   ├── __init__.py
 │   └── commands.py       # 命令行命令
 │
+├── web/                  # Web 控制台界面
+│   ├── __init__.py
+│   ├── server.py         # Flask Web 服務器
+│   ├── templates/        # HTML 模板
+│   │   └── index.html
+│   └── static/           # 靜態資源 (CSS, JS)
+│
 ├── config.py             # 配置文件
 ├── logger.py             # 日誌配置
 ├── run.py                # 統一入口文件
@@ -77,6 +85,9 @@ lemon_trader/
   - numpy
   - python-dotenv
   - starknet-py
+  - flask
+  - flask-socketio
+  - python-socketio
 
 ## 安裝
 
@@ -124,15 +135,71 @@ PARADEX_PROXY_WEBSOCKET=
 ```
 ## 使用方法
 
-### 統一入口 (推薦)
+### Web 控制台 (推薦)
+
+程序提供了直觀的 Web 控制台界面，方便可視化管理和監控交易策略。
+
+#### 啟動 Web 服務器
 
 ```bash
+# 啟動 Web 服務器（默認端口 5000）
+python run.py --web
+```
 
-# 啟動命令行界面 (推薦)
+#### 訪問控制台
+
+啟動後，在瀏覽器中訪問：
+```
+http://localhost:5000
+```
+
+#### Web 界面功能
+
+- **實時監控**：查看交易統計、餘額、盈虧等實時數據（每5秒更新）
+- **策略管理**：啟動/停止做市策略，支持多種策略類型
+- **參數配置**：
+  - 交易所選擇（Backpack、Aster、Paradex）
+  - 市場類型（現貨 / 永續合約）
+  - 策略類型（標準做市 / Maker-Taker 對沖）
+  - 交易對、價差、訂單數量等
+  - 永續合約參數（目標倉位、最大倉位、止損止盈等）
+  - 現貨重平衡參數
+- **數據展示**：
+  - 當前價格和余額（只顯示報價資產 USDT/USDC/USD）
+  - 交易統計（買賣筆數、成交量、手續費）
+  - 盈虧分析（已實現/未實現盈虧、累計盈虧、磨損率）
+  - 運行時間統計
+
+#### 使用示例
+
+1. 啟動 Web 服務器
+2. 在瀏覽器打開控制台
+3. 配置環境變量（API Key 需提前在 .env 文件中設置）
+4. 選擇交易所和交易對
+5. 設置策略參數
+6. 點擊"啟動機器人"開始交易
+7. 實時查看交易狀態和統計數據
+8. 需要停止時點擊"停止機器人"
+
+#### 注意事項
+
+- Web 服務器需要持續運行以監控策略
+- API 密鑰通過環境變量讀取，不會在 Web 界面中顯示
+- 支持多個瀏覽器標籤頁同時查看（通過 WebSocket 同步）
+- 停止策略後統計數據會保留，方便查看最終結果
+
+---
+
+### 啟動命令行界面
+
+```bash
 python run.py --cli  
+```
 
-# 快數啟動方式：
 
+### 快速啟動方式
+
+```bash
 # BackPack 現貨做市
 python run.py --exchange backpack --symbol SOL_USDC --spread 0.01 --max-orders 3 --duration 3600 --interval 60
 
