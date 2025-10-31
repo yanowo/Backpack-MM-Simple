@@ -564,7 +564,62 @@ class ParadexClient(BaseExchangeClient):
             logger.info(f"已緩存 {len(self._market_info_cache)} 個市場信息")
 
     def get_balance(self) -> Dict[str, Any]:
-        """獲取賬户餘額"""
+        """獲取賬户餘額
+        
+        Paradex API 返回格式:
+        {
+            "results": [
+                {
+                    "token": "USDC",
+                    "size": "1234.56",
+                    "last_updated_at": 1681462770114
+                }
+            ]
+        }
+        """
+        result = self.make_request(
+            "GET",
+            "/balance",
+            instruction=True,
+            retry_count=self.max_retries
+        )
+
+        if isinstance(result, dict) and "error" in result:
+            return result
+
+        # 轉換為標準格式（與其他客户端一致）
+        balances = {}
+        balance_list = result.get("results", []) if isinstance(result, dict) else []
+
+        for item in balance_list:
+            if isinstance(item, dict):
+                token = item.get("token", "UNKNOWN")
+                size = item.get("size", "0")
+                
+                # Paradex 的 balance 端點只返回總額，沒有區分 available 和 locked
+                # 我們需要從 account summary 獲取更詳細的信息
+                balances[token] = {
+                    "available": str(size),
+                    "locked": "0",  # Paradex balance 端點不提供鎖定金額
+                    "total": str(size)
+                }
+
+        return balances
+
+    def get_collateral(self) -> Dict[str, Any]:
+        """獲取賬户抵押品信息（通過 account summary 端點）
+        
+        Paradex API 返回格式:
+        {
+            "account": "0x...",
+            "account_value": "136285.06918911",
+            "free_collateral": "73276.47229774",
+            "initial_margin_requirement": "63008.59689218",
+            "maintenance_margin_requirement": "31504.29844641",
+            "total_collateral": "123003.62047353",
+            "updated_at": 1681471234972
+        }
+        """
         result = self.make_request(
             "GET",
             "/account",
@@ -575,19 +630,16 @@ class ParadexClient(BaseExchangeClient):
         if isinstance(result, dict) and "error" in result:
             return result
 
-        # 轉換為標準格式（與其他客户端一致）
-        balances = {}
-        account_data = result.get("results", {}) if isinstance(result, dict) else {}
-
-        for asset, data in account_data.items():
-            if isinstance(data, dict):
-                balances[asset] = {
-                    "available": str(data.get("available", 0)),
-                    "locked": str(data.get("locked", 0)),
-                    "total": str(data.get("total", 0))
-                }
-
-        return balances
+        # 返回包含抵押品信息的摘要
+        return {
+            "account": result.get("account"),
+            "account_value": result.get("account_value"),
+            "total_collateral": result.get("total_collateral"),
+            "free_collateral": result.get("free_collateral"),
+            "initial_margin": result.get("initial_margin_requirement"),
+            "maintenance_margin": result.get("maintenance_margin_requirement"),
+            "updated_at": result.get("updated_at")
+        }
 
     def execute_order(self, order_details: Dict[str, Any]) -> Dict[str, Any]:
         """執行訂單

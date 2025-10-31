@@ -113,34 +113,102 @@ def get_address_command(api_key, secret_key):
     print(result)
 
 def get_balance_command(api_key, secret_key):
-    """獲取餘額命令"""
-    c = _get_client(api_key, secret_key)
-    balances = c.get_balance()
-    collateral = c.get_collateral()
-    if isinstance(balances, dict) and "error" in balances and balances["error"]:
-        print(f"獲取餘額失敗: {balances['error']}")
-    else:
-        print("\n當前餘額:")
-        if isinstance(balances, dict):
-            for coin, details in balances.items():
-                if float(details.get('available', 0)) > 0 or float(details.get('locked', 0)) > 0:
-                    print(f"{coin}: 可用 {details.get('available', 0)}, 凍結 {details.get('locked', 0)}")
-        else:
-            print(f"獲取餘額失敗: 無法識別返回格式 {type(balances)}")
+    """獲取餘額命令 - 檢查所有已配置的交易所"""
+    
+    # 定義要檢查的交易所列表
+    exchanges_to_check = []
+    
+    # 檢查 Backpack
+    backpack_api, backpack_secret = _resolve_api_credentials('backpack', api_key, secret_key)
+    if backpack_api and backpack_secret:
+        exchanges_to_check.append(('backpack', backpack_api, backpack_secret))
+    
+    # 檢查 Aster
+    aster_api, aster_secret = _resolve_api_credentials('aster', None, None)
+    if aster_api and aster_secret:
+        exchanges_to_check.append(('aster', aster_api, aster_secret))
+    
+    # 檢查 Paradex
+    paradex_account, paradex_key = _resolve_api_credentials('paradex', None, None)
+    if paradex_account and paradex_key:
+        exchanges_to_check.append(('paradex', paradex_account, paradex_key))
+    
+    if not exchanges_to_check:
+        print("未找到任何已配置的交易所 API 密鑰")
+        return
+    
+    # 遍歷所有交易所並獲取餘額
+    for exchange, ex_api_key, ex_secret_key in exchanges_to_check:
+        print(f"\n{'='*60}")
+        print(f"交易所: {exchange.upper()}")
+        print(f"{'='*60}")
+        
+        try:
+            exchange_config = {
+                'api_key': ex_api_key,
+            }
+            
+            if exchange == 'paradex':
+                exchange_config['private_key'] = ex_secret_key
+                exchange_config['account_address'] = ex_api_key
+                exchange_config['base_url'] = os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1')
+            else:
+                exchange_config['secret_key'] = ex_secret_key
+            
+            c = _get_client(api_key=ex_api_key, secret_key=ex_secret_key, exchange=exchange, exchange_config=exchange_config)
+            balances = c.get_balance()
+            collateral = c.get_collateral()
+            
+            if isinstance(balances, dict) and "error" in balances and balances["error"]:
+                print(f"獲取餘額失敗: {balances['error']}")
+            else:
+                print("\n當前餘額:")
+                has_balance = False
+                if isinstance(balances, dict):
+                    for coin, details in balances.items():
+                        if isinstance(details, dict):
+                            available = float(details.get('available', 0))
+                            locked = float(details.get('locked', 0))
+                            if available > 0 or locked > 0:
+                                print(f"{coin}: 可用 {details.get('available', 0)}, 凍結 {details.get('locked', 0)}")
+                                has_balance = True
+                    if not has_balance:
+                        print("無餘額記錄")
+                else:
+                    print(f"獲取餘額失敗: 無法識別返回格式 {type(balances)}")
 
-    if isinstance(collateral, dict) and "error" in collateral:
-        print(f"獲取抵押品失敗: {collateral['error']}")
-    elif isinstance(collateral, dict):
-        assets = collateral.get('assets') or collateral.get('collateral', [])
-        if assets:
-            print("\n抵押品資產:")
-            for item in assets:
-                symbol = item.get('symbol', '')
-                total = item.get('totalQuantity', '')
-                available = item.get('availableQuantity', '')
-                lend = item.get('lendQuantity', '')
-                collateral_value = item.get('collateralValue', '')
-                print(f"{symbol}: 總量 {total}, 可用 {available}, 出借中 {lend}, 抵押價值 {collateral_value}")
+            # Paradex 的抵押品信息格式不同
+            if exchange == 'paradex':
+                if isinstance(collateral, dict) and "error" in collateral:
+                    print(f"獲取賬戶摘要失敗: {collateral['error']}")
+                elif isinstance(collateral, dict) and collateral.get('account'):
+                    print("\n賬戶摘要:")
+                    print(f"賬戶地址: {collateral.get('account', 'N/A')}")
+                    print(f"賬戶價值: {collateral.get('account_value', '0')} USDC")
+                    print(f"總抵押品: {collateral.get('total_collateral', '0')} USDC")
+                    print(f"可用抵押品: {collateral.get('free_collateral', '0')} USDC")
+                    print(f"初始保證金: {collateral.get('initial_margin', '0')} USDC")
+                    print(f"維持保證金: {collateral.get('maintenance_margin', '0')} USDC")
+            else:
+                # 其他交易所的抵押品信息
+                if isinstance(collateral, dict) and "error" in collateral:
+                    print(f"獲取抵押品失敗: {collateral['error']}")
+                elif isinstance(collateral, dict):
+                    assets = collateral.get('assets') or collateral.get('collateral', [])
+                    if assets:
+                        print("\n抵押品資產:")
+                        for item in assets:
+                            symbol = item.get('symbol', '')
+                            total = item.get('totalQuantity', '')
+                            available = item.get('availableQuantity', '')
+                            lend = item.get('lendQuantity', '')
+                            collateral_value = item.get('collateralValue', '')
+                            print(f"{symbol}: 總量 {total}, 可用 {available}, 出借中 {lend}, 抵押價值 {collateral_value}")
+        
+        except Exception as e:
+            print(f"查詢 {exchange.upper()} 餘額時發生錯誤: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 def get_markets_command():
     """獲取市場信息命令"""
