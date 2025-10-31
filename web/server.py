@@ -7,6 +7,8 @@ from flask_socketio import SocketIO, emit
 import threading
 import os
 import sys
+import traceback
+import time
 from typing import Optional, Dict, Any
 from datetime import datetime
 
@@ -290,7 +292,6 @@ def start_bot():
 
     except Exception as e:
         logger.error(f"啟動機器人失敗: {e}")
-        import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'message': f'啟動失敗: {str(e)}'}), 500
 
@@ -341,7 +342,6 @@ def stop_bot():
 
     except Exception as e:
         logger.error(f"停止機器人失敗: {e}")
-        import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'message': f'停止失敗: {str(e)}'}), 500
 
@@ -449,13 +449,13 @@ def collect_strategy_stats():
                                     else:
                                         quote_balance = 0.0
 
-                                logger.info(f"[{current_strategy.exchange}] 報價資產 {key} 余額: {quote_balance:.2f}")
+                                logger.debug(f"[{current_strategy.exchange}] 報價資產 {key} 余額: {quote_balance:.2f}")
                                 break  # 找到就退出循環
                             except (ValueError, TypeError) as e:
-                                logger.warning(f"轉換報價資產余額失敗: {e}, quote_info={quote_info}")
+                                logger.error(f"轉換報價資產余額失敗: {e}, quote_info={quote_info}")
                                 continue
                     else:
-                        logger.warning(f"[{current_strategy.exchange}] 未找到報價資產余額，嘗試的鍵: {possible_quote_keys}")
+                        logger.error(f"[{current_strategy.exchange}] 未找到報價資產余額，嘗試的鍵: {possible_quote_keys}")
                         quote_balance = 0.0
                 else:
                     if has_error:
@@ -467,8 +467,6 @@ def collect_strategy_stats():
                 stats['base_balance'] = 0.0  # 不再顯示基礎資產
                 stats['quote_balance'] = round(quote_balance, 2)
                 stats['total_balance_usd'] = round(quote_balance, 2)  # 總余額就是報價資產余額
-
-                logger.info(f"[{current_strategy.exchange}] 最終餘額: {quote_balance:.2f} {current_strategy.quote_asset}")
             else:
                 # 如果沒有客戶端，使用原有方法獲取報價資產
                 quote_balance_result = current_strategy.get_asset_balance(current_strategy.quote_asset)
@@ -482,7 +480,6 @@ def collect_strategy_stats():
 
         except Exception as e:
             logger.error(f"獲取餘額時出錯: {e}")
-            import traceback
             traceback.print_exc()
             stats['base_balance'] = 0.0
             stats['quote_balance'] = 0.0
@@ -535,8 +532,7 @@ def collect_strategy_stats():
                         price = float(trade[0])
                         qty = float(trade[1])
                         total_volume_usdc += qty * price
-                except Exception as e:
-                    logger.debug(f"處理買單交易失敗: {e}")
+                except Exception:
                     continue
 
             # 計算賣單成交額
@@ -552,15 +548,13 @@ def collect_strategy_stats():
                         price = float(trade[0])
                         qty = float(trade[1])
                         total_volume_usdc += qty * price
-                except Exception as e:
-                    logger.debug(f"處理賣單交易失敗: {e}")
+                except Exception:
                     continue
 
             stats['total_volume_usdc'] = round(total_volume_usdc, 2)
 
         except Exception as e:
             logger.error(f"計算成交額失敗: {e}")
-            import traceback
             traceback.print_exc()
             stats['total_volume_usdc'] = 0.0
             stats['slippage_rate'] = 0.0
@@ -582,10 +576,10 @@ def collect_strategy_stats():
                     realized_pnl = pnl_result[0]
                     unrealized_pnl = pnl_result[1]
                     session_realized_pnl = pnl_result[2]
-                    logger.info(f"PnL返回7個值，使用前3個: {pnl_result[:3]}")
+                    logger.debug(f"PnL返回7個值，使用前3個: {pnl_result[:3]}")
                 else:
                     # 其他情況，嘗試使用前面的值
-                    logger.warning(f"PnL返回值數量異常: {len(pnl_result)} 個值，嘗試使用前面的值")
+                    logger.error(f"PnL返回值數量異常: {len(pnl_result)} 個值")
                     realized_pnl = pnl_result[0] if len(pnl_result) > 0 else 0
                     unrealized_pnl = pnl_result[1] if len(pnl_result) > 1 else 0
                     session_realized_pnl = pnl_result[2] if len(pnl_result) > 2 else 0
@@ -610,7 +604,6 @@ def collect_strategy_stats():
 
         except Exception as e:
             logger.error(f"計算盈虧失敗: {e}")
-            import traceback
             traceback.print_exc()
             stats['realized_pnl'] = 0
             stats['unrealized_pnl'] = 0
@@ -626,10 +619,6 @@ def collect_strategy_stats():
                 stats['slippage_rate'] = round(slippage_rate, 4)
             else:
                 stats['slippage_rate'] = 0.0
-
-            # 添加調試日志
-            if stats.get('total_trades', 0) > 0:
-                logger.debug(f"成交統計: 總交易{stats['total_trades']}筆, 成交額${stats.get('total_volume_usdc', 0):.2f}, 累計盈虧{stats.get('cumulative_pnl', 0):.4f}, 磨損率{stats['slippage_rate']:.4f}%")
         except Exception as e:
             logger.error(f"計算磨損率失敗: {e}")
             stats['slippage_rate'] = 0.0
@@ -647,7 +636,6 @@ def collect_strategy_stats():
 
     except Exception as e:
         logger.error(f"收集統計數據失敗: {e}")
-        import traceback
         traceback.print_exc()
         return {}
 
@@ -655,8 +643,6 @@ def collect_strategy_stats():
 def stats_update_worker():
     """統計數據更新工作線程"""
     global stats_update_running, current_strategy, last_stats
-
-    import time
 
     while stats_update_running:
         try:
