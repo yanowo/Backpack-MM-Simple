@@ -139,6 +139,8 @@ PARADEX_PROXY_WEBSOCKET=
 
 程序提供了直觀的 Web 控制台界面，方便可視化管理和監控交易策略。
 
+![Web 控制台界面](dashboard.png)
+
 #### 啟動 Web 服務器
 
 ```bash
