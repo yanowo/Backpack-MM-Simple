@@ -19,6 +19,7 @@ def parse_arguments():
     
     # 模式選擇
     parser.add_argument('--cli', action='store_true', help='啟動命令行界面')
+    parser.add_argument('--web', action='store_true', help='啟動Web界面')
     
     # 基本參數
     parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex'], default='backpack', help='交易所選擇 (backpack, aster 或 paradex)')
@@ -135,9 +136,24 @@ def main():
             logger.error("缺少API密鑰，請通過命令行參數或環境變量提供")
             sys.exit(1)
 
-    
+
     # 決定執行模式
-    if args.cli:
+    if args.web:
+        # 啟動Web界面
+        try:
+            logger.info("啟動Web界面...")
+            from web.server import run_server
+            run_server(host='0.0.0.0', port=5000, debug=False)
+        except ImportError as e:
+            logger.error(f"啟動Web界面時出錯: {str(e)}")
+            logger.error("請確保已安裝Flask和flask-socketio: pip install flask flask-socketio")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"Web服務器錯誤: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+    elif args.cli:
         # 啟動命令行界面
         try:
             from cli.commands import main_cli
@@ -273,6 +289,7 @@ def main():
     else:
         # 沒有指定執行模式時顯示幫助
         print("請指定執行模式：")
+        print("  --web     啟動Web界面")
         print("  --cli     啟動命令行界面")
         print("  直接指定  --symbol 和 --spread 參數運行做市策略")
         print("\n資料庫參數：")
