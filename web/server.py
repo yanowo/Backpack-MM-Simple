@@ -399,7 +399,7 @@ def collect_strategy_stats():
             'quote_asset': current_strategy.quote_asset,
         }
 
-        # 獲取餘額 - 直接從客戶端獲取，參考 CLI 實現
+        # 獲取餘額 - 只獲取報價資產（USDT/USDC/USD）
         try:
             # 獲取客戶端實例
             client = current_strategy.client if hasattr(current_strategy, 'client') else None
@@ -408,131 +408,85 @@ def collect_strategy_stats():
                 # 獲取完整餘額信息
                 balances = client.get_balance()
 
-                # 初始化余额变量
-                base_balance = 0.0
+                # 只初始化報價資產余額變量
                 quote_balance = 0.0
-                total_balance_usd = 0.0
 
-                # 參考 CLI 的檢查方式：檢查是否有錯誤且錯誤值為真
+                # 檢查是否有錯誤
                 has_error = isinstance(balances, dict) and "error" in balances and balances.get("error")
 
                 if not has_error and isinstance(balances, dict):
-                    logger.info(f"[{current_strategy.exchange}] 餘額數據: {balances}")
-                    logger.info(f"[{current_strategy.exchange}] 尋找資產 - 基礎: {current_strategy.base_asset}, 報價: {current_strategy.quote_asset}")
-
-                    # Paradex 特殊處理：將 USD 映射到 USDC
-                    base_asset_key = current_strategy.base_asset
+                    # 確定報價資產的鍵名（處理不同交易所的命名差異）
                     quote_asset_key = current_strategy.quote_asset
 
+                    # Paradex 特殊處理：將 USD 映射到 USDC
                     if current_strategy.exchange.lower() == 'paradex':
-                        # Paradex 使用 USDC 作為報價資產，但策略可能使用 USD
                         if quote_asset_key == 'USD' and 'USDC' in balances:
-                            logger.info(f"Paradex 資產映射: {quote_asset_key} -> USDC")
+                            logger.debug(f"Paradex 資產映射: {quote_asset_key} -> USDC")
                             quote_asset_key = 'USDC'
-                        if base_asset_key == 'USD' and 'USDC' in balances:
-                            logger.info(f"Paradex 資產映射: {base_asset_key} -> USDC")
-                            base_asset_key = 'USDC'
 
-                    # 獲取基礎資產余額
-                    if base_asset_key in balances:
-                        base_info = balances[base_asset_key]
-                        try:
-                            if isinstance(base_info, dict):
-                                # 字典格式：{available: "xxx", locked: "xxx"}
-                                available_value = base_info.get('available', 0)
-                                # 處理字符串和數字類型，Paradex 返回字符串
-                                if available_value not in (None, ''):
-                                    base_balance = float(available_value)
-                                else:
-                                    base_balance = 0.0
-                            else:
-                                # 直接是數值
-                                if base_info not in (None, ''):
-                                    base_balance = float(base_info)
-                                else:
-                                    base_balance = 0.0
-                            logger.info(f"基礎資產 {base_asset_key} 余額: {base_balance}")
-                        except (ValueError, TypeError) as e:
-                            logger.warning(f"轉換基礎資產余額失敗: {e}, base_info={base_info}")
-                            base_balance = 0.0
-                    else:
-                        logger.info(f"基礎資產 {base_asset_key} 不在餘額列表中，設為 0")
-                        base_balance = 0.0
+                    # 嘗試多個可能的報價資產名稱（USDT, USDC, USD）
+                    possible_quote_keys = [quote_asset_key]
+                    if quote_asset_key not in ['USDT', 'USDC', 'USD']:
+                        possible_quote_keys.extend(['USDC', 'USDT', 'USD'])
 
                     # 獲取報價資產余額
-                    if quote_asset_key in balances:
-                        quote_info = balances[quote_asset_key]
-                        try:
-                            if isinstance(quote_info, dict):
-                                # 字典格式：{available: "xxx", locked: "xxx"}
-                                available_value = quote_info.get('available', 0)
-                                # 處理字符串和數字類型，Paradex 返回字符串
-                                if available_value not in (None, ''):
-                                    quote_balance = float(available_value)
+                    for key in possible_quote_keys:
+                        if key in balances:
+                            quote_info = balances[key]
+                            try:
+                                if isinstance(quote_info, dict):
+                                    # 字典格式：{available: "xxx", locked: "xxx", total: "xxx"}
+                                    # 優先使用 available，其次 total
+                                    available_value = quote_info.get('available', quote_info.get('total', 0))
+                                    if available_value not in (None, ''):
+                                        quote_balance = float(available_value)
+                                    else:
+                                        quote_balance = 0.0
                                 else:
-                                    quote_balance = 0.0
-                            else:
-                                # 直接是數值
-                                if quote_info not in (None, ''):
-                                    quote_balance = float(quote_info)
-                                else:
-                                    quote_balance = 0.0
-                            logger.info(f"報價資產 {quote_asset_key} 余額: {quote_balance}")
-                        except (ValueError, TypeError) as e:
-                            logger.warning(f"轉換報價資產余額失敗: {e}, quote_info={quote_info}")
-                            quote_balance = 0.0
-                    else:
-                        logger.info(f"報價資產 {quote_asset_key} 不在餘額列表中，設為 0")
-                        quote_balance = 0.0
+                                    # 直接是數值
+                                    if quote_info not in (None, ''):
+                                        quote_balance = float(quote_info)
+                                    else:
+                                        quote_balance = 0.0
 
-                    # 計算總余額（以報價資產計價）
-                    try:
-                        current_price = float(current_strategy.get_current_price())
-                        # 總余額 = 報價資產 + (基礎資產 * 當前價格)
-                        total_balance_usd = quote_balance + (base_balance * current_price)
-                        logger.info(f"計算總余額: {quote_balance:.2f} + ({base_balance:.8f} * {current_price:.2f}) = {total_balance_usd:.2f}")
-                    except Exception as price_err:
-                        logger.warning(f"無法獲取當前價格計算總余額: {price_err}")
-                        # 如果無法獲取價格，只使用報價資產余額
-                        total_balance_usd = quote_balance
-                        logger.info(f"使用報價資產作為總余額: {total_balance_usd:.2f}")
+                                logger.info(f"[{current_strategy.exchange}] 報價資產 {key} 余額: {quote_balance:.2f}")
+                                break  # 找到就退出循環
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"轉換報價資產余額失敗: {e}, quote_info={quote_info}")
+                                continue
+                    else:
+                        logger.warning(f"[{current_strategy.exchange}] 未找到報價資產余額，嘗試的鍵: {possible_quote_keys}")
+                        quote_balance = 0.0
                 else:
                     if has_error:
                         logger.error(f"[{current_strategy.exchange}] 獲取餘額返回錯誤: {balances.get('error')}")
                     else:
-                        logger.error(f"[{current_strategy.exchange}] 獲取餘額返回格式不正確: type={type(balances)}, data={balances}")
+                        logger.error(f"[{current_strategy.exchange}] 獲取餘額返回格式不正確: type={type(balances)}")
 
-                logger.info(f"最終餘額統計 - 基礎: {base_balance:.8f}, 報價: {quote_balance:.8f}, 總計: {total_balance_usd:.2f}")
-                stats['base_balance'] = round(base_balance, 8)
-                stats['quote_balance'] = round(quote_balance, 8)
-                stats['total_balance_usd'] = round(total_balance_usd, 2)
+                # 設置統計數據（不再獲取基礎資產，總余額直接使用報價資產余額）
+                stats['base_balance'] = 0.0  # 不再顯示基礎資產
+                stats['quote_balance'] = round(quote_balance, 2)
+                stats['total_balance_usd'] = round(quote_balance, 2)  # 總余額就是報價資產余額
+
+                logger.info(f"[{current_strategy.exchange}] 最終餘額: {quote_balance:.2f} {current_strategy.quote_asset}")
             else:
-                # 如果沒有客戶端，使用原有方法
-                base_balance_result = current_strategy.get_asset_balance(current_strategy.base_asset)
+                # 如果沒有客戶端，使用原有方法獲取報價資產
                 quote_balance_result = current_strategy.get_asset_balance(current_strategy.quote_asset)
 
                 # 處理可能返回元組的情況
-                base_balance = base_balance_result[0] if isinstance(base_balance_result, tuple) else base_balance_result
                 quote_balance = quote_balance_result[0] if isinstance(quote_balance_result, tuple) else quote_balance_result
 
-                stats['base_balance'] = round(float(base_balance), 8)
-                stats['quote_balance'] = round(float(quote_balance), 8)
-
-                # 計算總余額
-                try:
-                    current_price = float(current_strategy.get_current_price())
-                    total_balance_usd = float(quote_balance) + (float(base_balance) * current_price)
-                    stats['total_balance_usd'] = round(total_balance_usd, 2)
-                except Exception:
-                    stats['total_balance_usd'] = round(float(quote_balance), 2)
+                stats['base_balance'] = 0.0  # 不再顯示基礎資產
+                stats['quote_balance'] = round(float(quote_balance), 2)
+                stats['total_balance_usd'] = round(float(quote_balance), 2)
 
         except Exception as e:
             logger.error(f"獲取餘額時出錯: {e}")
             import traceback
             traceback.print_exc()
-            stats['base_balance'] = 0
-            stats['quote_balance'] = 0
-            stats['total_balance_usd'] = 0
+            stats['base_balance'] = 0.0
+            stats['quote_balance'] = 0.0
+            stats['total_balance_usd'] = 0.0
 
         # 獲取當前價格
         try:
