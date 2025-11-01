@@ -173,8 +173,8 @@ class MarketMaker:
         self._load_trading_stats()
         self._load_recent_trades()
 
-        # 針對 Aster 使用 REST 成交同步
-        if self.exchange == 'aster':
+        # 針對無 WebSocket 的交易所使用 REST 成交同步
+        if self.exchange in ('aster', 'lighter'):
             self._bootstrap_fill_history()
         
         logger.info(f"初始化做市商: {symbol}")
@@ -444,22 +444,25 @@ class MarketMaker:
     # Aster REST 成交同步相關方法
     # ------------------------------------------------------------------
     def _bootstrap_fill_history(self) -> None:
-        """初始化 Aster 成交歷史，避免重複計數"""
+        """初始化 REST 成交歷史，避免重複計數"""
+        exchange_label = self.exchange.capitalize()
         try:
             self._sync_fill_history(bootstrap=True)
-            logger.info("Aster 成交歷史初始化完成，開始追蹤新成交")
+            logger.info("%s 成交歷史初始化完成，開始追蹤新成交", exchange_label)
         except Exception as e:
-            logger.error(f"初始化 Aster 成交歷史時出錯: {e}")
+            logger.error(f"初始化 {exchange_label} 成交歷史時出錯: {e}")
 
     def _sync_fill_history(self, bootstrap: bool = False) -> None:
         """透過 REST API 同步最新成交"""
-        if self.exchange != 'aster':
+        if self.exchange not in ('aster', 'lighter'):
             return
+
+        exchange_label = self.exchange.capitalize()
 
         try:
             response = self.client.get_fill_history(self.symbol, limit=200)
         except Exception as e:
-            logger.error(f"獲取 Aster 成交歷史時出錯: {e}")
+            logger.error(f"獲取 {exchange_label} 成交歷史時出錯: {e}")
             return
 
         fills = self._normalize_fill_history_response(response)
@@ -535,45 +538,96 @@ class MarketMaker:
 
         fills: List[Dict[str, Any]] = []
 
+        def _extract(entry: Dict[str, Any], *keys: str) -> Any:
+            for key in keys:
+                if key in entry and entry[key] not in (None, ""):
+                    return entry[key]
+            return None
+
+        def _to_float(value: Any) -> Optional[float]:
+            if value in (None, "", "NaN"):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
         for entry in data:
             if not isinstance(entry, dict):
                 continue
 
-            fill_id = entry.get('id') or entry.get('tradeId') or entry.get('t')
-            order_id = entry.get('orderId') or entry.get('i')
-            side = entry.get('side') or entry.get('S')
-            price = entry.get('price') or entry.get('p') or entry.get('L')
-            quantity = entry.get('qty') or entry.get('quantity') or entry.get('q') or entry.get('l') or entry.get('size')
-            fee = entry.get('commission') or entry.get('fee') or entry.get('n')
-            fee_asset = entry.get('commissionAsset') or entry.get('feeAsset') or entry.get('N')
-            maker_flag = entry.get('maker') or entry.get('isMaker') or entry.get('m')
-            timestamp = entry.get('time') or entry.get('timestamp') or entry.get('T') or entry.get('ts')
+            fill_id = _extract(
+                entry,
+                "id",
+                "fillId",
+                "fill_id",
+                "tradeId",
+                "trade_id",
+                "executionId",
+                "execution_id",
+                "t",
+            )
+            order_id = _extract(
+                entry,
+                "orderId",
+                "order_id",
+                "orderIndex",
+                "order_index",
+                "ask_id",
+                "bid_id",
+                "i",
+            )
+            side = _extract(entry, "side", "S")
+            price = _to_float(_extract(entry, "price", "p", "L"))
+            quantity = _to_float(_extract(entry, "quantity", "qty", "q", "l", "size"))
+            fee_asset = _extract(
+                entry,
+                "fee_asset",
+                "feeAsset",
+                "commissionAsset",
+                "N",
+                "fee_currency",
+                "feeCurrency",
+            )
+            maker_flag = _extract(entry, "maker", "isMaker", "m", "is_maker")
+            timestamp_raw = _extract(entry, "time", "timestamp", "T", "ts")
 
-            try:
-                price = float(price) if price is not None else None
-            except (TypeError, ValueError):
-                price = None
+            maker_fee = _to_float(_extract(entry, "maker_fee", "makerFee"))
+            taker_fee = _to_float(_extract(entry, "taker_fee", "takerFee"))
+            fee_primary = _extract(entry, "fee", "commission", "n", "fee_value")
+            fee_value = _to_float(fee_primary)
 
-            try:
-                quantity = float(quantity) if quantity is not None else None
-            except (TypeError, ValueError):
-                quantity = None
+            derived_maker_flag: Optional[bool] = None
+            if maker_fee is not None and abs(maker_fee) > 0:
+                derived_maker_flag = True
+            elif taker_fee is not None and abs(taker_fee) > 0:
+                derived_maker_flag = False
 
-            try:
-                fee_value = float(fee) if fee is not None else 0.0
-            except (TypeError, ValueError):
-                fee_value = 0.0
-
-            try:
-                timestamp_value = int(timestamp) if timestamp is not None else 0
-            except (TypeError, ValueError):
-                timestamp_value = 0
-
-            is_maker = False
+            is_maker = True
             if isinstance(maker_flag, bool):
                 is_maker = maker_flag
             elif maker_flag is not None:
                 is_maker = str(maker_flag).lower() in ("true", "1", "yes")
+            elif derived_maker_flag is not None:
+                is_maker = derived_maker_flag
+
+            if fee_value is None:
+                if is_maker and maker_fee is not None:
+                    fee_value = maker_fee
+                elif not is_maker and taker_fee is not None:
+                    fee_value = taker_fee
+                elif maker_fee is not None:
+                    fee_value = maker_fee
+                elif taker_fee is not None:
+                    fee_value = taker_fee
+
+            if fee_value is None:
+                fee_value = 0.0
+
+            try:
+                timestamp_value = int(float(timestamp_raw)) if timestamp_raw is not None else 0
+            except (TypeError, ValueError):
+                timestamp_value = 0
 
             fills.append({
                 'fill_id': str(fill_id) if fill_id is not None else None,
@@ -2162,8 +2216,8 @@ class MarketMaker:
                 # 檢查訂單成交情況
                 self.check_order_fills()
 
-                # Aster 使用 REST API 同步最新成交
-                if self.exchange == 'aster':
+                # 透過 REST API 同步最新成交
+                if self.exchange in ('aster', 'lighter'):
                     self._sync_fill_history()
 
                 # 檢查是否需要重平衡倉位

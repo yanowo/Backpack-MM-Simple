@@ -22,23 +22,13 @@ DEFAULT_BASE_URL = "https://mainnet.zklighter.elliot.ai"
 DEFAULT_HTTP_TIMEOUT = 10.0
 
 DEFAULT_SYMBOL_OVERRIDES: Dict[str, Dict[str, Any]] = {
-    "SOLUSDT": {
-        "symbol": "SOL",
-        "base_asset": "SOL",
-        "quote_asset": "USDT",
-        "market_type": "PERP",
-        "status": "TRADING",
-        "min_order_size": "0.050",
-        "tick_size": "0.001",
-        "base_precision": 3,
-        "quote_precision": 3,
-    }
 }
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_SIGNER_SEARCH_PATHS = [
     os.path.join(_MODULE_DIR, "signers"),
     os.path.join(os.path.dirname(_MODULE_DIR), "external", "lighter-python", "lighter", "signers"),
+    os.path.join(os.path.dirname(_MODULE_DIR), "Signer", "Lighter"),
 ]
 _SIGNER_FILENAMES = {
     ("windows", "amd64"): "signer-amd64.dll",
@@ -388,6 +378,7 @@ class LighterClient(BaseExchangeClient):
         self._market_cache: Dict[str, Dict[str, Any]] = {}
         self._alias_map: Dict[str, str] = {}
         self._market_id_map: Dict[int, Dict[str, Any]] = {}
+        self._allow_fee_rate_inference: bool = bool(config.get("allow_fee_rate_inference", False))
 
         self.account_index: Optional[int] = self._as_int(
             config.get("account_index")
@@ -570,6 +561,21 @@ class LighterClient(BaseExchangeClient):
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _as_bool(self, value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if value in (None, "", "NaN"):
+            return None
+        if isinstance(value, (int, float, Decimal)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("true", "1", "yes", "y", "t"):
+                return True
+            if lowered in ("false", "0", "no", "n", "f"):
+                return False
+        return None
 
     def _scale_to_int(self, value: Any, precision: int) -> Optional[int]:
         decimal_value = self._safe_decimal(value)
@@ -1414,17 +1420,187 @@ class LighterClient(BaseExchangeClient):
         price = self._safe_float(trade.get("price"))
         usd_amount = self._safe_float(trade.get("usd_amount"))
 
+        maker_account = self._as_int(
+            trade.get("maker_account_index") or trade.get("makerAccountIndex")
+        )
+        taker_account = self._as_int(
+            trade.get("taker_account_index") or trade.get("takerAccountIndex")
+        )
+        ask_account = self._as_int(
+            trade.get("ask_account_id") or trade.get("askAccountId")
+        )
+        bid_account = self._as_int(
+            trade.get("bid_account_id") or trade.get("bidAccountId")
+        )
+        maker_is_ask = self._as_bool(
+            trade.get("is_maker_ask")
+            or trade.get("maker_is_ask")
+            or trade.get("makerIsAsk")
+            or trade.get("maker_side_is_ask")
+        )
+        taker_is_ask = self._as_bool(
+            trade.get("is_taker_ask")
+            or trade.get("taker_is_ask")
+            or trade.get("takerIsAsk")
+            or trade.get("taker_side_is_ask")
+        )
+        maker_is_buy = self._as_bool(
+            trade.get("maker_is_buy") or trade.get("is_maker_buy") or trade.get("makerIsBuy")
+        )
+        taker_is_buy = self._as_bool(
+            trade.get("taker_is_buy") or trade.get("is_taker_buy") or trade.get("takerIsBuy")
+        )
+
+        if maker_account is None or taker_account is None:
+            if maker_is_ask is True:
+                if maker_account is None:
+                    maker_account = ask_account
+                if taker_account is None:
+                    taker_account = bid_account
+            elif maker_is_ask is False:
+                if maker_account is None:
+                    maker_account = bid_account
+                if taker_account is None:
+                    taker_account = ask_account
+
+        is_maker: Optional[bool] = None
+        if self.account_index is not None:
+            if maker_account is not None and maker_account == int(self.account_index):
+                is_maker = True
+            elif taker_account is not None and taker_account == int(self.account_index):
+                is_maker = False
+
+        side: Optional[str] = None
+        if is_maker is True:
+            if maker_is_ask is None and maker_is_buy is not None:
+                maker_is_ask = not maker_is_buy
+            if maker_is_ask is not None:
+                side = "Ask" if maker_is_ask else "Bid"
+        elif is_maker is False:
+            if taker_is_ask is None and taker_is_buy is not None:
+                taker_is_ask = not taker_is_buy
+            if taker_is_ask is None and maker_is_ask is not None:
+                taker_is_ask = not maker_is_ask
+            if taker_is_ask is not None:
+                side = "Ask" if taker_is_ask else "Bid"
+
+        if side is None:
+            generic_side = trade.get("side") or trade.get("taker_side") or trade.get("maker_side")
+            if isinstance(generic_side, str):
+                side_upper = generic_side.upper()
+                if side_upper in ("BUY", "BID"):
+                    side = "Bid"
+                elif side_upper in ("SELL", "ASK"):
+                    side = "Ask"
+
+        if side is None and maker_is_ask is not None:
+            side = "Ask" if maker_is_ask else "Bid"
+
+        if side is None:
+            side = "Bid"
+
+        maker_fee_raw = self._safe_float(trade.get("maker_fee"))
+        taker_fee_raw = self._safe_float(trade.get("taker_fee"))
+
+        if is_maker is None:
+            if maker_fee_raw is not None and (taker_fee_raw is None or abs(maker_fee_raw) >= abs(taker_fee_raw)):
+                is_maker = True
+            elif taker_fee_raw is not None:
+                is_maker = False
+
+        fee_amount: Optional[float] = None
+        fee_amount_explicit = False
+        for key in (
+            "fee",
+            "fee_amount",
+            "fee_paid",
+            "feeValue",
+            "fee_value",
+            "maker_fee_paid",
+            "taker_fee_paid",
+        ):
+            value = self._safe_float(trade.get(key))
+            if value is not None:
+                fee_amount = value
+                fee_amount_explicit = True
+                break
+
+        notional: Optional[float] = None
+        if usd_amount is not None:
+            notional = abs(usd_amount)
+        elif size is not None and price is not None:
+            notional = abs(size * price)
+
+        rate_candidate: Optional[float] = None
+        if is_maker is True and maker_fee_raw is not None:
+            rate_candidate = maker_fee_raw
+        elif is_maker is False and taker_fee_raw is not None:
+            rate_candidate = taker_fee_raw
+        elif maker_fee_raw is not None:
+            rate_candidate = maker_fee_raw
+        elif taker_fee_raw is not None:
+            rate_candidate = taker_fee_raw
+
+        if (
+            self._allow_fee_rate_inference
+            and rate_candidate is not None
+            and notional is not None
+            and not fee_amount_explicit
+        ):
+            rate = rate_candidate
+            if abs(rate) > 1:
+                rate = rate / 1_000_000.0
+            computed_fee = notional * rate
+            if (
+                fee_amount is None
+                or fee_amount == 0.0
+                or (notional > 0 and abs(fee_amount) > notional * 0.1)
+            ):
+                fee_amount = computed_fee
+
+        if fee_amount is None:
+            fee_amount = 0.0
+
+        fee_asset = (
+            trade.get("fee_asset")
+            or trade.get("feeAsset")
+            or trade.get("maker_fee_asset")
+            or trade.get("taker_fee_asset")
+            or trade.get("fee_currency")
+            or trade.get("feeCurrency")
+        )
+
+        order_identifier = (
+            trade.get("order_id")
+            or trade.get("orderId")
+            or trade.get("order_index")
+            or trade.get("orderIndex")
+            or trade.get("ask_id")
+            or trade.get("bid_id")
+        )
+
+        timestamp = trade.get("timestamp") or trade.get("time")
+
         return {
             "trade_id": str(trade_id) if trade_id is not None else None,
-            "order_id": trade.get("ask_id") or trade.get("bid_id"),
+            "order_id": str(order_identifier) if order_identifier is not None else None,
             "market_id": trade.get("market_id"),
-            "side": "Ask" if trade.get("is_maker_ask") else "Bid",
+            "side": side,
             "size": size,
+            "quantity": size,
             "price": price,
             "usd_amount": usd_amount,
-            "taker_fee": trade.get("taker_fee"),
-            "maker_fee": trade.get("maker_fee"),
-            "timestamp": trade.get("timestamp"),
+            "fee": fee_amount,
+            "fee_asset": fee_asset,
+            "taker_fee": taker_fee_raw,
+            "maker_fee": maker_fee_raw,
+            # 如果没有 fee 项，就用 maker_fee 或 taker_fee 推断出来的，默认不推算
+            "fee_rate_inferred": bool(
+                self._allow_fee_rate_inference and not fee_amount_explicit and rate_candidate is not None
+            ),
+            "is_maker": is_maker,
+            "maker_account_index": maker_account,
+            "taker_account_index": taker_account,
+            "timestamp": timestamp,
             "tx_hash": trade.get("tx_hash"),
         }
-
