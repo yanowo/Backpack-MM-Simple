@@ -9,6 +9,7 @@ import os
 from typing import Optional
 from config import ENABLE_DATABASE
 from logger import setup_logger
+from api.lighter_client import DEFAULT_BASE_URL as LIGHTER_DEFAULT_BASE_URL
 
 # 創建記錄器
 logger = setup_logger("main")
@@ -22,7 +23,7 @@ def parse_arguments():
     parser.add_argument('--web', action='store_true', help='啟動Web界面')
     
     # 基本參數
-    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex'], default='backpack', help='交易所選擇 (backpack, aster 或 paradex)')
+    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex', 'lighter'], default='backpack', help='交易所選擇 (backpack、aster、paradex 或 lighter)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--ws-proxy', type=str, help='WebSocket Proxy (可選，默認使用環境變數或配置文件)')
@@ -122,8 +123,27 @@ def main():
             'account_address': account_address,
             'base_url': base_url,
         }
+    elif exchange == 'lighter':
+        api_key = args.api_key or os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
+        secret_key = args.secret_key or os.getenv('LIGHTER_SECRET_KEY') or api_key
+        ws_proxy = os.getenv('LIGHTER_PROXY_WEBSOCKET') or os.getenv('LIGHTER_WS_PROXY')
+        base_url = os.getenv('LIGHTER_BASE_URL', LIGHTER_DEFAULT_BASE_URL)
+        account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+        api_key_index = os.getenv('LIGHTER_API_KEY_INDEX', '0')
+        signer_dir = os.getenv('LIGHTER_SIGNER_DIR')
+        chain_id = os.getenv('LIGHTER_CHAIN_ID')
+
+        exchange_config = {
+            'api_private_key': api_key,
+            'account_index': account_index,
+            'api_key_index': api_key_index,
+            'signer_lib_dir': signer_dir,
+            'base_url': base_url,
+        }
+        if chain_id is not None:
+            exchange_config['chain_id'] = chain_id
     else:
-        logger.error("不支持的交易所，請選擇 'backpack', 'aster' 或 'paradex'")
+        logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex' 或 'lighter'")
         sys.exit(1)
 
     # 檢查API密鑰
@@ -131,12 +151,18 @@ def main():
         if not secret_key or not account_address:
             logger.error("Paradex 需要提供 StarkNet 私鑰與帳戶地址，請確認環境變數已設定")
             sys.exit(1)
+    elif exchange == 'lighter':
+        if not api_key:
+            logger.error("缺少 Lighter 私鑰，請使用 --api-key 或環境變量 LIGHTER_PRIVATE_KEY 提供")
+            sys.exit(1)
+        if not exchange_config.get('account_index'):
+            logger.error("缺少 Lighter Account Index，請透過環境變量 LIGHTER_ACCOUNT_INDEX 提供")
+            sys.exit(1)
     else:
         if not api_key or not secret_key:
             logger.error("缺少API密鑰，請通過命令行參數或環境變量提供")
             sys.exit(1)
-
-
+    
     # 決定執行模式
     if args.web:
         # 啟動Web界面
