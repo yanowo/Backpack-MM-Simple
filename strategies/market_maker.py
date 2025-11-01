@@ -64,8 +64,12 @@ class MarketMaker:
             self.client = BPClient(self.exchange_config)
         elif exchange == 'aster':
             self.client = AsterClient(self.exchange_config)
+        elif exchange == 'paradex':
+            from api.paradex_client import ParadexClient
+            self.client = ParadexClient(self.exchange_config)
         elif exchange == 'lighter':
             self.client = LighterClient(self.exchange_config)
+
         else:
             raise ValueError(f"不支持的交易所: {exchange}")
             
@@ -103,6 +107,7 @@ class MarketMaker:
         self.session_maker_sell_volume = 0.0
         self.session_taker_buy_volume = 0.0
         self.session_taker_sell_volume = 0.0
+        self.session_quote_volume = 0.0
 
         # 初始化市場限制
         self.market_limits = self.client.get_market_limits(symbol)
@@ -121,6 +126,7 @@ class MarketMaker:
         self.maker_sell_volume = 0
         self.taker_buy_volume = 0
         self.taker_sell_volume = 0
+        self.total_quote_volume = 0.0
         self.total_fees = 0
 
         # 關鍵：在任何可能出錯的代碼之前初始化這些屬性
@@ -405,10 +411,12 @@ class MarketMaker:
                     quantity = float(quantity)
                     price = float(price)
                     fee = float(fee)
-                    
+                    quote_volume = abs(quantity * price)
+
                     if side == 'Bid':  # 買入
                         self.buy_trades.append((price, quantity))
                         self.total_bought += quantity
+                        self.total_quote_volume += quote_volume
                         if maker:
                             self.maker_buy_volume += quantity
                         else:
@@ -416,6 +424,7 @@ class MarketMaker:
                     elif side == 'Ask':  # 賣出
                         self.sell_trades.append((price, quantity))
                         self.total_sold += quantity
+                        self.total_quote_volume += quote_volume
                         if maker:
                             self.maker_sell_volume += quantity
                         else:
@@ -727,6 +736,10 @@ class MarketMaker:
 
             safe_insert_order()
 
+        trade_quote_volume = abs(quantity * price)
+        self.total_quote_volume += trade_quote_volume
+        self.session_quote_volume += trade_quote_volume
+
         if normalized_side == 'Bid':
             self.total_bought += quantity
             self.buy_trades.append((price, quantity))
@@ -806,14 +819,14 @@ class MarketMaker:
             logger.error(f"成交後置處理時出錯: {hook_error}")
 
     def _after_fill_processed(self, fill_info: Dict[str, Any]) -> None:
-        """留給子類覆蓋的成交後置處理鉤子"""
+        """留給子類覆蓋的成交後置處理鈎子"""
         return
 
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
-            # aster 沒有 WebSocket，直接返回 True
-            if self.exchange == 'aster':
+            # aster 和 paradex 沒有 WebSocket，直接返回 True
+            if self.exchange in ('aster', 'paradex'):
                 return True
             if self.exchange == 'lighter':
                 return True
@@ -895,8 +908,25 @@ class MarketMaker:
                     price = float(data.get('L', '0'))
                     order_id = data.get('i')
                     maker = data.get('m', False)
-                    fee = float(data.get('n', '0'))
-                    fee_asset = data.get('N', '')
+                    
+                    # 解析手續費信息（處理各種可能的字段名）
+                    fee = 0.0
+                    fee_asset = self.quote_asset
+                    fee_fields = [
+                        ('n', 'N'),  # n: fee amount, N: fee asset
+                        ('fee', 'fee_currency'),
+                        ('commission', 'commissionAsset')
+                    ]
+                    for amount_field, asset_field in fee_fields:
+                        fee_amount = data.get(amount_field)
+                        if fee_amount is not None:
+                            try:
+                                fee = float(fee_amount)
+                                fee_asset = data.get(asset_field, self.quote_asset)
+                                break
+                            except (TypeError, ValueError):
+                                continue
+                    
                     trade_id = data.get('t')
                     timestamp = data.get('T') or data.get('E')
 
@@ -907,6 +937,13 @@ class MarketMaker:
                             timestamp_int = int(timestamp)
                         except (TypeError, ValueError):
                             timestamp_int = None
+
+                    logger.info(
+                        f"WebSocket 成交通知: {'買' if side == 'BUY' else '賣'}單成交 "
+                        f"{quantity} @ {price}, "
+                        f"{'Maker' if maker else 'Taker'}, "
+                        f"手續費: {fee} {fee_asset}"
+                    )
 
                     self._process_order_fill_event(
                         side=side,
@@ -959,6 +996,10 @@ class MarketMaker:
                 }
                 
                 # 更新統計
+                quote_volume = abs(filled_size * price)
+                self.total_quote_volume += quote_volume
+                self.session_quote_volume += quote_volume
+
                 if side == 'buy':
                     self.total_bought += filled_size
                     if is_maker:
@@ -1013,10 +1054,38 @@ class MarketMaker:
             logger.error(f"處理訂單更新時出錯: {e}")
             traceback.print_exc()
     
+    def _calculate_memory_profit(self) -> float:
+        """使用記憶體中的成交記錄計算已實現利潤（FIFO）。"""
+        if not self.buy_trades or not self.sell_trades:
+            return 0.0
+
+        buy_queue: List[Tuple[float, float]] = [
+            (float(price), float(quantity)) for price, quantity in self.buy_trades
+        ]
+        total_profit = 0.0
+
+        for sell_price, sell_quantity in self.sell_trades:
+            remaining_sell = float(sell_quantity)
+            sell_price = float(sell_price)
+
+            while remaining_sell > 0 and buy_queue:
+                buy_price, buy_quantity = buy_queue[0]
+                matched_quantity = min(remaining_sell, buy_quantity)
+
+                total_profit += (sell_price - buy_price) * matched_quantity
+
+                remaining_sell -= matched_quantity
+                if matched_quantity >= buy_quantity:
+                    buy_queue.pop(0)
+                else:
+                    buy_queue[0] = (buy_price, buy_quantity - matched_quantity)
+
+        return total_profit
+
     def _calculate_db_profit(self):
         """基於數據庫記錄計算已實現利潤（FIFO方法）"""
         if not self._db_available():
-            return 0
+            return self._calculate_memory_profit()
         try:
             # 獲取訂單歷史，注意這裡將返回一個列表
             order_history = self.db.get_order_history(self.symbol)
@@ -1743,66 +1812,96 @@ class MarketMaker:
         self.active_sell_orders = []
     
     def check_order_fills(self):
-        """檢查訂單成交情況"""
         open_orders = self.client.get_open_orders(self.symbol)
-        
         if isinstance(open_orders, dict) and "error" in open_orders:
             logger.error(f"獲取訂單失敗: {open_orders['error']}")
-            return
-        
-        # 獲取當前所有訂單ID
+            return []
         current_order_ids = set()
         if open_orders:
             for order in open_orders:
                 order_id = order.get('id')
                 if order_id:
                     current_order_ids.add(order_id)
-        
-        # 記錄更新前的訂單數量
         prev_buy_orders = len(self.active_buy_orders)
         prev_sell_orders = len(self.active_sell_orders)
-        
-        # 更新活躍訂單列表
+        filled_order_ids = []
+        for order in self.active_buy_orders + self.active_sell_orders:
+            order_id = order.get('id')
+            if order_id and order_id not in current_order_ids:
+                filled_order_ids.append(order_id)
+        filled_trades = []
+        if filled_order_ids:
+            try:
+                recent_fills = self.client.get_fill_history(self.symbol, limit=50)
+                if recent_fills and not (isinstance(recent_fills, dict) and "error" in recent_fills):
+                    if not hasattr(self, '_processed_fill_ids'):
+                        self._processed_fill_ids = set()
+                    for fill in recent_fills:
+                        fill_id = fill.get('id')
+                        fill_order_id = fill.get('order_id')
+                        if fill_id in self._processed_fill_ids:
+                            continue
+                        if fill_order_id in filled_order_ids:
+                            filled_trades.append(fill)
+                            self._processed_fill_ids.add(fill_id)
+                            side = fill.get('side', '').upper()
+                            price = float(fill.get('price', 0))
+                            size = float(fill.get('size', 0))
+                            liquidity = fill.get('liquidity', 'UNKNOWN')
+                            realized_pnl = fill.get('realized_pnl', 0)
+                            is_maker = liquidity.upper() == 'MAKER'
+                            
+                            # 獲取手續費信息
+                            fee = float(fill.get('fee', 0))
+                            fee_currency = fill.get('fee_currency', self.quote_asset)
+                            
+                            # 構建完整的成交資訊
+                            fill_info = {
+                                'side': 'Bid' if side == 'BUY' else 'Ask',
+                                'quantity': size,
+                                'price': price,
+                                'maker': is_maker,
+                                'order_id': fill.get('order_id'),
+                                'trade_id': fill.get('id'),
+                                'realized_pnl': realized_pnl,
+                                'fee': fee,
+                                'fee_currency': fee_currency
+                            }
+                            
+                            logger.info(
+                                f"✓ {'買' if side == 'BUY' else '賣'}單成交 ({liquidity}): "
+                                f"{size} @ {price}, 已實現盈虧: {realized_pnl}, 手續費: {fee} {fee_currency}"
+                            )
+                            
+                            # 觸發成交後處理
+                            self._process_order_fill_event(
+                                side=fill_info['side'],
+                                quantity=fill_info['quantity'],
+                                price=fill_info['price'],
+                                order_id=fill_info['order_id'],
+                                maker=fill_info['maker'],
+                                fee=fee,
+                                fee_asset=fee_currency,
+                                trade_id=fill_info['trade_id'],
+                                source='rest',
+                                timestamp=int(time.time() * 1000)
+                            )
+            except Exception as e:
+                logger.error(f"獲取成交記錄失敗: {e}")
         active_buy_orders = []
         active_sell_orders = []
-        
         if open_orders:
             for order in open_orders:
-                if order.get('side') == 'Bid':
+                if order.get('side') == 'Bid' or order.get('side') == 'BUY':
                     active_buy_orders.append(order)
-                elif order.get('side') == 'Ask':
+                elif order.get('side') == 'Ask' or order.get('side') == 'SELL':
                     active_sell_orders.append(order)
-        
-        # 檢查買單成交
-        filled_buy_orders = []
-        for order in self.active_buy_orders:
-            order_id = order.get('id')
-            if order_id and order_id not in current_order_ids:
-                price = float(order.get('price', 0))
-                quantity = float(order.get('quantity', 0))
-                logger.info(f"買單已成交: {price} x {quantity}")
-                filled_buy_orders.append(order)
-        
-        # 檢查賣單成交
-        filled_sell_orders = []
-        for order in self.active_sell_orders:
-            order_id = order.get('id')
-            if order_id and order_id not in current_order_ids:
-                price = float(order.get('price', 0))
-                quantity = float(order.get('quantity', 0))
-                logger.info(f"賣單已成交: {price} x {quantity}")
-                filled_sell_orders.append(order)
-        
-        # 更新活躍訂單列表
         self.active_buy_orders = active_buy_orders
         self.active_sell_orders = active_sell_orders
-        
-        # 輸出訂單數量變化，方便追蹤
         if prev_buy_orders != len(active_buy_orders) or prev_sell_orders != len(active_sell_orders):
             logger.info(f"訂單數量變更: 買單 {prev_buy_orders} -> {len(active_buy_orders)}, 賣單 {prev_sell_orders} -> {len(active_sell_orders)}")
-        
         logger.info(f"當前活躍訂單: 買單 {len(self.active_buy_orders)} 個, 賣單 {len(self.active_sell_orders)} 個")
-    
+        return filled_trades
     def estimate_profit(self, pnl_data=None):
         """輸出本次迭代的關鍵統計資訊。"""
         if pnl_data is None:
@@ -1833,6 +1932,7 @@ class MarketMaker:
                 ("Maker成交量", f"買 {self.session_maker_buy_volume:.3f} {self.base_asset} | 賣 {self.session_maker_sell_volume:.3f} {self.base_asset}"),
                 ("Taker成交量", f"買 {self.session_taker_buy_volume:.3f} {self.base_asset} | 賣 {self.session_taker_sell_volume:.3f} {self.base_asset}"),
             ]
+            session_rows.insert(1, ("成交額", f"{self.session_quote_volume:.2f} {self.quote_asset}"))
         else:
             session_rows = [
                 "本次迭代沒有成交記錄",
@@ -1868,14 +1968,24 @@ class MarketMaker:
             )
         )
 
+        if self.total_quote_volume > 0:
+            wear_rate_value = abs(net_pnl) / self.total_quote_volume * 100
+            wear_rate_display = f"{wear_rate_value:.4f}%"
+        else:
+            wear_rate_display = "N/A"
+
+        trade_rows = [
+            ("總成交量", f"買 {self.total_bought:.3f} {self.base_asset} | 賣 {self.total_sold:.3f} {self.base_asset}"),
+            ("總成交額", f"{self.total_quote_volume:.2f} {self.quote_asset}"),
+            ("Maker總量", f"買 {self.maker_buy_volume:.3f} {self.base_asset} | 賣 {self.maker_sell_volume:.3f} {self.base_asset}"),
+            ("Taker總量", f"買 {self.taker_buy_volume:.3f} {self.base_asset} | 賣 {self.taker_sell_volume:.3f} {self.base_asset}"),
+            ("磨損率", wear_rate_display),
+        ]
+
         sections.append(
             (
                 "成交概況",
-                [
-                    ("總成交量", f"買 {self.total_bought:.3f} {self.base_asset} | 賣 {self.total_sold:.3f} {self.base_asset}"),
-                    ("Maker總量", f"買 {self.maker_buy_volume:.3f} {self.base_asset} | 賣 {self.maker_sell_volume:.3f} {self.base_asset}"),
-                    ("Taker總量", f"買 {self.taker_buy_volume:.3f} {self.base_asset} | 賣 {self.taker_sell_volume:.3f} {self.base_asset}"),
-                ],
+                trade_rows,
             )
         )
 

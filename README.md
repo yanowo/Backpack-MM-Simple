@@ -1,8 +1,12 @@
-# Backpack Exchange 做市交易程序
+# 加密貨幣做市交易程序
 
-這是一個針對 Backpack Exchange 的加密貨幣做市交易程序。該程序提供自動化做市功能，通過維持買賣價差賺取利潤。
+這是一個支援對沖與做市策略的加密貨幣交易架構，具備多交易所自助接入與自訂策略擴充能力。系統內建自動化做市功能，可透過維持買賣價差獲取穩定收益。目前已支援 Backpack、Aster 和 Paradex 等交易所。
 
 Backpack 註冊連結：[https://backpack.exchange/refer/yan](https://backpack.exchange/refer/yan)
+
+Asterdex 註冊連結：[https://www.asterdex.com/referral/1a7b6E](https://www.asterdex.com/referral/1a7b6E)
+
+Paradex 註冊連結：[https://app.paradex.trade/r/yanowo](https://app.paradex.trade/r/yanowo)
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
@@ -10,11 +14,13 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 ## 功能特點
 
-- **多交易所架構**：支援 Backpack、未來可擴展至其他交易所
+- **多交易所架構**：支援 Backpack、Aster、Paradex，可擴展至其他交易所
+- **Paradex 整合**：完整支援 Paradex 永續合約交易，包含 JWT 自動更新機制
 - **自動化做市策略**：智能價差管理和訂單調整
 - **Maker-Taker 對沖策略**：僅在買一/賣一掛單並於成交後以市價單即刻對沖，支援現貨與永續市場
 - **永續合約做市**：倉位風險管理與風險中性機制
 - **智能重平衡系統**：自動維持資產配置比例
+- **JWT 自動更新**：Paradex JWT token 自動刷新，避免認證過期
 - **增強日誌系統**：詳細的市場狀態和策略追蹤
 - **WebSocket 實時連接**：即時市場數據和訂單更新
 - **命令行界面**：靈活的參數配置和策略執行
@@ -29,8 +35,9 @@ lemon_trader/
 │   ├── __init__.py
 │   ├── auth.py           # API認證和簽名相關
 │   ├── base_client.py    # 抽象基礎客户端 (支持繼承開發接入任意交易所)
+│   ├── bp_client.py      # Backpack Exchange 客户端
 │   ├── aster_client.py   # Aster Exchange 客户端
-│   └── bp_client.py      # Backpack Exchange 客户端
+│   └── paradex_client.py # Paradex Exchange 客户端 (含 JWT 認證)
 │
 ├── websocket/            # WebSocket模塊
 │   ├── __init__.py
@@ -43,7 +50,8 @@ lemon_trader/
 ├── strategies/           # 策略模塊
 │   ├── __init__.py
 │   ├── market_maker.py   # 做市策略
-│   └── perp_market_maker.py   # 合約做市策略
+│   ├── perp_market_maker.py   # 合約做市策略
+│   └── maker_taker_hedge.py   # 合約對沖策略
 │
 ├── utils/                # 工具模塊
 │   ├── __init__.py
@@ -63,11 +71,12 @@ lemon_trader/
 
 - Python 3.8 或更高版本
 - 所需第三方庫：
-  - nacl (用於API簽名)
+  - PyNaCl
   - requests
   - websocket-client
   - numpy
   - python-dotenv
+  - starknet-py
 
 ## 安裝
 
@@ -92,12 +101,23 @@ pip install -r requirements.txt
 # Backpack Exchange
 BACKPACK_KEY=your_backpack_api_key
 BACKPACK_SECRET=your_backpack_secret_key
-BACKPACK_PROXY_WEBSOCKET=http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
 BASE_URL=https://api.backpack.work
+
+# WS 代理格式 http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
+BACKPACK_PROXY_WEBSOCKET=
+
 
 # Aster Exchange
 ASTER_API_KEY=your_aster_api_key
 ASTER_SECRET_KEY=your_aster_secret_key
+
+# Paradex Exchange (使用 StarkNet 賬户認證)
+PARADEX_PRIVATE_KEY=your_starknet_private_key
+PARADEX_ACCOUNT_ADDRESS=your_starknet_account_address
+PARADEX_BASE_URL=https://api.prod.paradex.trade/v1
+
+# WS 代理格式 http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
+PARADEX_PROXY_WEBSOCKET=
 
 # Optional Features
 # ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
@@ -111,23 +131,31 @@ ASTER_SECRET_KEY=your_aster_secret_key
 # 啟動命令行界面 (推薦)
 python run.py --cli  
 
-# 直接運行做市策略
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.5 --max-orders 3 --duration 3600 --interval 60
+# 快數啟動方式：
 
-# 直接運行 Maker-Taker 對沖現貨
-python run.py --exchange backpack --symbol SOL_USDC --spread 0.1 --strategy maker_hedge --duration 3600 --interval 30
+# BackPack 現貨做市
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.01 --max-orders 3 --duration 3600 --interval 60
 
-# 直接運行 BackPack 永續做市
+# BackPack Maker-Taker 現貨對沖
+python run.py --exchange backpack --symbol SOL_USDC --spread 0.01 --strategy maker_hedge --duration 3600 --interval 30
+
+# BackPack 永續做市
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 3600 --interval 10
 
-# 直接運行 Maker-Taker 對沖永續
-python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 15
+# BackPack Maker-Taker 永續對沖
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 8
 
-# 直接運行 Aster 永續 Maker-Taker 對沖
-python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.02 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 15
-
-# 直接運行 Aster 永續做市
+# Aster 永續做市
 python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 3600 --interval 10
+
+# Aster Maker-Taker 永續對沖
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 15
+
+# Paradex 永續做市
+python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
+
+# Paradex Maker-Taker 對沖
+python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 
 ```
 
@@ -135,8 +163,8 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 
 #### 基本參數
 - `--api-key`: API 密鑰 (可選，默認使用環境變數)
-- `--secret-key`: API 密鑰 (可選，默認使用環境變數)
-- `--exchange`: 交易所選擇 (默認: backpack)
+- `--secret-key`: API 密鑰 (可選，默認使用環境變數；Paradex 使用` Paradex 帳戶`私鑰)
+- `--exchange`: 交易所選擇 (支援: `backpack`, `aster`, `paradex`，默認: `backpack`)
 - `--ws-proxy`: Websocket 代理 (可選，默認使用環境變數)
 - `--cli`: 啟動命令行界面
 - `--enable-db`: 啟用資料庫寫入 (預設關閉)
@@ -170,15 +198,73 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 - 透過設定環境變數 `ENABLE_DATABASE=1` 或在啟動命令時加上 `--enable-db` 可啟用資料庫寫入功能。
 - 若要臨時停用資料庫，可使用 `--disable-db` 覆寫設定。
 - 當資料庫功能關閉時，相關的歷史統計/報表選單會顯示為停用狀態。
-
+___
 ### Maker-Taker 對沖策略
 
-- 於啟動參數中將 `--strategy` 設定為 `maker_hedge`，或在 CLI 對話式流程中選擇 `maker_hedge`，即可啟用對沖模式。
-- 策略會僅在買一/賣一各保留一張 Post-Only 掛單，成交後立即透過市價單反向對沖，避免持倉累積。
-- 現貨與永續皆支援該策略；永續市價對沖訂單會帶上 `reduceOnly` 以確保僅削減倉位。
-- Aster 永續合約同樣支援 maker-taker 對沖，系統會自動調整訂單欄位以符合交易所限制（例如移除 `postOnly` 與市價單 `timeInForce`）。
-- 其餘參數 (如價差、下單量、永續倉位目標) 仍遵循既有設置邏輯。
 
+
+#### 啟動永續合約對沖範例
+
+```bash
+# 以 BackPack 為例
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 86400 --interval 8
+```
+
+
+**執行情況：**
+```
+[INFO] 初始化 Maker-Taker 對沖策略 (永續合約僅掛買一/賣一)
+[INFO] 對沖參考倉位初始化為 0.00000000
+[INFO] 買單已掛出: 價格 239.45, 數量 0.1
+[INFO] 賣單已掛出: 價格 239.65, 數量 0.1
+[INFO] 處理Maker成交：Ask 0.1@239.65
+[INFO] 偵測到 Maker 成交，準備以市價對沖 0.10000000 Bid
+[INFO] 提交市價對沖訂單: Bid 0.10000000 (第 1 次嘗試) [reduceOnly=True]
+[INFO] 市價對沖訂單已提交: def456
+[INFO] 市價對沖已完成，倉位回到參考水位
+```
+
+**優勢：**
+- 永續合約支持雙向開倉，對沖更靈活
+- `reduceOnly` 確保不會意外開新倉位
+
+
+#### 常見問題
+
+**Q1: 為什麼對沖後還有小額殘量？**
+
+A: 由於交易所的精度限制，對沖數量可能無法完全匹配成交量。策略會記錄這些殘量（通常 < 最小下單量），並在下次成交時一併處理。
+
+**Q2: 對沖失敗會怎樣？**
+
+A: 若市價對沖訂單提交失敗（如餘額不足、API 錯誤），策略會保留完整對沖目標量至下次嘗試。同時會在日誌中記錄錯誤訊息，便於追蹤問題。
+
+
+**Q3: 對沖策略能用於高波動行情嗎？**
+
+A: 可以，但需注意：
+- 高波動可能導致對沖滑點增加
+- 建議縮短 `interval` (如 5-10 秒) 以更快反應市場變化
+
+
+**Q5: Maker-Taker 策略與標準做市的區別？**
+
+| 特性 | 標準做市 | Maker-Taker 對沖 |
+|------|----------|-----------------|
+| 訂單層數 | 多層 (可配置) | 單層 (買一/賣一) |
+| 持倉風險 | 累積持倉 | 即時對沖，接近零持倉 |
+| 資金占用率 | 較高 | 較低 |
+| 適合場景 | 震盪行情 | 提高交易量 |
+| 盈利模式 | 價差 + 持倉升值 | 延遲價差 |
+
+#### 交易所相容性
+
+| 交易所 | 永續對沖 | 特殊處理 |
+|--------|---------|----------|
+| Backpack | ✓ | 自動啟用 `autoLendRedeem` |
+| Aster | ✓ | 移除 `postOnly` (永續) |
+| Paradex | ✓ | JWT 自動刷新 |
+___
 ### 永續合約做市
 
 
@@ -213,14 +299,10 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 #### 啟動永續做市範例
 
 ```bash
-# BackPack 永續做市
+# 以 BackPack 為例
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
 ```
 
-```bash
-# Aster 永續做市
-python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 999999999 --interval 10
-```
 
 #### 永續合約參數詳解
 
@@ -244,6 +326,8 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 2. 策略偵測到虧損超過 25 USDC 閾值，立即**取消所有未成交掛單**並以市價賣出平倉。
 3. 平倉成功後，日誌會提示「止損觸發，已以市價平倉」，接著策略重新計算報價並繼續掛單，整個流程無需人工介入。
 4. 若之後行情好轉並達成 `take_profit=50` 的設定，流程相同，策略會自動鎖定利潤並持續運作。
+
+___
 
 ## 重平衡功能詳解
 
@@ -337,7 +421,7 @@ python run.py --exchange backpack --symbol SOL_USDC --spread 0.1 --duration 8640
 python run.py --exchange backpack --symbol SOL_USDC --spread 0.3 --quantity 0.5 --max-orders 3 --duration 7200 --interval 60 --enable-rebalance --base-asset-target 25 --rebalance-threshold 15
 ``` 
 
-## 重平功能管理
+___
 
 ### 通過 CLI 界面管理
 

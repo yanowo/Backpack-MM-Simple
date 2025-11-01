@@ -8,6 +8,7 @@ from datetime import datetime
 
 from api.bp_client import BPClient
 from api.aster_client import AsterClient
+from api.paradex_client import ParadexClient
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -36,6 +37,16 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
             os.getenv("ASTER_SECRET_KEY"),
             os.getenv("ASTER_SECRET"),
         ]
+    elif exchange == "paradex":
+        # Paradex 使用 StarkNet 認證，不需要傳統的 API Key
+        # 使用 account_address 作為 api_key 的佔位符
+        api_candidates = [
+            os.getenv("PARADEX_ACCOUNT_ADDRESS"),
+        ]
+        secret_candidates = [
+            os.getenv("PARADEX_PRIVATE_KEY"),
+        ]
+        # Paradex 使用 StarkNet 賬户地址和私鑰進行認證
     else:
         api_candidates = [
             os.getenv("BACKPACK_KEY"),
@@ -55,12 +66,12 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
 def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_config=None):
     """獲取緩存的客户端實例，避免重複創建"""
     exchange = (exchange or 'backpack').lower()
-    if exchange not in ('backpack', 'aster'):
+    if exchange not in ('backpack', 'aster', 'paradex'):
         raise ValueError(f"不支持的交易所: {exchange}")
 
     config = dict(exchange_config or {})
     config_api_key = api_key or config.get('api_key')
-    config_secret_key = secret_key or config.get('secret_key')
+    config_secret_key = secret_key or config.get('secret_key') or config.get('private_key')
 
     if config_api_key:
         config['api_key'] = config_api_key
@@ -68,19 +79,28 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
         config.pop('api_key', None)
 
     if config_secret_key:
-        config['secret_key'] = config_secret_key
+        if exchange == 'paradex':
+            config['private_key'] = config_secret_key  # Paradex 使用私钥
+        else:
+            config['secret_key'] = config_secret_key
     else:
         config.pop('secret_key', None)
+        config.pop('private_key', None)
 
     cache_suffix = (
-        f"{config.get('api_key', '')}_{config.get('secret_key', '')}"
-        if config.get('api_key') or config.get('secret_key')
+        f"{config.get('api_key', '')}_{config.get('secret_key', '') or config.get('private_key', '')}"
+        if config.get('api_key') or config.get('secret_key') or config.get('private_key')
         else 'public'
     )
     cache_key = f"{exchange}:{cache_suffix}"
 
     if cache_key not in _client_cache:
-        client_cls = BPClient if exchange == 'backpack' else AsterClient
+        if exchange == 'backpack':
+            client_cls = BPClient
+        elif exchange == 'aster':
+            client_cls = AsterClient
+        else:  # paradex
+            client_cls = ParadexClient
         _client_cache[cache_key] = client_cls(config)
 
     return _client_cache[cache_key]
@@ -93,34 +113,102 @@ def get_address_command(api_key, secret_key):
     print(result)
 
 def get_balance_command(api_key, secret_key):
-    """獲取餘額命令"""
-    c = _get_client(api_key, secret_key)
-    balances = c.get_balance()
-    collateral = c.get_collateral()
-    if isinstance(balances, dict) and "error" in balances and balances["error"]:
-        print(f"獲取餘額失敗: {balances['error']}")
-    else:
-        print("\n當前餘額:")
-        if isinstance(balances, dict):
-            for coin, details in balances.items():
-                if float(details.get('available', 0)) > 0 or float(details.get('locked', 0)) > 0:
-                    print(f"{coin}: 可用 {details.get('available', 0)}, 凍結 {details.get('locked', 0)}")
-        else:
-            print(f"獲取餘額失敗: 無法識別返回格式 {type(balances)}")
+    """獲取餘額命令 - 檢查所有已配置的交易所"""
+    
+    # 定義要檢查的交易所列表
+    exchanges_to_check = []
+    
+    # 檢查 Backpack
+    backpack_api, backpack_secret = _resolve_api_credentials('backpack', api_key, secret_key)
+    if backpack_api and backpack_secret:
+        exchanges_to_check.append(('backpack', backpack_api, backpack_secret))
+    
+    # 檢查 Aster
+    aster_api, aster_secret = _resolve_api_credentials('aster', None, None)
+    if aster_api and aster_secret:
+        exchanges_to_check.append(('aster', aster_api, aster_secret))
+    
+    # 檢查 Paradex
+    paradex_account, paradex_key = _resolve_api_credentials('paradex', None, None)
+    if paradex_account and paradex_key:
+        exchanges_to_check.append(('paradex', paradex_account, paradex_key))
+    
+    if not exchanges_to_check:
+        print("未找到任何已配置的交易所 API 密鑰")
+        return
+    
+    # 遍歷所有交易所並獲取餘額
+    for exchange, ex_api_key, ex_secret_key in exchanges_to_check:
+        print(f"\n{'='*60}")
+        print(f"交易所: {exchange.upper()}")
+        print(f"{'='*60}")
+        
+        try:
+            exchange_config = {
+                'api_key': ex_api_key,
+            }
+            
+            if exchange == 'paradex':
+                exchange_config['private_key'] = ex_secret_key
+                exchange_config['account_address'] = ex_api_key
+                exchange_config['base_url'] = os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1')
+            else:
+                exchange_config['secret_key'] = ex_secret_key
+            
+            c = _get_client(api_key=ex_api_key, secret_key=ex_secret_key, exchange=exchange, exchange_config=exchange_config)
+            balances = c.get_balance()
+            collateral = c.get_collateral()
+            
+            if isinstance(balances, dict) and "error" in balances and balances["error"]:
+                print(f"獲取餘額失敗: {balances['error']}")
+            else:
+                print("\n當前餘額:")
+                has_balance = False
+                if isinstance(balances, dict):
+                    for coin, details in balances.items():
+                        if isinstance(details, dict):
+                            available = float(details.get('available', 0))
+                            locked = float(details.get('locked', 0))
+                            if available > 0 or locked > 0:
+                                print(f"{coin}: 可用 {details.get('available', 0)}, 凍結 {details.get('locked', 0)}")
+                                has_balance = True
+                    if not has_balance:
+                        print("無餘額記錄")
+                else:
+                    print(f"獲取餘額失敗: 無法識別返回格式 {type(balances)}")
 
-    if isinstance(collateral, dict) and "error" in collateral:
-        print(f"獲取抵押品失敗: {collateral['error']}")
-    elif isinstance(collateral, dict):
-        assets = collateral.get('assets') or collateral.get('collateral', [])
-        if assets:
-            print("\n抵押品資產:")
-            for item in assets:
-                symbol = item.get('symbol', '')
-                total = item.get('totalQuantity', '')
-                available = item.get('availableQuantity', '')
-                lend = item.get('lendQuantity', '')
-                collateral_value = item.get('collateralValue', '')
-                print(f"{symbol}: 總量 {total}, 可用 {available}, 出借中 {lend}, 抵押價值 {collateral_value}")
+            # Paradex 的抵押品信息格式不同
+            if exchange == 'paradex':
+                if isinstance(collateral, dict) and "error" in collateral:
+                    print(f"獲取賬戶摘要失敗: {collateral['error']}")
+                elif isinstance(collateral, dict) and collateral.get('account'):
+                    print("\n賬戶摘要:")
+                    print(f"賬戶地址: {collateral.get('account', 'N/A')}")
+                    print(f"賬戶價值: {collateral.get('account_value', '0')} USDC")
+                    print(f"總抵押品: {collateral.get('total_collateral', '0')} USDC")
+                    print(f"可用抵押品: {collateral.get('free_collateral', '0')} USDC")
+                    print(f"初始保證金: {collateral.get('initial_margin', '0')} USDC")
+                    print(f"維持保證金: {collateral.get('maintenance_margin', '0')} USDC")
+            else:
+                # 其他交易所的抵押品信息
+                if isinstance(collateral, dict) and "error" in collateral:
+                    print(f"獲取抵押品失敗: {collateral['error']}")
+                elif isinstance(collateral, dict):
+                    assets = collateral.get('assets') or collateral.get('collateral', [])
+                    if assets:
+                        print("\n抵押品資產:")
+                        for item in assets:
+                            symbol = item.get('symbol', '')
+                            total = item.get('totalQuantity', '')
+                            available = item.get('availableQuantity', '')
+                            lend = item.get('lendQuantity', '')
+                            collateral_value = item.get('collateralValue', '')
+                            print(f"{symbol}: 總量 {total}, 可用 {available}, 出借中 {lend}, 抵押價值 {collateral_value}")
+        
+        except Exception as e:
+            print(f"查詢 {exchange.upper()} 餘額時發生錯誤: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 def get_markets_command():
     """獲取市場信息命令"""
@@ -305,15 +393,25 @@ def configure_rebalance_settings():
 def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     """執行做市策略命令"""
     # [整合功能] 1. 增加交易所選擇
-    exchange_input = input("請選擇交易所 (backpack/aster，默認 backpack): ").strip().lower()
-    exchange = exchange_input if exchange_input in ('backpack', 'aster') else 'backpack'
+    exchange_input = input("請選擇交易所 (backpack/aster/paradex，默認 backpack): ").strip().lower()
+
+    # 處理交易所選擇
+    if exchange_input in ('backpack', 'aster', 'paradex', ''):
+        exchange = exchange_input if exchange_input else 'backpack'
+    else:
+        print(f"警告: 不識別的交易所 '{exchange_input}'，使用默認 'backpack'")
+        exchange = 'backpack'
+
     print(f"已選擇交易所: {exchange}")
 
     # [整合功能] 2. 根據選擇配置交易所信息
     api_key, secret_key = _resolve_api_credentials(exchange, api_key, secret_key)
 
     if not api_key or not secret_key:
-        print("錯誤：未找到對應交易所的 API Key 或 Secret Key，請先設置環境變數或配置檔案。")
+        if exchange == 'paradex':
+            print("錯誤：未找到 Paradex 的賬户地址或私鑰，請先設置 PARADEX_ACCOUNT_ADDRESS 和 PARADEX_PRIVATE_KEY 環境變數。")
+        else:
+            print("錯誤：未找到對應交易所的 API Key 或 Secret Key，請先設置環境變數或配置檔案。")
         return
 
     if exchange == 'backpack':
@@ -329,15 +427,42 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
             'api_key': api_key,
             'secret_key': secret_key,
         }
+    elif exchange == 'paradex':
+        exchange_config = {
+            'private_key': secret_key,  # Paradex 使用 StarkNet 私钥
+            'account_address': api_key or os.getenv('PARADEX_ACCOUNT_ADDRESS'),  # StarkNet 账户地址
+            'base_url': os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1'),
+        }
     else:
         print("錯誤：不支持的交易所。")
         return
 
+    # 市場類型選擇
     market_type_input = input("請選擇市場類型 (spot/perp，默認 spot): ").strip().lower()
-    market_type = market_type_input if market_type_input in ("spot", "perp") else "spot"
 
+    # 處理常見別名
+    if market_type_input in ("perpetual", "future", "futures", "contract"):
+        print("提示: 已識別為永續合約 'perp'")
+        market_type = "perp"
+    elif market_type_input in ("spot", "perp", ""):
+        market_type = market_type_input if market_type_input else "spot"
+    else:
+        print(f"警告: 不識別的市場類型 '{market_type_input}'，使用默認 'spot'")
+        market_type = "spot"
+
+    # 策略選擇（支援拼寫糾正）
     strategy_input = input("請選擇策略 (standard/maker_hedge，默認 standard): ").strip().lower()
-    strategy = strategy_input if strategy_input in ("standard", "maker_hedge") else "standard"
+
+    # 處理常見拼寫錯誤
+    if strategy_input in ("marker_hedge", "make_hedge", "makertaker", "maker-hedge"):
+        print(f"提示: 已自動糾正 '{strategy_input}' -> 'maker_hedge'")
+        strategy = "maker_hedge"
+    elif strategy_input in ("standard", "maker_hedge", ""):
+        strategy = strategy_input if strategy_input else "standard"
+    else:
+        print(f"警告: 不識別的策略 '{strategy_input}'，使用默認策略 'standard'")
+        strategy = "standard"
+
     print(f"已選擇策略: {strategy}")
 
     symbol = input("請輸入要做市的交易對 (例如: SOL_USDC): ")
@@ -881,7 +1006,7 @@ def market_analysis_command(api_key, secret_key, ws_proxy=None):
         import traceback
         traceback.print_exc()
 
-def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_database=ENABLE_DATABASE):
+def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_database=ENABLE_DATABASE, exchange='backpack'):
     """主CLI函數"""
     global USE_DATABASE
     USE_DATABASE = bool(enable_database)
@@ -889,8 +1014,15 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_datab
     if not USE_DATABASE:
         print("提示: 資料庫寫入功能已關閉，統計與歷史查詢功能將不可用。")
 
+    # 显示当前交易所
+    exchange_display = {
+        'backpack': 'Backpack',
+        'aster': 'Aster',
+        'paradex': 'Paradex'
+    }.get(exchange.lower(), 'Backpack')
+
     while True:
-        print("\n===== Backpack Exchange 交易程序 =====")
+        print(f"\n===== {exchange_display} 交易程序 =====")
         print("1 - 查詢存款地址")
         print("2 - 查詢餘額")
         print("3 - 獲取市場信息")

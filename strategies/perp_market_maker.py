@@ -247,8 +247,12 @@ class PerpetualMarketMaker(MarketMaker):
         
         if position_info:
             # 使用API返回的精確信息
-            avg_entry = float(position_info.get("entryPrice", 0))
-            unrealized = float(position_info.get("pnlUnrealized", 0))
+            entry_price_raw = position_info.get("entryPrice", 0)
+            pnl_raw = position_info.get("pnlUnrealized", 0)
+
+            # 安全處理可能為 None 的值
+            avg_entry = float(entry_price_raw) if entry_price_raw is not None else 0.0
+            unrealized = float(pnl_raw) if pnl_raw is not None else 0.0
         else:
             # 使用本地計算作為備用
             if net > 0:
