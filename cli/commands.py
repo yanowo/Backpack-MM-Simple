@@ -9,6 +9,7 @@ from datetime import datetime
 from api.bp_client import BPClient
 from api.aster_client import AsterClient
 from api.paradex_client import ParadexClient
+from api.lighter_client import LighterClient, DEFAULT_BASE_URL as LIGHTER_DEFAULT_BASE_URL
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -36,6 +37,16 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
         secret_candidates = [
             os.getenv("ASTER_SECRET_KEY"),
             os.getenv("ASTER_SECRET"),
+        ]
+    elif exchange == "lighter":
+        api_candidates = [
+            os.getenv("LIGHTER_PRIVATE_KEY"),
+            os.getenv("LIGHTER_API_KEY"),
+            os.getenv("API_KEY_PRIVATE_KEY"),
+        ]
+        secret_candidates = [
+            os.getenv("LIGHTER_SECRET_KEY"),
+            os.getenv("LIGHTER_PRIVATE_KEY"),
         ]
     elif exchange == "paradex":
         # Paradex 使用 StarkNet 認證，不需要傳統的 API Key
@@ -66,32 +77,86 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
 def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_config=None):
     """獲取緩存的客户端實例，避免重複創建"""
     exchange = (exchange or 'backpack').lower()
-    if exchange not in ('backpack', 'aster', 'paradex'):
+    if exchange not in ('backpack', 'aster', 'paradex', 'lighter'):
         raise ValueError(f"不支持的交易所: {exchange}")
 
     config = dict(exchange_config or {})
-    config_api_key = api_key or config.get('api_key')
-    config_secret_key = secret_key or config.get('secret_key') or config.get('private_key')
 
-    if config_api_key:
-        config['api_key'] = config_api_key
-    else:
-        config.pop('api_key', None)
-
-    if config_secret_key:
-        if exchange == 'paradex':
-            config['private_key'] = config_secret_key  # Paradex 使用私钥
+    if exchange == 'lighter':
+        private_key = (
+            api_key
+            or config.get('api_private_key')
+            or config.get('private_key')
+            or config.get('api_key')
+        )
+        if private_key:
+            config['api_private_key'] = private_key
+            config['private_key'] = private_key
         else:
-            config['secret_key'] = config_secret_key
-    else:
-        config.pop('secret_key', None)
-        config.pop('private_key', None)
+            config.pop('api_private_key', None)
 
-    cache_suffix = (
-        f"{config.get('api_key', '')}_{config.get('secret_key', '') or config.get('private_key', '')}"
-        if config.get('api_key') or config.get('secret_key') or config.get('private_key')
-        else 'public'
-    )
+        account_index_value = (
+            secret_key
+            if secret_key not in (None, '')
+            else config.get('account_index')
+            or config.get('accountIndex')
+            or os.getenv('LIGHTER_ACCOUNT_INDEX')
+        )
+        if account_index_value not in (None, ''):
+            config['account_index'] = account_index_value
+        elif 'account_index' in config:
+            config.pop('account_index')
+
+        api_key_index_value = (
+            config.get('api_key_index')
+            or config.get('apiKeyIndex')
+            or os.getenv('LIGHTER_API_KEY_INDEX')
+        )
+        if api_key_index_value not in (None, ''):
+            config['api_key_index'] = api_key_index_value
+
+        signer_dir = config.get('signer_lib_dir') or os.getenv('LIGHTER_SIGNER_DIR')
+        if signer_dir:
+            config['signer_lib_dir'] = signer_dir
+
+        base_url = config.get('base_url') or os.getenv('LIGHTER_BASE_URL', LIGHTER_DEFAULT_BASE_URL)
+        config['base_url'] = base_url
+
+        chain_id = config.get('chain_id') or os.getenv('LIGHTER_CHAIN_ID')
+        if chain_id not in (None, ''):
+            config['chain_id'] = chain_id
+
+        verify_ssl_env = os.getenv('LIGHTER_VERIFY_SSL')
+        if 'verify_ssl' not in config and verify_ssl_env is not None:
+            config['verify_ssl'] = verify_ssl_env.lower() not in ('0', 'false', 'no')
+
+        config.pop('api_key', None)
+        config.pop('secret_key', None)
+    else:
+        config_api_key = api_key or config.get('api_key')
+        config_secret_key = secret_key or config.get('secret_key') or config.get('private_key')
+
+        if config_api_key:
+            config['api_key'] = config_api_key
+        else:
+            config.pop('api_key', None)
+
+        if config_secret_key:
+            if exchange == 'paradex':
+                config['private_key'] = config_secret_key  # Paradex 使用私钥
+            else:
+                config['secret_key'] = config_secret_key
+        else:
+            config.pop('secret_key', None)
+            if exchange == 'paradex':
+                config.pop('private_key', None)
+
+    identifier_components = []
+    for key in ('api_private_key', 'api_key', 'secret_key', 'private_key', 'account_index'):
+        value = config.get(key)
+        if value not in (None, ''):
+            identifier_components.append(str(value))
+    cache_suffix = "_".join(identifier_components) if identifier_components else 'public'
     cache_key = f"{exchange}:{cache_suffix}"
 
     if cache_key not in _client_cache:
@@ -99,8 +164,10 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
             client_cls = BPClient
         elif exchange == 'aster':
             client_cls = AsterClient
-        else:  # paradex
+        elif exchange == 'paradex':
             client_cls = ParadexClient
+        else:
+            client_cls = LighterClient
         _client_cache[cache_key] = client_cls(config)
 
     return _client_cache[cache_key]
@@ -132,6 +199,12 @@ def get_balance_command(api_key, secret_key):
     paradex_account, paradex_key = _resolve_api_credentials('paradex', None, None)
     if paradex_account and paradex_key:
         exchanges_to_check.append(('paradex', paradex_account, paradex_key))
+
+    # 檢查 Lighter
+    lighter_private, lighter_account_index = _resolve_api_credentials('lighter', None, None)
+    lighter_account_index = lighter_account_index or os.getenv("LIGHTER_ACCOUNT_INDEX")
+    if lighter_private and lighter_account_index:
+        exchanges_to_check.append(('lighter', lighter_private, lighter_account_index))
     
     if not exchanges_to_check:
         print("未找到任何已配置的交易所 API 密鑰")
@@ -152,12 +225,40 @@ def get_balance_command(api_key, secret_key):
                 exchange_config['private_key'] = ex_secret_key
                 exchange_config['account_address'] = ex_api_key
                 exchange_config['base_url'] = os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1')
+                client_secret = ex_secret_key
+            elif exchange == 'lighter':
+                account_index = ex_secret_key or os.getenv('LIGHTER_ACCOUNT_INDEX')
+                if not account_index:
+                    print("缺少 Lighter Account Index，請設置 LIGHTER_ACCOUNT_INDEX 環境變數。")
+                    continue
+                exchange_config = {
+                    'api_private_key': ex_api_key,
+                    'account_index': account_index,
+                    'api_key_index': os.getenv('LIGHTER_API_KEY_INDEX', '0'),
+                    'base_url': os.getenv('LIGHTER_BASE_URL', LIGHTER_DEFAULT_BASE_URL),
+                }
+                signer_dir = os.getenv('LIGHTER_SIGNER_DIR')
+                if signer_dir:
+                    exchange_config['signer_lib_dir'] = signer_dir
+                chain_id = os.getenv('LIGHTER_CHAIN_ID')
+                if chain_id:
+                    exchange_config['chain_id'] = chain_id
+                verify_ssl_env = os.getenv('LIGHTER_VERIFY_SSL')
+                if verify_ssl_env is not None:
+                    exchange_config['verify_ssl'] = verify_ssl_env.lower() not in ('0', 'false', 'no')
+                client_secret = account_index
             else:
                 exchange_config['secret_key'] = ex_secret_key
-            
-            c = _get_client(api_key=ex_api_key, secret_key=ex_secret_key, exchange=exchange, exchange_config=exchange_config)
-            balances = c.get_balance()
-            collateral = c.get_collateral()
+                client_secret = ex_secret_key
+
+            client = _get_client(
+                api_key=ex_api_key,
+                secret_key=client_secret,
+                exchange=exchange,
+                exchange_config=exchange_config,
+            )
+            balances = client.get_balance()
+            collateral = client.get_collateral()
             
             if isinstance(balances, dict) and "error" in balances and balances["error"]:
                 print(f"獲取餘額失敗: {balances['error']}")
@@ -393,10 +494,10 @@ def configure_rebalance_settings():
 def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     """執行做市策略命令"""
     # [整合功能] 1. 增加交易所選擇
-    exchange_input = input("請選擇交易所 (backpack/aster/paradex，默認 backpack): ").strip().lower()
+    exchange_input = input("請選擇交易所 (backpack/aster/paradex/lighter，默認 backpack): ").strip().lower()
 
     # 處理交易所選擇
-    if exchange_input in ('backpack', 'aster', 'paradex', ''):
+    if exchange_input in ('backpack', 'aster', 'paradex', 'lighter', ''):
         exchange = exchange_input if exchange_input else 'backpack'
     else:
         print(f"警告: 不識別的交易所 '{exchange_input}'，使用默認 'backpack'")
@@ -407,12 +508,26 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     # [整合功能] 2. 根據選擇配置交易所信息
     api_key, secret_key = _resolve_api_credentials(exchange, api_key, secret_key)
 
-    if not api_key or not secret_key:
-        if exchange == 'paradex':
+    account_index = None
+    if exchange == 'paradex':
+        if not api_key or not secret_key:
             print("錯誤：未找到 Paradex 的賬户地址或私鑰，請先設置 PARADEX_ACCOUNT_ADDRESS 和 PARADEX_PRIVATE_KEY 環境變數。")
-        else:
+            return
+    elif exchange == 'lighter':
+        if not api_key:
+            print("錯誤：未找到 Lighter 私鑰，請先設置 LIGHTER_PRIVATE_KEY 或使用命令行參數提供。")
+            return
+        account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+        if not account_index:
+            account_index_input = input("請輸入 Lighter Account Index: ").strip()
+            account_index = account_index_input or None
+        if not account_index:
+            print("錯誤：未提供 Lighter Account Index，請設置 LIGHTER_ACCOUNT_INDEX 環境變數或於提示時輸入。")
+            return
+    else:
+        if not api_key or not secret_key:
             print("錯誤：未找到對應交易所的 API Key 或 Secret Key，請先設置環境變數或配置檔案。")
-        return
+            return
 
     if exchange == 'backpack':
         exchange_config = {
@@ -433,6 +548,23 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
             'account_address': api_key or os.getenv('PARADEX_ACCOUNT_ADDRESS'),  # StarkNet 账户地址
             'base_url': os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1'),
         }
+    elif exchange == 'lighter':
+        exchange_config = {
+            'api_private_key': api_key,
+            'account_index': account_index,
+            'api_key_index': os.getenv('LIGHTER_API_KEY_INDEX', '0'),
+            'base_url': os.getenv('LIGHTER_BASE_URL', LIGHTER_DEFAULT_BASE_URL),
+        }
+        signer_dir = os.getenv('LIGHTER_SIGNER_DIR')
+        if signer_dir:
+            exchange_config['signer_lib_dir'] = signer_dir
+        chain_id = os.getenv('LIGHTER_CHAIN_ID')
+        if chain_id:
+            exchange_config['chain_id'] = chain_id
+        verify_ssl_env = os.getenv('LIGHTER_VERIFY_SSL')
+        if verify_ssl_env is not None:
+            exchange_config['verify_ssl'] = verify_ssl_env.lower() not in ('0', 'false', 'no')
+        secret_key = api_key if not secret_key else secret_key
     else:
         print("錯誤：不支持的交易所。")
         return
@@ -1018,7 +1150,8 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_datab
     exchange_display = {
         'backpack': 'Backpack',
         'aster': 'Aster',
-        'paradex': 'Paradex'
+        'paradex': 'Paradex',
+        'lighter': 'Lighter',
     }.get(exchange.lower(), 'Backpack')
 
     while True:

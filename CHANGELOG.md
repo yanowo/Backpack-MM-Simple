@@ -1,4 +1,17 @@
 # Changelog
+## [1.5.1] - 2025-11-02
+
+### 新增
+- **：Lighter 交易所集成** 提供純 HTTP 的 Lighter 永續交易支持
+  - 實作自簽名 REST 客戶端，整合原生 signer 並支援簽章執行
+  - 支援永續合約做市和 Maker-Taker 對沖策略
+  - 解析 Lighter 成交資料時保留原始費率並避免誤計實際手續費，零手續費帳戶可正確記帳
+
+- CLI 命令行界面新增 Paradex 交易所選項
+
+### 文檔
+- 新增 Lighter 配置說明到 `.env.example`
+- 添加 Lighter 使用示例到 README
 
 ## [1.5.0] - 2025-10-29
 
