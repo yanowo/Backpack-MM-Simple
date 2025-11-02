@@ -37,7 +37,8 @@ lemon_trader/
 │   ├── base_client.py    # 抽象基礎客户端 (支持繼承開發接入任意交易所)
 │   ├── bp_client.py      # Backpack Exchange 客户端
 │   ├── aster_client.py   # Aster Exchange 客户端
-│   └── paradex_client.py # Paradex Exchange 客户端 (含 JWT 認證)
+│   ├── paradex_client.py # Paradex Exchange 客户端 (含 JWT 認證)
+│   └── lighter_client.py # Lighter Exchange 客户端
 │
 ├── ws_client/            # WebSocket模塊
 │   ├── __init__.py
@@ -138,6 +139,13 @@ PARADEX_BASE_URL=https://api.prod.paradex.trade/v1
 
 # WS 代理格式 http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
 PARADEX_PROXY_WEBSOCKET=
+
+LIGHTER_PRIVATE_KEY=your_private_key
+LIGHTER_PUBLIC_KEY=your_public_key
+LIGHTER_API_KEY_INDEX=your_API_key_index
+LIGHTER_ACCOUNT_INDEX= (获取方法⬇️)
+# 获取 LIGHTER_ACCOUNT_INDEX 方法：在浏览器中打开 https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value=你的钱包地址 ，在返回结果中搜索 "account_index" —— 短的是主账户，长的是子账户。
+
 
 # Optional Features
 # ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
@@ -271,6 +279,12 @@ python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --spre
 
 # Paradex Maker-Taker 對沖
 python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
+
+# Lighter 永續做市
+python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
+
+# Lighter Maker-Taker 對沖
+python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 ```
 
 > **適合場景**：自動化部署、定時任務、批量運行  
