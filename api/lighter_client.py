@@ -379,6 +379,7 @@ class LighterClient(BaseExchangeClient):
         self._alias_map: Dict[str, str] = {}
         self._market_id_map: Dict[int, Dict[str, Any]] = {}
         self._allow_fee_rate_inference: bool = bool(config.get("allow_fee_rate_inference", False))
+        self._market_fetch_retries: int = max(1, int(config.get("market_fetch_retries", 3)))
 
         self.account_index: Optional[int] = self._as_int(
             config.get("account_index")
@@ -698,15 +699,39 @@ class LighterClient(BaseExchangeClient):
         }
 
     def _fetch_markets(self) -> List[Dict[str, Any]]:
-        payload = self.make_request("GET", "/api/v1/orderBookDetails")
-        if isinstance(payload, dict) and "error" in payload:
-            logger.error("Failed to fetch Lighter markets: %s", payload["error"])
-            return []
-        details = payload.get("order_book_details") if isinstance(payload, dict) else None
-        if not isinstance(details, list):
-            logger.error("Unexpected market metadata format: %s", type(details).__name__)
-            return []
-        return [entry for entry in details if isinstance(entry, dict)]
+        last_error: Optional[str] = None
+        for attempt in range(1, self._market_fetch_retries + 1):
+            payload = self.make_request("GET", "/api/v1/orderBookDetails")
+            if isinstance(payload, dict) and "error" in payload:
+                last_error = payload["error"]
+                logger.error(
+                    "Failed to fetch Lighter markets (attempt %d/%d): %s",
+                    attempt,
+                    self._market_fetch_retries,
+                    last_error,
+                )
+                if attempt < self._market_fetch_retries:
+                    time.sleep(min(1.0, 0.2 * attempt))
+                continue
+
+            details = payload.get("order_book_details") if isinstance(payload, dict) else None
+            if not isinstance(details, list):
+                logger.error(
+                    "Unexpected market metadata format (attempt %d/%d): %s",
+                    attempt,
+                    self._market_fetch_retries,
+                    type(details).__name__,
+                )
+                if attempt < self._market_fetch_retries:
+                    time.sleep(min(1.0, 0.2 * attempt))
+                    continue
+                return []
+
+            return [entry for entry in details if isinstance(entry, dict)]
+
+        if last_error:
+            logger.error("Failed to fetch Lighter markets after retries: %s", last_error)
+        return []
 
     def _ensure_market_cache(self) -> None:
         if self._market_cache:
@@ -804,7 +829,94 @@ class LighterClient(BaseExchangeClient):
         market = self._lookup_market(symbol)
         if market:
             return dict(market)
-        logger.error("Unable to find market metadata for %s", symbol)
+
+        markets_info = self.get_markets()
+        if isinstance(markets_info, list):
+            normalized_symbol = self._normalize_symbol_key(symbol)
+            for market_info in markets_info:
+                if not isinstance(market_info, dict):
+                    continue
+
+                entry_symbol = market_info.get("symbol") or market_info.get("symbolName")
+                if not entry_symbol:
+                    continue
+
+                if entry_symbol == symbol or self._normalize_symbol_key(entry_symbol) == normalized_symbol:
+                    base_asset = (
+                        market_info.get("base_asset")
+                        or market_info.get("baseSymbol")
+                        or market_info.get("baseToken")
+                        or market_info.get("baseAsset")
+                        or symbol.split("/")[0]
+                    )
+                    quote_asset = (
+                        market_info.get("quote_asset")
+                        or market_info.get("quoteSymbol")
+                        or market_info.get("quoteToken")
+                        or market_info.get("quoteAsset")
+                        or symbol.split("/")[-1]
+                    )
+
+                    base_precision = market_info.get("base_precision")
+                    quote_precision = market_info.get("quote_precision")
+
+                    for candidate in (
+                        "supported_size_decimals",
+                        "size_decimals",
+                        "base_precision_digits",
+                        "basePrecision",
+                    ):
+                        if base_precision is None and market_info.get(candidate) is not None:
+                            try:
+                                base_precision = int(market_info[candidate])
+                            except (TypeError, ValueError):
+                                pass
+
+                    for candidate in (
+                        "supported_price_decimals",
+                        "price_decimals",
+                        "quote_precision_digits",
+                        "pricePrecision",
+                    ):
+                        if quote_precision is None and market_info.get(candidate) is not None:
+                            try:
+                                quote_precision = int(market_info[candidate])
+                            except (TypeError, ValueError):
+                                pass
+
+                    if base_precision is None:
+                        base_precision = 3
+                    if quote_precision is None:
+                        quote_precision = 3
+
+                    min_order_size = (
+                        market_info.get("min_order_size")
+                        or market_info.get("min_base_amount")
+                        or market_info.get("minQuantity")
+                        or market_info.get("minTradeSize")
+                        or "0"
+                    )
+                    tick_size = (
+                        market_info.get("tick_size")
+                        or market_info.get("tickSize")
+                        or market_info.get("priceIncrement")
+                    )
+                    if tick_size is None:
+                        tick_size = self._infer_tick_size(int(quote_precision))
+
+                    return {
+                        "base_asset": base_asset,
+                        "quote_asset": quote_asset,
+                        "base_precision": int(base_precision),
+                        "quote_precision": int(quote_precision),
+                        "min_order_size": str(min_order_size),
+                        "tick_size": str(tick_size),
+                    }
+
+            logger.error("Unable to find market metadata for %s", symbol)
+            return None
+
+        logger.error("Failed to retrieve market list when resolving %s: %s", symbol, markets_info)
         return None
 
     def get_order_book(self, symbol: str, limit: int = 50) -> Dict[str, Any]:
