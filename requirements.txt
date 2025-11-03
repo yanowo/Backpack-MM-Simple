@@ -4,7 +4,7 @@ websocket-client
 numpy
 python-dotenv
 starknet-py
-Flask==3.0.0
-flask-socketio==5.3.5
-python-socketio==5.10.0
-werkzeug==3.0.1
+Flask
+flask-socketio
+python-socketio
+werkzeug
