@@ -201,8 +201,10 @@ class BPClient(BaseExchangeClient):
                     return result
 
                 if isinstance(result, list):
+                    logger.debug(f"第 {i//max_batch_size + 1} 批返回 {len(result)} 個訂單結果")
                     all_results.extend(result)
                 elif isinstance(result, dict):
+                    logger.debug(f"第 {i//max_batch_size + 1} 批返回單個訂單結果")
                     all_results.append(result)
 
                 # 批次之間添加短暫延遲，避免速率限制
@@ -210,6 +212,7 @@ class BPClient(BaseExchangeClient):
                     import time
                     time.sleep(0.5)
 
+            logger.info(f"所有批次完成，共返回 {len(all_results)} 個訂單結果")
             return all_results
         else:
             return self._execute_order_batch_internal(orders_list)

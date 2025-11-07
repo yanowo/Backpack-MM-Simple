@@ -125,6 +125,52 @@ python run.py --symbol SOL_USDC_PERP --strategy perp_grid \
 
 ## 已修復的問題
 
+### 分批下單訂單計數問題（2025-11-07）
+
+#### 問題描述
+當訂單數量超過 50 個觸發分批下單時，最終記錄的訂單數量少於實際下單數量。例如：
+- 準備 98 個訂單
+- 分成 2 批：50 + 48
+- 但最終只記錄了 53 個訂單
+
+#### 根本原因
+原代碼使用 `result.index(order_result)` 來匹配原始訂單，但當分批下單時：
+1. 返回結果是所有批次合併後的列表
+2. 使用 `index()` 查找會返回錯誤的索引位置
+3. 導致無法正確匹配原始訂單和返回結果
+
+```python
+# ❌ 錯誤的匹配方式
+idx = result.index(order_result)
+original_order = orders_to_place[idx]  # 索引錯誤
+```
+
+#### 解決方案
+改用 **(價格, 方向)** 作為鍵來匹配訂單：
+
+```python
+# ✅ 正確的匹配方式
+# 1. 創建映射表
+order_map = {}
+for order in orders_to_place:
+    key = (float(order['price']), order['side'])
+    order_map[key] = order
+
+# 2. 使用價格和方向匹配
+for order_result in result:
+    result_price = float(order_result.get('price', 0))
+    result_side = order_result.get('side', '')
+    key = (result_price, result_side)
+
+    if key in order_map:
+        original_order = order_map[key]
+        # 記錄訂單...
+```
+
+#### 修改文件
+- `strategies/grid_strategy.py` - 現貨網格策略
+- `strategies/perp_grid_strategy.py` - 永續網格策略
+
 ### 批量下單 403 錯誤（2025-11-07）
 
 #### 問題描述
@@ -327,6 +373,7 @@ python run.py --symbol SOL_USDC_PERP --strategy perp_grid \
 
 ## 更新記錄
 
+- 2025-11-07: 修復分批下單時訂單計數不正確問題（使用價格+方向匹配訂單）
 - 2025-11-07: 修復批量下單 403 錯誤（修正端點、請求格式和簽名方式）
 - 2025-11-07: 添加批量訂單自動分批功能（默認最多 50 個/批）
 - 2025-11-07: 添加批量下單功能
