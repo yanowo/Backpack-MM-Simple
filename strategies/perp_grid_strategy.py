@@ -132,9 +132,21 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
     def _initialize_grid_prices(self) -> bool:
         """初始化網格價格點位"""
-        current_price = self.get_current_price()
-        if not current_price:
-            logger.error("無法獲取當前價格，無法初始化網格")
+        # 強制使用REST API獲取準確的初始價格
+        ticker = self.client.get_ticker(self.symbol)
+        if isinstance(ticker, dict) and "error" in ticker:
+            logger.error("無法獲取當前價格: %s", ticker.get('error'))
+            return False
+        
+        if "lastPrice" not in ticker:
+            logger.error("Ticker數據不完整: %s", ticker)
+            return False
+        
+        current_price = float(ticker['lastPrice'])
+        logger.info("從REST API獲取當前價格: %.4f", current_price)
+        
+        if not current_price or current_price <= 0:
+            logger.error("無法獲取有效的當前價格，無法初始化網格")
             return False
 
         # 自動計算價格範圍

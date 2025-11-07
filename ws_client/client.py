@@ -47,9 +47,9 @@ class BackpackWebSocket:
         # 重連相關參數
         self.auto_reconnect = auto_reconnect
         self.reconnect_delay = 1
-        self.max_reconnect_delay = 30
+        self.max_reconnect_delay = 1800
         self.reconnect_attempts = 0
-        self.max_reconnect_attempts = 10
+        self.max_reconnect_attempts = 2
         self.reconnect_cooldown_until = 0.0
         self.running = False
         self.ws_thread = None
@@ -403,6 +403,14 @@ class BackpackWebSocket:
         """定期檢查WebSocket連接狀態並在需要時重連"""
         while self.running:
             current_time = time.time()
+            
+            # 檢查是否在冷卻期，如果是則跳過心跳檢測
+            if self.reconnect_cooldown_until and current_time < self.reconnect_cooldown_until:
+                remaining_cooldown = int(self.reconnect_cooldown_until - current_time)
+                logger.debug(f"WebSocket 處於冷卻期，剩餘 {remaining_cooldown} 秒，使用 API 備援模式")
+                time.sleep(5)
+                continue
+            
             time_since_last_heartbeat = current_time - self.last_heartbeat
             
             if time_since_last_heartbeat > self.heartbeat_interval * 2:
@@ -518,7 +526,7 @@ class BackpackWebSocket:
         with self.ws_lock:
             if not self.running or self.reconnect_attempts >= self.max_reconnect_attempts:
                 logger.warning(f"重連次數超過上限 ({self.max_reconnect_attempts})，暫停自動重連")
-                cooldown_seconds = max(self.max_reconnect_delay * 2, 60)
+                cooldown_seconds = max(self.max_reconnect_delay, 60)
                 self.reconnect_cooldown_until = time.time() + cooldown_seconds
                 self.last_heartbeat = time.time()
                 logger.warning(f"已啟動 {cooldown_seconds} 秒冷卻，將繼續使用備援模式")
