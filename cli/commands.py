@@ -1022,7 +1022,7 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_datab
     }.get(exchange.lower(), 'Backpack')
 
     while True:
-        print(f"\n===== {exchange_display} 交易程序 =====")
+        print(f"\n===== 量化交易程序 =====")
         print("1 - 查詢存款地址")
         print("2 - 查詢餘額")
         print("3 - 獲取市場信息")
