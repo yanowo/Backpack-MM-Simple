@@ -222,8 +222,8 @@ class GridStrategy(MarketMaker):
                 self.order_quantity = self.min_order_size
                 logger.warning("無法計算訂單數量，使用最小值: %.4f", self.order_quantity)
 
-        # 在每個網格點位掛單
-        placed_orders = 0
+        # 批量構建網格訂單
+        orders_to_place = []
 
         for price in self.grid_levels:
             if abs(price - current_price) / current_price < 0.001:  # 跳過太接近當前價格的點位
@@ -233,27 +233,106 @@ class GridStrategy(MarketMaker):
             if price < current_price:
                 # 在當前價格下方掛買單
                 if quote_balance >= price * self.order_quantity:
-                    success = self._place_grid_buy_order(price, self.order_quantity)
-                    if success:
-                        placed_orders += 1
-                        quote_balance -= price * self.order_quantity
+                    orders_to_place.append({
+                        "orderType": "Limit",
+                        "price": str(price),
+                        "quantity": str(self.order_quantity),
+                        "side": "Bid",
+                        "symbol": self.symbol,
+                        "timeInForce": "GTC",
+                        "postOnly": True
+                    })
+                    quote_balance -= price * self.order_quantity
                 else:
                     logger.warning("報價資產餘額不足，無法在價格 %.4f 掛買單", price)
 
             elif price > current_price:
                 # 在當前價格上方掛賣單
                 if base_balance >= self.order_quantity:
-                    success = self._place_grid_sell_order(price, self.order_quantity)
-                    if success:
-                        placed_orders += 1
-                        base_balance -= self.order_quantity
+                    orders_to_place.append({
+                        "orderType": "Limit",
+                        "price": str(price),
+                        "quantity": str(self.order_quantity),
+                        "side": "Ask",
+                        "symbol": self.symbol,
+                        "timeInForce": "GTC",
+                        "postOnly": True
+                    })
+                    base_balance -= self.order_quantity
                 else:
                     logger.warning("基礎資產餘額不足，無法在價格 %.4f 掛賣單", price)
+
+        # 批量下單
+        placed_orders = 0
+        if orders_to_place:
+            logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
+            result = self.client.execute_order_batch(orders_to_place)
+
+            if isinstance(result, dict) and "error" in result:
+                logger.error("批量下單失敗: %s", result['error'])
+                # 如果批量下單失敗，回退到逐個下單
+                logger.info("回退到逐個下單模式...")
+                for i, order in enumerate(orders_to_place):
+                    price = float(order['price'])
+                    side = order['side']
+                    result_single = self.client.execute_order(order)
+
+                    if isinstance(result_single, dict) and "error" not in result_single:
+                        order_id = result_single.get('id')
+                        self._record_grid_order(order_id, price, side, self.order_quantity)
+                        placed_orders += 1
+                        logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
+                    else:
+                        logger.error("掛單失敗: %s", result_single.get('error', 'unknown'))
+            else:
+                # 批量下單成功，記錄所有訂單
+                if isinstance(result, list):
+                    for order_result in result:
+                        if 'id' in order_result:
+                            order_id = order_result['id']
+                            # 從原始訂單列表中找到對應的訂單信息
+                            idx = result.index(order_result)
+                            if idx < len(orders_to_place):
+                                original_order = orders_to_place[idx]
+                                price = float(original_order['price'])
+                                side = original_order['side']
+                                quantity = float(original_order['quantity'])
+                                self._record_grid_order(order_id, price, side, quantity)
+                                placed_orders += 1
+                    logger.info("批量下單成功: %d 個訂單", placed_orders)
 
         logger.info("網格初始化完成: 共放置 %d 個訂單", placed_orders)
         self.grid_initialized = True
 
         return True
+
+    def _record_grid_order(self, order_id: str, price: float, side: str, quantity: float) -> None:
+        """記錄網格訂單信息"""
+        order_info = {
+            'order_id': order_id,
+            'side': side,
+            'quantity': quantity,
+            'price': price,
+            'created_time': datetime.now(),
+            'created_from': 'GRID_INIT'
+        }
+
+        self.grid_orders_by_id[order_id] = order_info
+
+        if price not in self.grid_orders_by_price:
+            self.grid_orders_by_price[price] = []
+        self.grid_orders_by_price[price].append(order_info)
+
+        if side == 'Bid':
+            if price not in self.grid_buy_orders_by_price:
+                self.grid_buy_orders_by_price[price] = []
+            self.grid_buy_orders_by_price[price].append(order_info)
+        else:
+            if price not in self.grid_sell_orders_by_price:
+                self.grid_sell_orders_by_price[price] = []
+            self.grid_sell_orders_by_price[price].append(order_info)
+
+        self.orders_placed += 1
 
     def _place_grid_buy_order(self, price: float, quantity: float) -> bool:
         """在指定價格掛買單"""
