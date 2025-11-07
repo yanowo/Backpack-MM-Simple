@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -202,8 +203,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
             self.order_quantity = self.min_order_size
             logger.info("使用最小訂單量: %.4f %s", self.order_quantity, self.base_asset)
 
-        # 在每個網格點位掛單
-        placed_orders = 0
+        # 批量構建網格訂單
+        orders_to_place = []
 
         for price in self.grid_levels:
             if abs(price - current_price) / current_price < 0.001:
@@ -214,33 +215,127 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 # 中性網格：在當前價格下方掛開多單，上方掛開空單
                 if price < current_price:
                     # 開多單（買入）
-                    success = self._place_grid_long_order(price, self.order_quantity)
-                    if success:
-                        placed_orders += 1
+                    orders_to_place.append({
+                        "orderType": "Limit",
+                        "price": str(price),
+                        "quantity": str(self.order_quantity),
+                        "side": "Bid",
+                        "symbol": self.symbol,
+                        "timeInForce": "GTC",
+                        "postOnly": True
+                    })
                 elif price > current_price:
                     # 開空單（賣出）
-                    success = self._place_grid_short_order(price, self.order_quantity)
-                    if success:
-                        placed_orders += 1
+                    orders_to_place.append({
+                        "orderType": "Limit",
+                        "price": str(price),
+                        "quantity": str(self.order_quantity),
+                        "side": "Ask",
+                        "symbol": self.symbol,
+                        "timeInForce": "GTC",
+                        "postOnly": True
+                    })
 
             elif self.grid_type == "long":
                 # 做多網格：只在下方掛開多單
                 if price <= current_price:
-                    success = self._place_grid_long_order(price, self.order_quantity)
-                    if success:
-                        placed_orders += 1
+                    orders_to_place.append({
+                        "orderType": "Limit",
+                        "price": str(price),
+                        "quantity": str(self.order_quantity),
+                        "side": "Bid",
+                        "symbol": self.symbol,
+                        "timeInForce": "GTC",
+                        "postOnly": True
+                    })
 
             elif self.grid_type == "short":
                 # 做空網格：只在上方掛開空單
                 if price >= current_price:
-                    success = self._place_grid_short_order(price, self.order_quantity)
-                    if success:
+                    orders_to_place.append({
+                        "orderType": "Limit",
+                        "price": str(price),
+                        "quantity": str(self.order_quantity),
+                        "side": "Ask",
+                        "symbol": self.symbol,
+                        "timeInForce": "GTC",
+                        "postOnly": True
+                    })
+
+        # 批量下單
+        placed_orders = 0
+        if orders_to_place:
+            logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
+            result = self.client.execute_order_batch(orders_to_place)
+
+            if isinstance(result, dict) and "error" in result:
+                logger.error("批量下單失敗: %s", result['error'])
+                # 如果批量下單失敗，回退到逐個下單
+                logger.info("回退到逐個下單模式...")
+                for i, order in enumerate(orders_to_place):
+                    price = float(order['price'])
+                    side = order['side']
+                    result_single = self.client.execute_order(order)
+
+                    if isinstance(result_single, dict) and "error" not in result_single:
+                        order_id = result_single.get('id')
+                        self._record_grid_order(order_id, price, side, self.order_quantity)
                         placed_orders += 1
+                        logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
+                    else:
+                        logger.error("掛單失敗: %s", result_single.get('error', 'unknown'))
+            else:
+                # 批量下單成功，記錄所有訂單
+                if isinstance(result, list):
+                    for order_result in result:
+                        if 'id' in order_result:
+                            order_id = order_result['id']
+                            # 從原始訂單列表中找到對應的訂單信息
+                            idx = result.index(order_result)
+                            if idx < len(orders_to_place):
+                                original_order = orders_to_place[idx]
+                                price = float(original_order['price'])
+                                side = original_order['side']
+                                quantity = float(original_order['quantity'])
+                                self._record_grid_order(order_id, price, side, quantity)
+                                placed_orders += 1
+                    logger.info("批量下單成功: %d 個訂單", placed_orders)
 
         logger.info("網格初始化完成: 共放置 %d 個訂單", placed_orders)
         self.grid_initialized = True
 
         return True
+
+    def _record_grid_order(self, order_id: str, price: float, side: str, quantity: float) -> None:
+        """記錄網格訂單信息"""
+        grid_type = 'long' if side == 'Bid' else 'short'
+
+        order_info = {
+            'order_id': order_id,
+            'side': side,
+            'quantity': quantity,
+            'price': price,
+            'created_time': datetime.now(),
+            'created_from': 'GRID_INIT',
+            'grid_type': grid_type
+        }
+
+        self.grid_orders_by_id[order_id] = order_info
+
+        if price not in self.grid_orders_by_price:
+            self.grid_orders_by_price[price] = []
+        self.grid_orders_by_price[price].append(order_info)
+
+        if grid_type == 'long':
+            if price not in self.grid_long_orders_by_price:
+                self.grid_long_orders_by_price[price] = []
+            self.grid_long_orders_by_price[price].append(order_info)
+        else:
+            if price not in self.grid_short_orders_by_price:
+                self.grid_short_orders_by_price[price] = []
+            self.grid_short_orders_by_price[price].append(order_info)
+
+        self.orders_placed += 1
 
     def _place_grid_long_order(self, price: float, quantity: float) -> bool:
         """在指定價格掛開多單"""
@@ -424,22 +519,57 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         logger.info("開多成交後在價格 %.4f 掛平多單 (開倉價格: %.4f)", next_price, open_price)
 
-        # 掛平倉單（reduce_only=True）
+        # 延遲一下，等待持倉更新（解決 reduce-only 時序問題）
+        time.sleep(0.5)
+
+        # 查詢持倉確認
+        net_position = self.get_net_position()
+        logger.debug("當前淨持倉: %.4f", net_position)
+
+        # 檢查是否有足夠的多頭持倉可以平倉
+        if net_position < quantity * 0.9:  # 允許 10% 的誤差
+            logger.warning("多頭持倉不足 (當前: %.4f, 需要: %.4f)，改為不使用 reduce_only",
+                          net_position, quantity)
+            # 不使用 reduce_only，讓訂單可以開反向倉位
+            reduce_only = False
+        else:
+            reduce_only = True
+
+        # 掛平倉單
         result = self.open_short(
             quantity=quantity,
             price=next_price,
             order_type="Limit",
-            reduce_only=True  # 平倉單
+            reduce_only=reduce_only
         )
 
         if isinstance(result, dict) and "error" in result:
-            logger.error("掛平多單失敗: %s", result.get('error'))
-        else:
-            # 計算網格利潤
-            grid_profit = (next_price - open_price) * quantity
-            self.grid_profit += grid_profit
-            logger.info("潛在網格利潤: %.4f %s (累計: %.4f)",
-                       grid_profit, self.quote_asset, self.grid_profit)
+            error_msg = result.get('error', '')
+            logger.error("掛平多單失敗: %s", error_msg)
+
+            # 如果還是 reduce-only 錯誤，重試一次不使用 reduce_only
+            if "Reduce only" in error_msg and reduce_only:
+                logger.info("重試不使用 reduce_only...")
+                time.sleep(0.5)
+                result = self.open_short(
+                    quantity=quantity,
+                    price=next_price,
+                    order_type="Limit",
+                    reduce_only=False
+                )
+                if isinstance(result, dict) and "error" not in result:
+                    logger.info("重試成功")
+                else:
+                    logger.error("重試仍失敗: %s", result.get('error', ''))
+                    return
+            else:
+                return
+
+        # 計算網格利潤
+        grid_profit = (next_price - open_price) * quantity
+        self.grid_profit += grid_profit
+        logger.info("潛在網格利潤: %.4f %s (累計: %.4f)",
+                   grid_profit, self.quote_asset, self.grid_profit)
 
     def _place_close_short_after_open(self, open_price: float, quantity: float) -> None:
         """開空成交後，在下一個網格點位掛平空單"""
@@ -456,22 +586,57 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         logger.info("開空成交後在價格 %.4f 掛平空單 (開倉價格: %.4f)", next_price, open_price)
 
-        # 掛平倉單（reduce_only=True）
+        # 延遲一下，等待持倉更新（解決 reduce-only 時序問題）
+        time.sleep(0.5)
+
+        # 查詢持倉確認
+        net_position = self.get_net_position()
+        logger.debug("當前淨持倉: %.4f", net_position)
+
+        # 檢查是否有足夠的空頭持倉可以平倉（空頭持倉為負數）
+        if net_position > -quantity * 0.9:  # 允許 10% 的誤差
+            logger.warning("空頭持倉不足 (當前: %.4f, 需要: %.4f)，改為不使用 reduce_only",
+                          net_position, -quantity)
+            # 不使用 reduce_only，讓訂單可以開反向倉位
+            reduce_only = False
+        else:
+            reduce_only = True
+
+        # 掛平倉單
         result = self.open_long(
             quantity=quantity,
             price=next_price,
             order_type="Limit",
-            reduce_only=True  # 平倉單
+            reduce_only=reduce_only
         )
 
         if isinstance(result, dict) and "error" in result:
-            logger.error("掛平空單失敗: %s", result.get('error'))
-        else:
-            # 計算網格利潤
-            grid_profit = (open_price - next_price) * quantity
-            self.grid_profit += grid_profit
-            logger.info("潛在網格利潤: %.4f %s (累計: %.4f)",
-                       grid_profit, self.quote_asset, self.grid_profit)
+            error_msg = result.get('error', '')
+            logger.error("掛平空單失敗: %s", error_msg)
+
+            # 如果還是 reduce-only 錯誤，重試一次不使用 reduce_only
+            if "Reduce only" in error_msg and reduce_only:
+                logger.info("重試不使用 reduce_only...")
+                time.sleep(0.5)
+                result = self.open_long(
+                    quantity=quantity,
+                    price=next_price,
+                    order_type="Limit",
+                    reduce_only=False
+                )
+                if isinstance(result, dict) and "error" not in result:
+                    logger.info("重試成功")
+                else:
+                    logger.error("重試仍失敗: %s", result.get('error', ''))
+                    return
+            else:
+                return
+
+        # 計算網格利潤
+        grid_profit = (open_price - next_price) * quantity
+        self.grid_profit += grid_profit
+        logger.info("潛在網格利潤: %.4f %s (累計: %.4f)",
+                   grid_profit, self.quote_asset, self.grid_profit)
 
     def place_limit_orders(self) -> None:
         """放置限價單 - 覆蓋父類方法"""

@@ -177,6 +177,140 @@ class BPClient(BaseExchangeClient):
 
         return self.make_request("POST", endpoint, self.api_key, self.secret_key, instruction, params, order_details)
 
+    def execute_order_batch(self, orders_list, max_batch_size=50):
+        """批量執行訂單
+
+        Args:
+            orders_list: 訂單列表，每個訂單是一個字典，包含訂單詳情
+            max_batch_size: 單次批量下單的最大訂單數量，默認50個
+
+        Returns:
+            批量訂單結果
+        """
+        # 如果訂單數量超過限制，分批處理
+        if len(orders_list) > max_batch_size:
+            logger.info(f"訂單數量 {len(orders_list)} 超過單次限制 {max_batch_size}，將分批下單")
+            all_results = []
+            for i in range(0, len(orders_list), max_batch_size):
+                batch = orders_list[i:i + max_batch_size]
+                logger.info(f"處理第 {i//max_batch_size + 1} 批，共 {len(batch)} 個訂單")
+                result = self._execute_order_batch_internal(batch)
+
+                if isinstance(result, dict) and "error" in result:
+                    # 如果某批次失敗，返回錯誤
+                    return result
+
+                if isinstance(result, list):
+                    all_results.extend(result)
+                elif isinstance(result, dict):
+                    all_results.append(result)
+
+                # 批次之間添加短暫延遲，避免速率限制
+                if i + max_batch_size < len(orders_list):
+                    import time
+                    time.sleep(0.5)
+
+            return all_results
+        else:
+            return self._execute_order_batch_internal(orders_list)
+
+    def _execute_order_batch_internal(self, orders_list):
+        """內部批量下單實現
+
+        Args:
+            orders_list: 訂單列表
+
+        Returns:
+            批量訂單結果
+        """
+        # 根據 Backpack API 文檔，批量下單端點是 POST /api/v1/orders
+        endpoint = f"/api/{API_VERSION}/orders"
+        instruction = "orderExecute"  # 每個訂單使用 orderExecute 指令
+
+        # 請求體直接是訂單數組，不需要包裝在 {orders: ...} 中
+        data = orders_list
+
+        # 構建簽名參數字符串
+        # 根據文檔：為每個訂單構建 instruction=orderExecute&param1=value1&param2=value2...
+        # 然後將所有訂單的參數字符串拼接起來
+        param_strings = []
+
+        for order in orders_list:
+            # 按字母順序排序訂單參數
+            sorted_params = sorted(order.items())
+
+            # 構建單個訂單的參數字符串
+            order_params = []
+            order_params.append(f"instruction={instruction}")
+
+            for key, value in sorted_params:
+                if value is None:
+                    continue
+                # 布爾值轉換為小寫字符串
+                if isinstance(value, bool):
+                    order_params.append(f"{key}={str(value).lower()}")
+                else:
+                    order_params.append(f"{key}={value}")
+
+            param_strings.append("&".join(order_params))
+
+        # 拼接所有訂單的參數字符串
+        sign_message = "&".join(param_strings)
+
+        # 添加時間戳和窗口
+        timestamp = str(int(time.time() * 1000))
+        window = DEFAULT_WINDOW
+        sign_message += f"&timestamp={timestamp}&window={window}"
+
+        # 創建簽名
+        signature = create_signature(self.secret_key, sign_message)
+        if not signature:
+            return {"error": "簽名創建失敗"}
+
+        # 構建請求頭
+        url = f"{API_URL}{endpoint}"
+        headers = {
+            'Content-Type': 'application/json',
+            'X-API-KEY': self.api_key,
+            'X-SIGNATURE': signature,
+            'X-TIMESTAMP': timestamp,
+            'X-WINDOW': window,
+            'X-Broker-Id': '1500'
+        }
+
+        # 執行請求（使用自定義頭，不通過 make_request）
+        import json
+        import requests
+
+        retry_count = 3
+        for attempt in range(retry_count):
+            try:
+                response = requests.post(url, headers=headers, data=json.dumps(data), timeout=30)
+
+                if response.status_code in [200, 201]:
+                    return response.json() if response.text.strip() else {}
+                elif response.status_code == 429:  # 速率限制
+                    wait_time = 1 * (2 ** attempt)
+                    logger.warning(f"遇到速率限制，等待 {wait_time} 秒後重試")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    error_msg = f"狀態碼: {response.status_code}, 消息: {response.text}"
+                    if attempt < retry_count - 1:
+                        logger.warning(f"請求失敗 ({attempt+1}/{retry_count}): {error_msg}")
+                        time.sleep(1)
+                        continue
+                    return {"error": error_msg}
+
+            except Exception as e:
+                if attempt < retry_count - 1:
+                    logger.warning(f"請求異常 ({attempt+1}/{retry_count}): {str(e)}，重試中...")
+                    time.sleep(1)
+                    continue
+                return {"error": f"請求失敗: {str(e)}"}
+
+        return {"error": "達到最大重試次數"}
+
     def get_open_orders(self, symbol=None):
         """獲取未成交訂單"""
         endpoint = f"/api/{API_VERSION}/orders"
