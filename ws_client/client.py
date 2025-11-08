@@ -947,9 +947,23 @@ class BackpackWebSocket:
     
     def check_and_reconnect_if_needed(self):
         """檢查連接狀態並在需要時重連 - 供外部調用"""
-        if self.reconnect_cooldown_until and time.time() < self.reconnect_cooldown_until:
+        current_time = time.time()
+        
+        # 如果在冷卻期內，確保 API 備援模式激活，但不觸發重連
+        if self.reconnect_cooldown_until and current_time < self.reconnect_cooldown_until:
+            if not self.is_connected() and not self.api_fallback_active:
+                remaining_cooldown = int(self.reconnect_cooldown_until - current_time)
+                logger.debug(f"冷卻期內檢查到連接斷開（剩餘 {remaining_cooldown} 秒），啟動 API 備援模式")
+                self._start_api_fallback()
             return self.is_connected()
 
+        # 冷卻期已結束，重置重連計數器
+        if self.reconnect_cooldown_until and current_time >= self.reconnect_cooldown_until:
+            self.reconnect_attempts = 0
+            self.reconnect_cooldown_until = 0.0
+            logger.info("冷卻期結束，重置重連計數器")
+
+        # 非冷卻期，檢查連接並觸發重連
         if not self.is_connected() and not self.reconnecting:
             logger.info("外部檢查發現連接斷開，觸發重連...")
             threading.Thread(target=self._trigger_reconnect, daemon=True).start()
