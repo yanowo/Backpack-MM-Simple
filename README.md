@@ -143,9 +143,9 @@ PARADEX_PROXY_WEBSOCKET=
 LIGHTER_PRIVATE_KEY=your_private_key
 LIGHTER_PUBLIC_KEY=your_public_key
 LIGHTER_API_KEY_INDEX=your_API_key_index
-LIGHTER_ACCOUNT_INDEX= (获取方法⬇️)
-# 获取 LIGHTER_ACCOUNT_INDEX 方法：在浏览器中打开 https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value=你的钱包地址 ，在返回结果中搜索 "account_index" —— 短的是主账户，长的是子账户。
-
+LIGHTER_ADDRESS=<your_wallet_address (ignored if LIGHTER_ACCOUNT_INDEX is set)>
+# 如果使用主账户，直接将钱包地址填入 LIGHTER_ADDRESS 环境变量即可，无需查找 account_index。如果你需要使用子账户，请在浏览器中打开 https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value=你的钱包地址，在返回结果中搜索 "account_index"手动查找并填写对应的 account_index。。
+LIGHTER_ACCOUNT_INDEX=
 
 # Optional Features
 # ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
