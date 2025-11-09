@@ -6,8 +6,8 @@ import os
 import random
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from api.lighter_client import LighterClient
 from logger import setup_logger
@@ -120,7 +120,9 @@ class VolumeHoldStrategyConfig:
                 raise StrategyConfigError(f"Missing api_private_key for account {label}")
             account_index = entry.get("account_index")
             if account_index is None:
-                raise StrategyConfigError(f"Missing account_index for account {label}")
+                account_address = entry.get('account_address')
+                from api.lighter_client import _get_lihgter_account_index
+                account_index = _get_lihgter_account_index(account_address)
             cred = AccountCredentials(
                 label=label,
                 api_private_key=str(api_private_key),
@@ -385,6 +387,8 @@ class VolumeHoldStrategy:
     ) -> List[Dict[str, float]]:
         rounded_qty = max(round_to_precision(quantity, limits.base_precision), limits.min_order_size)
         rounded_price = round_to_tick_size(price, limits.tick_size)
+        submitted_at = time.time()
+        self._refresh_client_nonce(client)
         order = {
             "symbol": symbol,
             "side": side,
@@ -399,26 +403,35 @@ class VolumeHoldStrategy:
             logger.error("Limit order rejected for %s: %s", symbol, response["error"])
             return []
 
-        identifier = self._extract_order_identifier(response)
-        if identifier is None:
-            logger.error("Unable to determine order id for %s", symbol)
-            return []
+        identifiers = self._extract_order_identifiers(response)
+        if not identifiers:
+            logger.warning("Order identifiers missing for %s, falling back to timestamp matching", symbol)
 
-        return self._wait_for_fills(client, symbol, identifier, rounded_qty, limits)
+        return self._wait_for_fills(
+            client=client,
+            symbol=symbol,
+            match_order_ids=identifiers,
+            target_qty=rounded_qty,
+            limits=limits,
+            order_start_time=submitted_at,
+        )
 
     def _wait_for_fills(
         self,
         client: LighterClient,
         symbol: str,
-        order_identifier: str,
+        match_order_ids: Sequence[str],
         target_qty: float,
         limits: MarketConstraints,
+        order_start_time: float,
     ) -> List[Dict[str, float]]:
         deadline = time.time() + self.config.slice_fill_timeout
-        seen_trades: set[str] = set()
+        seen_trades: Set[str] = set()
         fills: List[Dict[str, float]] = []
         filled_qty = 0.0
         tolerance = max(limits.min_order_size * 0.1, 1e-9)
+        match_ids: Set[str] = {str(value) for value in match_order_ids if value is not None}
+        fallback_threshold = max(order_start_time - 1.0, 0.0)
 
         while not self._stop_event.is_set():
             trades = client.get_fill_history(symbol, limit=50)
@@ -426,8 +439,16 @@ class VolumeHoldStrategy:
                 logger.error("Failed to fetch fills for %s: %s", symbol, trades["error"])
             else:
                 for trade in trades:
-                    if str(trade.get("order_id")) != str(order_identifier):
-                        continue
+                    order_id = trade.get("order_id")
+                    trade_ts = self._normalize_timestamp(trade.get("timestamp"))
+                    matches_identifier = order_id is not None and str(order_id) in match_ids
+                    is_recent = trade_ts is not None and trade_ts >= fallback_threshold
+                    if match_ids:
+                        if not matches_identifier and not is_recent:
+                            continue
+                    else:
+                        if not is_recent:
+                            continue
                     trade_id = str(trade.get("trade_id"))
                     if trade_id in seen_trades:
                         continue
@@ -463,13 +484,31 @@ class VolumeHoldStrategy:
     ) -> None:
         if qty <= 0:
             return
-        allocations = self._split_quantity(qty, len(hedger_indices))
-        for hedger_idx, alloc in zip(hedger_indices, allocations):
+        if not hedger_indices:
+            logger.warning("No hedger accounts configured for %s fill %.8f", symbol, qty)
+            return
+        allocations = self._split_base_quantity(qty, hedger_indices, limits)
+
+        for list_index, hedger_idx in enumerate(hedger_indices):
+            alloc = allocations[list_index]
             alloc += self._drain_backlog(hedger_idx, symbol, side)
             rounded = round_to_precision(alloc, limits.base_precision)
-            if rounded < limits.min_order_size:
-                self._enqueue_backlog(hedger_idx, symbol, side, alloc)
+            if rounded <= 0:
+                logger.debug(
+                    "Rounded hedge size is zero after precision clamp (alloc=%.8f, precision=%s)",
+                    alloc,
+                    limits.base_precision,
+                )
                 continue
+            if rounded < limits.min_order_size:
+                logger.debug(
+                    "Hedge qty %.8f smaller than exchange min %.8f for %s (%s) - submitting anyway",
+                    rounded,
+                    limits.min_order_size,
+                    symbol,
+                    self._account_labels[hedger_idx],
+                )
+            self._refresh_client_nonce(self._clients[hedger_idx])
             payload = {
                 "symbol": symbol,
                 "side": side,
@@ -486,26 +525,58 @@ class VolumeHoldStrategy:
                     response["error"],
                 )
                 self._enqueue_backlog(hedger_idx, symbol, side, alloc)
+                continue
+            order_ids = self._extract_order_identifiers(response)
+            logger.info(
+                "Hedge submitted: account=%s side=%s qty=%.8f id=%s",
+                self._account_labels[hedger_idx],
+                side,
+                rounded,
+                order_ids[0] if order_ids else "N/A",
+            )
 
-    def _split_quantity(self, total_quantity: float, bucket_count: int) -> List[float]:
+    def _split_base_quantity(
+        self,
+        total_quantity: float,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+    ) -> List[float]:
+        """Split base quantity across hedgers while respecting precision."""
+        bucket_count = len(hedger_indices)
         if bucket_count <= 0:
             return []
+        total_quantity = round_to_precision(total_quantity, limits.base_precision)
+        if bucket_count == 1:
+            return [total_quantity]
+
         low, high = self.config.random_split_range
-        allocations: List[float] = []
-        remaining = total_quantity
-        for idx in range(bucket_count):
+        raw_allocations: List[float]
+        if bucket_count == 2:
+            ratio = self._random.uniform(low, high)
+            raw_allocations = [total_quantity * ratio, total_quantity * (1 - ratio)]
+        else:
+            even_share = total_quantity / bucket_count
+            raw_allocations = [even_share for _ in range(bucket_count - 1)]
+            remainder = total_quantity - even_share * (bucket_count - 1)
+            raw_allocations.append(remainder)
+
+        rounded: List[float] = []
+        consumed = 0.0
+        for idx, amount in enumerate(raw_allocations):
             if idx == bucket_count - 1:
-                allocations.append(max(remaining, 0.0))
-            elif idx == 0 and bucket_count >= 2:
-                ratio = self._random.uniform(low, high)
-                share = remaining * ratio
-                allocations.append(share)
-                remaining -= share
+                value = max(total_quantity - consumed, 0.0)
+                value = round_to_precision(value, limits.base_precision)
             else:
-                share = remaining / max(1, bucket_count - idx)
-                allocations.append(share)
-                remaining -= share
-        return allocations
+                value = round_to_precision(amount, limits.base_precision)
+                consumed += value
+            rounded.append(value)
+
+        # Adjust final bucket to fix rounding drift
+        total_rounded = sum(rounded)
+        drift = round(total_quantity - total_rounded, limits.base_precision)
+        if abs(drift) >= 10 ** (-limits.base_precision):
+            rounded[-1] = round_to_precision(rounded[-1] + drift, limits.base_precision)
+        return rounded
 
     def _drain_backlog(self, account_idx: int, symbol: str, side: str) -> float:
         store = self._hedge_backlog.setdefault(account_idx, {}).setdefault(symbol, {})
@@ -517,6 +588,7 @@ class VolumeHoldStrategy:
             return
         store = self._hedge_backlog.setdefault(account_idx, {}).setdefault(symbol, {})
         store[side] = store.get(side, 0.0) + qty
+
 
     def _weighted_average(self, fills: Iterable[Dict[str, float]]) -> float:
         total_notional = 0.0
@@ -609,9 +681,33 @@ class VolumeHoldStrategy:
         self._current_primary_index = (self._current_primary_index + 1) % len(self._clients)
 
     @staticmethod
-    def _extract_order_identifier(payload: Dict[str, Any]) -> Optional[str]:
-        for key in ("clientOrderIndex", "orderIndex", "id", "orderId"):
+    def _refresh_client_nonce(client: LighterClient) -> None:
+        refresh = getattr(client, "refresh_nonce", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception as exc:
+                logger.debug("Failed to refresh nonce: %s", exc)
+
+    @staticmethod
+    def _normalize_timestamp(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            ts = float(value)
+        except (TypeError, ValueError):
+            return None
+        if ts > 1_000_000_000_000:
+            ts /= 1000.0
+        return ts
+
+    @staticmethod
+    def _extract_order_identifiers(payload: Optional[Dict[str, Any]]) -> List[str]:
+        if not isinstance(payload, dict):
+            return []
+        identifiers: List[str] = []
+        for key in ("orderIndex", "orderId", "id", "clientOrderIndex", "clientOrderId"):
             value = payload.get(key)
             if value is not None:
-                return str(value)
-        return None
+                identifiers.append(str(value))
+        return identifiers

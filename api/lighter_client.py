@@ -515,6 +515,18 @@ class LighterClient(BaseExchangeClient):
         self._auth_expiry = 0.0
         return signer
 
+    def refresh_nonce(self) -> bool:
+        """Refresh signer nonce from the exchange (best effort)."""
+        signer = self._ensure_signer_client()
+        if not signer:
+            return False
+        try:
+            signer._fetch_nonce()
+            return True
+        except Exception as exc:  # pragma: no cover - signer fetch rarely fails
+            logger.debug("Lighter nonce refresh failed: %s", exc)
+            return False
+
     def _get_auth_token(self) -> Optional[str]:
         signer = self._ensure_signer_client()
         if not signer:
