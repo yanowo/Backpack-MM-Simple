@@ -354,7 +354,26 @@ class SimpleSignerClient:
 def _compact_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in data.items() if value is not None}
 
+def _get_lihgter_account_index(address):
+    # 通过钱包地址查找主账户
+    from eth_utils import to_checksum_address
+    import requests
 
+    # 转换为 EIP-55 校验格式
+    checksum_address = to_checksum_address(address.lower())
+    url = 'https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value='
+    full_url = url + checksum_address
+
+    res = requests.get(full_url)
+    data = res.json()
+
+    # 提取 account_index
+    if 'accounts' in data:
+        account_index = data['accounts'][0]['account_index']
+        return int(account_index)
+    else:
+        raise ValueError(f"Account not found for address: {address}")
+    
 class LighterClient(BaseExchangeClient):
     """HTTP-based Lighter exchange adapter compatible with the strategy layer."""
 

@@ -116,6 +116,10 @@ def main():
         ws_proxy = os.getenv('LIGHTER_PROXY_WEBSOCKET') or os.getenv('LIGHTER_WS_PROXY')
         base_url = os.getenv('LIGHTER_BASE_URL', LIGHTER_DEFAULT_BASE_URL)
         account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+        account_address = os.getenv('LIGHTER_ADDRESS')
+        if not account_index:
+            from api.lighter_client import _get_lihgter_account_index
+            account_index = _get_lihgter_account_index(account_address)
         api_key_index = os.getenv('LIGHTER_API_KEY_INDEX', '0')
         signer_dir = os.getenv('LIGHTER_SIGNER_DIR')
         chain_id = os.getenv('LIGHTER_CHAIN_ID')
