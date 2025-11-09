@@ -9,7 +9,7 @@ from datetime import datetime
 from api.bp_client import BPClient
 from api.aster_client import AsterClient
 from api.paradex_client import ParadexClient
-from api.lighter_client import LighterClient, DEFAULT_BASE_URL as LIGHTER_DEFAULT_BASE_URL
+from api.lighter_client import LighterClient
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -120,7 +120,7 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
         if signer_dir:
             config['signer_lib_dir'] = signer_dir
 
-        base_url = config.get('base_url') or os.getenv('LIGHTER_BASE_URL', LIGHTER_DEFAULT_BASE_URL)
+        base_url = config.get('base_url') or os.getenv('LIGHTER_BASE_URL')
         config['base_url'] = base_url
 
         chain_id = config.get('chain_id') or os.getenv('LIGHTER_CHAIN_ID')
@@ -229,7 +229,7 @@ def get_balance_command(api_key, secret_key):
                     'api_private_key': ex_api_key,
                     'account_index': ex_secret_key,
                     'api_key_index': os.getenv('LIGHTER_API_KEY_INDEX', '0'),
-                    'base_url': os.getenv('LIGHTER_BASE_URL', LIGHTER_DEFAULT_BASE_URL),
+                    'base_url': os.getenv('LIGHTER_BASE_URL'),
                 }
                 signer_dir = os.getenv('LIGHTER_SIGNER_DIR')
                 if signer_dir:
@@ -540,7 +540,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
         exchange_config = {
             'api_private_key': api_key,
             'account_index': secret_key,
-            'base_url': os.getenv('LIGHTER_BASE_URL', LIGHTER_DEFAULT_BASE_URL),
+            'base_url': os.getenv('LIGHTER_BASE_URL'),
         }
         api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
         if api_key_index:
