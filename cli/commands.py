@@ -77,7 +77,6 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
 def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_config=None):
     """獲取緩存的客户端實例，避免重複創建"""
     exchange = (exchange or 'backpack').lower()
-    # ① 允許 lighter
     if exchange not in ('backpack', 'aster', 'paradex', 'lighter'):
         raise ValueError(f"不支持的交易所: {exchange}")
 
@@ -91,7 +90,7 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
         config.pop('api_key', None)
 
     if config_secret_key:
-        # ② lighter 與 paradex 一樣使用 private_key
+        # lighter 與 paradex 一樣使用 private_key
         if exchange in ('paradex', 'lighter'):
             config['private_key'] = config_secret_key
             config.pop('secret_key', None)
@@ -110,7 +109,6 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
     cache_key = f"{exchange}:{cache_suffix}"
 
     if cache_key not in _client_cache:
-        # ③ 新增 lighter 的 Client 選擇
         if exchange == 'backpack':
             client_cls = BPClient
         elif exchange == 'aster':
@@ -183,9 +181,6 @@ def get_balance_command(api_key, secret_key):
                     'api_key_index': os.getenv('LIGHTER_API_KEY_INDEX', '0'),
                     'base_url': os.getenv('LIGHTER_BASE_URL'),
                 }
-                signer_dir = os.getenv('LIGHTER_SIGNER_DIR')
-                if signer_dir:
-                    exchange_config['signer_lib_dir'] = signer_dir
                 chain_id = os.getenv('LIGHTER_CHAIN_ID')
                 if chain_id:
                     exchange_config['chain_id'] = chain_id
@@ -196,8 +191,6 @@ def get_balance_command(api_key, secret_key):
                 exchange_config['secret_key'] = ex_secret_key
             
             secret_for_client = ex_secret_key
-            if exchange == 'lighter':
-                secret_for_client = ex_secret_key
             c = _get_client(api_key=ex_api_key, secret_key=secret_for_client, exchange=exchange, exchange_config=exchange_config)
             balances = c.get_balance()
             collateral = c.get_collateral()
@@ -450,24 +443,23 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     # [整合功能] 2. 根據選擇配置交易所信息
     api_key, secret_key = _resolve_api_credentials(exchange, api_key, secret_key)
 
-    if exchange == 'paradex':
-        if not api_key or not secret_key:
-            print("錯誤：未找到 Paradex 的賬户地址或私鑰，請先設置 PARADEX_ACCOUNT_ADDRESS 和 PARADEX_PRIVATE_KEY 環境變數。")
-            return
-    elif exchange == 'lighter':
-        if not api_key:
-            api_key = input("請輸入 Lighter API Private Key (hex): ").strip()
-        account_index = secret_key or os.getenv('LIGHTER_ACCOUNT_INDEX')
+    if not api_key or not secret_key:
+        print("錯誤：未找到對應交易所的 API Key 或 Secret Key，請先設置環境變數或配置檔案。")
+        return
+    # lighter 額外檢查：account_index
+    if exchange == 'lighter':
+        # 優先用現有變數/配置/環境變數；若無則提示輸入
+        account_index = (
+            (exchange_config or {}).get('account_index')
+            or os.getenv('LIGHTER_ACCOUNT_INDEX')
+            or input("請輸入 Lighter Account Index: ").strip()
+        )
         if not account_index:
-            account_index = input("請輸入 Lighter Account Index: ").strip()
-        if not api_key or not account_index:
-            print("錯誤：未提供 Lighter API 私鑰或 Account Index。")
+            print("錯誤：未提供 Lighter Account Index。")
             return
-        secret_key = account_index
-    else:
-        if not api_key or not secret_key:
-            print("錯誤：未找到對應交易所的 API Key 或 Secret Key，請先設置環境變數或配置檔案。")
-            return
+        # 如需後續用到，建議放入 config（如果你有 config 物件）
+        if exchange_config is not None:
+            exchange_config['account_index'] = account_index
 
     if exchange == 'backpack':
         exchange_config = {
@@ -497,9 +489,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
         api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
         if api_key_index:
             exchange_config['api_key_index'] = api_key_index
-        signer_dir = os.getenv('LIGHTER_SIGNER_DIR')
-        if signer_dir:
-            exchange_config['signer_lib_dir'] = signer_dir
         chain_id = os.getenv('LIGHTER_CHAIN_ID')
         if chain_id:
             exchange_config['chain_id'] = chain_id

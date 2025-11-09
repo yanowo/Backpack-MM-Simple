@@ -7,8 +7,11 @@
   - 支援永續合約做市和 Maker-Taker 對沖策略
   - 解析 Lighter 成交資料時保留原始費率並避免誤計實際手續費，零手續費帳戶可正確記帳
 
-- CLI 命令行界面新增 Paradex 交易所選項
+- CLI 命令行界面新增 Lighter 交易所選項
+- Web 界面新增 Lighter 交易所選項
 
+### 修复
+- 「磨損率（Slippage / Wear Rate）」的計算公式
 ### 文檔
 - 新增 Lighter 配置說明到 `.env.example`
 - 添加 Lighter 使用示例到 README
