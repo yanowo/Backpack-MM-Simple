@@ -1972,10 +1972,12 @@ class MarketMaker:
         )
 
         if self.total_quote_volume > 0:
-            wear_rate_value = abs(net_pnl) / self.total_quote_volume * 100
+            loss = min(net_pnl, 0)  # 仅取亏损
+            wear_rate_value = abs(loss) / self.total_quote_volume * 100
             wear_rate_display = f"{wear_rate_value:.4f}%"
         else:
             wear_rate_display = "N/A"
+
 
         trade_rows = [
             ("總成交量", f"買 {self.total_bought:.3f} {self.base_asset} | 賣 {self.total_sold:.3f} {self.base_asset}"),
