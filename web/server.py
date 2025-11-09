@@ -128,7 +128,7 @@ def start_bot():
             if not account_index:
                 from api.lighter_client import _get_lihgter_account_index
                 account_index = _get_lihgter_account_index(account_address)
-            api_key_index = os.getenv('LIGHTER_API_KEY_INDEX', '0')
+            api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
             chain_id = os.getenv('LIGHTER_CHAIN_ID')
 
             exchange_config = {

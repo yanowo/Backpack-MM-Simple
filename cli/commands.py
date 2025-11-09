@@ -51,12 +51,9 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
     elif exchange == "lighter":
         api_candidates = [
             os.getenv("LIGHTER_PRIVATE_KEY"),
-            os.getenv("LIGHTER_API_KEY"),
-            os.getenv("API_KEY_PRIVATE_KEY"),
         ]
         secret_candidates = [
             os.getenv("LIGHTER_ACCOUNT_INDEX"),
-            os.getenv("LIGHTER_ACCOUNT"),
         ]
     else:
         api_candidates = [
@@ -151,7 +148,6 @@ def get_balance_command(api_key, secret_key):
     
     # 檢查 Lighter
     lighter_private, lighter_account_index = _resolve_api_credentials('lighter', None, None)
-    lighter_account_index = lighter_account_index or os.getenv("LIGHTER_ACCOUNT_INDEX")
     if lighter_private and lighter_account_index:
         exchanges_to_check.append(('lighter', lighter_private, lighter_account_index))
     
@@ -178,7 +174,7 @@ def get_balance_command(api_key, secret_key):
                 exchange_config = {
                     'api_private_key': ex_api_key,
                     'account_index': ex_secret_key,
-                    'api_key_index': os.getenv('LIGHTER_API_KEY_INDEX', '0'),
+                    'api_key_index': os.getenv('LIGHTER_API_KEY_INDEX'),
                     'base_url': os.getenv('LIGHTER_BASE_URL'),
                 }
                 chain_id = os.getenv('LIGHTER_CHAIN_ID')
