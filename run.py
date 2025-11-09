@@ -133,14 +133,12 @@ def main():
             from api.lighter_client import _get_lihgter_account_index
             account_index = _get_lihgter_account_index(account_address)
         api_key_index = os.getenv('LIGHTER_API_KEY_INDEX', '0')
-        signer_dir = os.getenv('LIGHTER_SIGNER_DIR')
         chain_id = os.getenv('LIGHTER_CHAIN_ID')
 
         exchange_config = {
             'api_private_key': api_key,
             'account_index': account_index,
             'api_key_index': api_key_index,
-            'signer_lib_dir': signer_dir,
             'base_url': base_url,
         }
         if chain_id is not None:
