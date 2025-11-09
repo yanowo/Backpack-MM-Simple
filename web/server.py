@@ -118,6 +118,35 @@ def start_bot():
                 'api_key': api_key,
                 'secret_key': secret_key,
             }
+        elif exchange == 'lighter':
+            api_key = os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
+            secret_key = os.getenv('LIGHTER_SECRET_KEY') or api_key
+            ws_proxy = os.getenv('LIGHTER_PROXY_WEBSOCKET') or os.getenv('LIGHTER_WS_PROXY')
+            base_url = os.getenv('LIGHTER_BASE_URL')
+            account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+            account_address = os.getenv('LIGHTER_ADDRESS')
+            if not account_index:
+                from api.lighter_client import _get_lihgter_account_index
+                account_index = _get_lihgter_account_index(account_address)
+            api_key_index = os.getenv('LIGHTER_API_KEY_INDEX', '0')
+            signer_dir = os.getenv('LIGHTER_SIGNER_DIR')
+            chain_id = os.getenv('LIGHTER_CHAIN_ID')
+
+            exchange_config = {
+                'api_private_key': api_key,
+                'account_index': account_index,
+                'api_key_index': api_key_index,
+                'signer_lib_dir': signer_dir,
+                'base_url': base_url,
+            }
+            if chain_id is not None:
+                exchange_config['chain_id'] = chain_id
+            if not api_key:
+                logger.error("缺少 Lighter 私鑰，請使用 --api-key 或環境變量 LIGHTER_PRIVATE_KEY 提供")
+                sys.exit(1)
+            if not exchange_config.get('account_index'):
+                logger.error("缺少 Lighter Account Index，請透過環境變量 LIGHTER_ACCOUNT_INDEX 提供")
+                
         elif exchange == 'paradex':
             private_key = os.getenv('PARADEX_PRIVATE_KEY', '')
             account_address = os.getenv('PARADEX_ACCOUNT_ADDRESS')
@@ -356,7 +385,8 @@ def get_config():
         'env_configured': {
             'backpack': bool(os.getenv('BACKPACK_KEY') and os.getenv('BACKPACK_SECRET')),
             'aster': bool(os.getenv('ASTER_API_KEY') and os.getenv('ASTER_SECRET_KEY')),
-            'paradex': bool(os.getenv('PARADEX_PRIVATE_KEY') and os.getenv('PARADEX_ACCOUNT_ADDRESS'))
+            'paradex': bool(os.getenv('PARADEX_PRIVATE_KEY') and os.getenv('PARADEX_ACCOUNT_ADDRESS')),
+            'lighter': bool(os.getenv('LIGHTER_PRIVATE_KEY') and os.getenv('LIGHTER_PUBLIC_KEY'))
         }
     })
 
