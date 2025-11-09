@@ -287,6 +287,9 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 # Lighter Maker-Taker 對沖
 python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 
+# Lighter Volume Hold（三帳號輪轉）
+python run.py --exchange lighter --strategy volume_hold --strategy-config settings/volume_hold_strategy.sample.json
+
 ```
 
 > **適合場景**：自動化部署、定時任務、批量運行  
@@ -300,6 +303,16 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 - [現貨做市策略](docs/SPOT_MARKET_MAKING.md) - 多層訂單、智能重平衡
 - [永續合約做市策略](docs/PERP_MARKET_MAKING.md) - 倉位管理、風險中性
 - [Maker-Taker 對沖策略](docs/MAKER_TAKER_HEDGE.md) - 即時對沖、零持倉
+- Volume Hold（三帳號持倉策略）- `settings/volume_hold_strategy.sample.json` 提供範本配置
+
+### Volume Hold 配置提示
+
+- `coinlist`：指定輪詢的幣種與每輪 `target_notional` / `slice_notional` 或 `slice_count`。
+- `accounts`：三組 Lighter API 憑證，主帳會循環輪替，其餘兩帳即時市價對沖。
+- `hold_minutes`：持倉時長（預設 17 分鐘），支持 per-symbol 覆寫。
+- `entry/exit*_offset_bps`：掛單價格距離買一/賣一的偏移，避免直接衝擊市場。
+- `random_split_range`：對沖拆單的隨機比例（例如 0.45~0.55）。
+- 使用 `--strategy-config` 或環境變數 `VOLUME_HOLD_CONFIG` 指向實際 JSON 檔案即可啟動。
 
 ---
 
@@ -315,9 +328,10 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 - `--duration`: 運行時間（秒）
 - `--interval`: 更新間隔（秒）
 - `--market-type`: 市場類型 (`spot` 或 `perp`)
-- `--strategy`: 策略選擇 (`standard` 或 `maker_hedge`)
+- `--strategy`: 策略選擇 (`standard`、`maker_hedge`、`volume_hold`)
 
 #### 高級參數
+- `--strategy-config`: volume_hold 等高階策略的 JSON 配置路徑
 - `--enable-db` / `--disable-db`: 資料庫寫入控制
 - `--target-position`: 永續合約目標淨倉位
 - `--max-position`: 永續合約最大允許淨倉
