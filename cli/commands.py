@@ -77,95 +77,47 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
 def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_config=None):
     """獲取緩存的客户端實例，避免重複創建"""
     exchange = (exchange or 'backpack').lower()
+    # ① 允許 lighter
     if exchange not in ('backpack', 'aster', 'paradex', 'lighter'):
         raise ValueError(f"不支持的交易所: {exchange}")
 
     config = dict(exchange_config or {})
+    config_api_key = api_key or config.get('api_key')
+    config_secret_key = secret_key or config.get('secret_key') or config.get('private_key')
 
-    if exchange == 'lighter':
-        private_key = (
-            api_key
-            or config.get('api_private_key')
-            or config.get('private_key')
-            or config.get('api_key')
-        )
-        if private_key:
-            config['api_private_key'] = private_key
-            config.pop('api_key', None)
-        else:
-            config.pop('api_private_key', None)
-            config.pop('api_key', None)
-
-        account_index = (
-            secret_key
-            if secret_key not in (None, '')
-            else config.get('account_index')
-            or config.get('accountIndex')
-            or os.getenv('LIGHTER_ACCOUNT_INDEX')
-        )
-        if account_index not in (None, ''):
-            config['account_index'] = str(account_index)
-        else:
-            config.pop('account_index', None)
-
-        api_key_index = (
-            config.get('api_key_index')
-            or config.get('apiKeyIndex')
-            or os.getenv('LIGHTER_API_KEY_INDEX')
-        )
-        if api_key_index not in (None, ''):
-            config['api_key_index'] = str(api_key_index)
-
-        signer_dir = config.get('signer_lib_dir') or os.getenv('LIGHTER_SIGNER_DIR')
-        if signer_dir:
-            config['signer_lib_dir'] = signer_dir
-
-        base_url = config.get('base_url') or os.getenv('LIGHTER_BASE_URL')
-        config['base_url'] = base_url
-
-        chain_id = config.get('chain_id') or os.getenv('LIGHTER_CHAIN_ID')
-        if chain_id not in (None, ''):
-            config['chain_id'] = chain_id
-
-        verify_ssl_env = os.getenv('LIGHTER_VERIFY_SSL')
-        if 'verify_ssl' not in config and verify_ssl_env is not None:
-            config['verify_ssl'] = verify_ssl_env.lower() not in ('0', 'false', 'no')
-
-        config_secret_key = config.get('account_index')
+    if config_api_key:
+        config['api_key'] = config_api_key
     else:
-        config_api_key = api_key or config.get('api_key')
-        config_secret_key = secret_key or config.get('secret_key') or config.get('private_key')
+        config.pop('api_key', None)
 
-        if config_api_key:
-            config['api_key'] = config_api_key
-        else:
-            config.pop('api_key', None)
-
-        if config_secret_key:
-            if exchange == 'paradex':
-                config['private_key'] = config_secret_key  # Paradex 使用私钥
-            else:
-                config['secret_key'] = config_secret_key
-        else:
+    if config_secret_key:
+        # ② lighter 與 paradex 一樣使用 private_key
+        if exchange in ('paradex', 'lighter'):
+            config['private_key'] = config_secret_key
             config.pop('secret_key', None)
+        else:
+            config['secret_key'] = config_secret_key
             config.pop('private_key', None)
+    else:
+        config.pop('secret_key', None)
+        config.pop('private_key', None)
 
-    identifier_parts = []
-    for key in ('api_private_key', 'api_key', 'secret_key', 'private_key', 'account_index'):
-        value = config.get(key)
-        if value not in (None, ''):
-            identifier_parts.append(str(value))
-    cache_suffix = "_".join(identifier_parts) if identifier_parts else 'public'
+    cache_suffix = (
+        f"{config.get('api_key', '')}_{config.get('secret_key', '') or config.get('private_key', '')}"
+        if config.get('api_key') or config.get('secret_key') or config.get('private_key')
+        else 'public'
+    )
     cache_key = f"{exchange}:{cache_suffix}"
 
     if cache_key not in _client_cache:
+        # ③ 新增 lighter 的 Client 選擇
         if exchange == 'backpack':
             client_cls = BPClient
         elif exchange == 'aster':
             client_cls = AsterClient
         elif exchange == 'paradex':
             client_cls = ParadexClient
-        else:
+        else:  # lighter
             client_cls = LighterClient
         _client_cache[cache_key] = client_cls(config)
 
