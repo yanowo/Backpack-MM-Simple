@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>交易控制台 - 交易儀表板</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Top Navigation Bar -->
+        <nav class="top-navbar">
+            <div class="navbar-container">
+                <div class="navbar-brand">
+                    <div class="brand-logo">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                            <path d="M2 17l10 5 10-5M2 12l10 5 10-5"/>
+                        </svg>
+                        <span class="brand-text">做市交易控制台</span>
+                    </div>
+                    <span class="brand-subtitle">專業交易儀表板</span>
+                </div>
+                <div class="navbar-status">
+                    <div class="connection-badge" id="connectionBadge">
+                        <span class="badge-dot" id="statusDot"></span>
+                        <span class="badge-text" id="statusText">未連接</span>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Dashboard Content -->
+        <main class="dashboard-main">
+            <!-- Statistics Overview Section -->
+            <section id="statsSection" class="stats-overview" style="display: none;">
+                <div class="section-header-bar">
+                    <div class="header-left">
+                        <h2 class="section-title">即時數據分析</h2>
+                        <span class="section-subtitle">實時交易指標與績效表現</span>
+                    </div>
+                    <div class="header-right">
+                        <div class="runtime-badge">
+                            <span class="badge-label">運行時間</span>
+                            <span class="badge-value" id="statRuntimeHeader">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Key Metrics Grid -->
+                <div class="metrics-grid-primary">
+                    <div class="metric-card primary">
+                        <div class="metric-header">
+                            <span class="metric-title">總餘額</span>
+                            <div class="metric-icon-wrapper">
+                                <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="2" y="5" width="20" height="14" rx="2"/>
+                                    <line x1="2" y1="10" x2="22" y2="10"/>
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="metric-value" id="statTotalBalance">--</div>
+                    </div>
+
+                    <div class="metric-card primary highlight">
+                        <div class="metric-header">
+                            <span class="metric-title">累計盈虧</span>
+                            <div class="metric-icon-wrapper">
+                                <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                                    <polyline points="17 6 23 6 23 12"/>
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="metric-value" id="statCumulativePnL">--</div>
+                    </div>
+
+                    <div class="metric-card primary">
+                        <div class="metric-header">
+                            <span class="metric-title">總成交額</span>
+                            <div class="metric-icon-wrapper">
+                                <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="12" y1="1" x2="12" y2="23"/>
+                                    <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="metric-value" id="statVolumeUSDC">--</div>
+                    </div>
+
+                    <div class="metric-card primary">
+                        <div class="metric-header">
+                            <span class="metric-title">當前價格</span>
+                            <div class="metric-icon-wrapper">
+                                <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="metric-value" id="statPrice">--</div>
+                    </div>
+                </div>
+
+                <!-- Trading Statistics -->
+                <div class="stats-row">
+                    <div class="stats-group">
+                        <h3 class="group-label">交易活動</h3>
+                        <div class="metrics-grid-secondary">
+                            <div class="metric-card secondary">
+                                <span class="metric-label">總交易次數</span>
+                                <span class="metric-value-sm" id="statTotalTrades">--</span>
+                            </div>
+                            <div class="metric-card secondary">
+                                <span class="metric-label">買入 / 賣出</span>
+                                <span class="metric-value-sm" id="statBuySell">--</span>
+                            </div>
+                            <div class="metric-card secondary">
+                                <span class="metric-label">Maker 成交量</span>
+                                <span class="metric-value-sm" id="statMakerVolume">--</span>
+                            </div>
+                            <div class="metric-card secondary">
+                                <span class="metric-label">Taker 成交量</span>
+                                <span class="metric-value-sm" id="statTakerVolume">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="stats-group">
+                        <h3 class="group-label">成本與績效</h3>
+                        <div class="metrics-grid-secondary">
+                            <div class="metric-card secondary">
+                                <span class="metric-label">總手續費</span>
+                                <span class="metric-value-sm" id="statFees">--</span>
+                            </div>
+                            <div class="metric-card secondary">
+                                <span class="metric-label">磨損率</span>
+                                <span class="metric-value-sm" id="statSlippage">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Status Bar -->
+            <section class="status-panel">
+                <div class="status-item">
+                    <span class="status-label">連接狀態</span>
+                    <span class="status-value" id="connectionStatus">等待連接...</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">機器人狀態</span>
+                    <span class="status-value" id="botStatus">未啟動</span>
+                </div>
+                <div class="status-item flex-grow">
+                    <span class="status-label">當前配置</span>
+                    <span class="status-value" id="currentConfig">無</span>
+                </div>
+            </section>
+
+            <!-- Configuration Panel -->
+            <section class="config-panel">
+                <div class="section-header-bar">
+                    <div class="header-left">
+                        <h2 class="section-title">策略配置</h2>
+                        <span class="section-subtitle">配置您的做市參數</span>
+                    </div>
+                </div>
+
+                <form id="botConfigForm">
+                    <!-- Main Configuration Grid -->
+                    <div class="config-compact">
+                        <!-- Basic Settings -->
+                        <div class="config-block">
+                            <h3 class="block-title">基本設置</h3>
+                            <div class="form-grid-compact">
+                                <div class="form-field">
+                                    <label class="field-label">交易所</label>
+                                    <select id="exchange" name="exchange" class="field-input" required>
+                                        <option value="backpack">Backpack</option>
+                                        <option value="aster">Aster</option>
+                                        <option value="paradex">Paradex</option>
+                                    </select>
+                                </div>
+
+                                <div class="form-field">
+                                    <label class="field-label">交易對</label>
+                                    <input type="text" id="symbol" name="symbol" class="field-input" placeholder="SOL_USDC" required>
+                                </div>
+
+                                <div class="form-field">
+                                    <label class="field-label">價差 (%)</label>
+                                    <input type="number" id="spread" name="spread" class="field-input" step="0.001" placeholder="0.5" required>
+                                </div>
+
+                                <div class="form-field">
+                                    <label class="field-label">數量</label>
+                                    <input type="number" id="quantity" name="quantity" class="field-input" step="0.00001" placeholder="自動">
+                                </div>
+
+                                <div class="form-field">
+                                    <label class="field-label">市場類型</label>
+                                    <select id="market_type" name="market_type" class="field-input">
+                                        <option value="spot">現貨</option>
+                                        <option value="perp">永續合約</option>
+                                    </select>
+                                </div>
+
+                                <div class="form-field">
+                                    <label class="field-label">策略模式</label>
+                                    <select id="strategy" name="strategy" class="field-input">
+                                        <option value="standard">標準做市</option>
+                                        <option value="maker_hedge">對沖做市</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Market Parameters Row -->
+                        <div class="config-row">
+                            <!-- Spot Parameters -->
+                            <div id="spotParams" class="config-block flex-1">
+                                <h3 class="block-title">現貨市場參數</h3>
+                                <div class="form-grid-compact">
+                                    <div class="form-field">
+                                        <label class="field-label">最大訂單數</label>
+                                        <input type="number" id="max_orders" name="max_orders" class="field-input" value="3" min="1">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">目標比例 (%)</label>
+                                        <input type="number" id="base_asset_target" name="base_asset_target" class="field-input" value="30" min="0" max="100">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">重平衡閾值 (%)</label>
+                                        <input type="number" id="rebalance_threshold" name="rebalance_threshold" class="field-input" value="15" min="0">
+                                    </div>
+
+                                    <div class="form-field checkbox-field">
+                                        <label class="checkbox-label">
+                                            <input type="checkbox" id="enable_rebalance" name="enable_rebalance" class="field-checkbox" checked>
+                                            <span class="checkbox-text">啟用自動重平衡</span>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Perpetual Parameters -->
+                            <div id="perpParams" class="config-block flex-1" style="display: none;">
+                                <h3 class="block-title">永續合約參數</h3>
+                                <div class="form-grid-compact">
+                                    <div class="form-field">
+                                        <label class="field-label">最大訂單數</label>
+                                        <input type="number" id="max_orders_perp" name="max_orders" class="field-input" value="3" min="1">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">目標倉位</label>
+                                        <input type="number" id="target_position" name="target_position" class="field-input" value="1.0" step="0.1">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">最大倉位</label>
+                                        <input type="number" id="max_position" name="max_position" class="field-input" value="1.0" step="0.1">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">調整觸發值</label>
+                                        <input type="number" id="position_threshold" name="position_threshold" class="field-input" value="0.1" step="0.01">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">偏移係數</label>
+                                        <input type="number" id="inventory_skew" name="inventory_skew" class="field-input" value="0.0" step="0.1" min="0" max="1">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">止損</label>
+                                        <input type="number" id="stop_loss" name="stop_loss" class="field-input" step="0.01" placeholder="可選">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">止盈</label>
+                                        <input type="number" id="take_profit" name="take_profit" class="field-input" step="0.01" placeholder="可選">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Runtime Parameters -->
+                            <div class="config-block flex-1">
+                                <h3 class="block-title">運行參數</h3>
+                                <div class="form-grid-compact">
+                                    <div class="form-field">
+                                        <label class="field-label">運行時長 (秒)</label>
+                                        <input type="number" id="duration" name="duration" class="field-input" value="3600" min="1">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">更新間隔 (秒)</label>
+                                        <input type="number" id="interval" name="interval" class="field-input" value="10" min="1">
+                                    </div>
+
+                                    <div class="form-field checkbox-field">
+                                        <label class="checkbox-label">
+                                            <input type="checkbox" id="enable_db" name="enable_db" class="field-checkbox">
+                                            <span class="checkbox-text">啟用資料庫記錄</span>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="action-buttons">
+                        <button type="submit" id="startBtn" class="btn btn-primary">
+                            <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M8 5v14l11-7z"/>
+                            </svg>
+                            <span>啟動機器人</span>
+                        </button>
+                        <button type="button" id="stopBtn" class="btn btn-danger" disabled>
+                            <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="6" y="6" width="12" height="12"/>
+                            </svg>
+                            <span>停止機器人</span>
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            <!-- Activity Log -->
+            <section class="log-panel">
+                <div class="section-header-bar">
+                    <h3 class="section-title">運行日誌</h3>
+                </div>
+                <div id="logDisplay" class="log-container"></div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="dashboard-footer">
+            <div class="footer-content">
+                <span class="footer-text">Backpack 做市交易儀表板</span>
+                <span class="footer-divider">|</span>
+                <span class="footer-meta">實時 WebSocket 連接</span>
+            </div>
+        </footer>
+    </div>
+
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

@@ -226,10 +226,12 @@ class BPClient(BaseExchangeClient):
         endpoint = f"/api/{API_VERSION}/markets"
         return self.make_request("GET", endpoint)
 
-    def get_order_book(self, symbol, limit=20):
+    def get_order_book(self, symbol, limit=None):
         """獲取市場深度"""
         endpoint = f"/api/{API_VERSION}/depth"
-        params = {"symbol": symbol, "limit": str(limit)}
+        params = {"symbol": symbol}
+        if limit is not None:
+            params["limit"] = str(limit)
         response = self.make_request("GET", endpoint, params=params)
 
         if not isinstance(response, dict) or "error" in response:
