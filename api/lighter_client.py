@@ -17,8 +17,6 @@ from logger import setup_logger
 
 logger = setup_logger("api.lighter_client")
 
-
-DEFAULT_BASE_URL = "https://mainnet.zklighter.elliot.ai"
 DEFAULT_HTTP_TIMEOUT = 10.0
 
 DEFAULT_SYMBOL_OVERRIDES: Dict[str, Dict[str, Any]] = {
@@ -379,7 +377,7 @@ class LighterClient(BaseExchangeClient):
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.base_url: str = config.get("base_url", DEFAULT_BASE_URL).rstrip("/")
+        self.base_url: str = config.get("base_url").rstrip("/")
         self.verify_ssl: bool = bool(config.get("verify_ssl", True))
         self.timeout: float = float(config.get("timeout", DEFAULT_HTTP_TIMEOUT) or DEFAULT_HTTP_TIMEOUT)
         self.session = requests.Session()

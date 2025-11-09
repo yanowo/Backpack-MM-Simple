@@ -9,7 +9,6 @@ import os
 from typing import Optional
 from config import ENABLE_DATABASE
 from logger import setup_logger
-from api.lighter_client import DEFAULT_BASE_URL as LIGHTER_DEFAULT_BASE_URL
 
 # 創建記錄器
 logger = setup_logger("main")
@@ -124,10 +123,10 @@ def main():
             'base_url': base_url,
         }
     elif exchange == 'lighter':
-        api_key = args.api_key or os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
-        secret_key = args.secret_key or os.getenv('LIGHTER_SECRET_KEY') or api_key
+        api_key = os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
+        secret_key = os.getenv('LIGHTER_SECRET_KEY') or api_key
         ws_proxy = os.getenv('LIGHTER_PROXY_WEBSOCKET') or os.getenv('LIGHTER_WS_PROXY')
-        base_url = os.getenv('LIGHTER_BASE_URL', LIGHTER_DEFAULT_BASE_URL)
+        base_url = os.getenv('LIGHTER_BASE_URL')
         account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
         account_address = os.getenv('LIGHTER_ADDRESS')
         if not account_index:
