@@ -99,8 +99,10 @@ class GridStrategy(MarketMaker):
         self.grid_buy_orders_by_price: Dict[float, List[Dict]] = {}  # 買單
         self.grid_sell_orders_by_price: Dict[float, List[Dict]] = {}  # 賣單
 
-        # 網格依賴關係（買單成交後需要在上方掛賣單）
-        self.grid_dependencies: Dict[float, float] = {}  # {買入價格: 賣出價格}
+        # 網格點位鎖定狀態（防止重複補單）
+        # 買單成交後鎖定該買單價格，賣單成交後才解鎖
+        # key: 買單價格, value: 對應的賣單價格
+        self.grid_level_locks: Dict[float, float] = {}  # {買單價格: 賣單價格}
 
         # 統計
         self.grid_buy_filled_count = 0
@@ -549,13 +551,17 @@ class GridStrategy(MarketMaker):
 
         success = self._place_grid_sell_order(next_price, actual_quantity)
         if success:
-            # 建立依賴關係
-            self.grid_dependencies[buy_price] = next_price
+            # 鎖定買單價格，記錄對應的賣單價格
+            self.grid_level_locks[buy_price] = next_price
+            logger.debug("鎖定網格點位 %.4f，等待賣單 %.4f 成交", buy_price, next_price)
+
             # 計算網格利潤
             grid_profit = (next_price - buy_price) * actual_quantity
             self.grid_profit += grid_profit
             logger.info("潛在網格利潤: %.4f %s (累計: %.4f)",
                        grid_profit, self.quote_asset, self.grid_profit)
+        else:
+            logger.warning("掛賣單失敗，不鎖定買單價格 %.4f", buy_price)
 
     def _place_buy_after_sell(self, sell_price: float, quantity: float) -> None:
         """賣單成交後，在下一個網格點位掛買單"""
@@ -568,6 +574,11 @@ class GridStrategy(MarketMaker):
 
         if not next_price:
             logger.warning("賣出價格 %.4f 已經是最低網格，無法掛買單", sell_price)
+            # 解鎖對應的買單價格
+            for buy_price, locked_sell_price in list(self.grid_level_locks.items()):
+                if locked_sell_price == sell_price:
+                    del self.grid_level_locks[buy_price]
+                    logger.debug("解鎖網格點位 %.4f（賣單在最低點成交）", buy_price)
             return
 
         # 計算可買入的數量（扣除手續費）
@@ -580,12 +591,11 @@ class GridStrategy(MarketMaker):
 
         success = self._place_grid_buy_order(next_price, buy_quantity)
         if success:
-            # 解除依賴關係
-            for buy_price, dependent_sell_price in list(self.grid_dependencies.items()):
-                if dependent_sell_price == sell_price:
-                    del self.grid_dependencies[buy_price]
-                    logger.debug("解除依賴: 買入價格 %.4f -> 賣出價格 %.4f",
-                               buy_price, sell_price)
+            # 解鎖對應的買單價格，允許重新補單
+            for buy_price, locked_sell_price in list(self.grid_level_locks.items()):
+                if locked_sell_price == sell_price:
+                    del self.grid_level_locks[buy_price]
+                    logger.debug("解鎖網格點位 %.4f，完成買賣循環", buy_price)
 
     def place_limit_orders(self) -> None:
         """放置限價單 - 覆蓋父類方法"""
@@ -600,8 +610,17 @@ class GridStrategy(MarketMaker):
 
     def _refill_grid_orders(self) -> None:
         """補充缺失的網格訂單"""
+
         current_price = self.get_current_price()
         if not current_price:
+            return
+
+        # 檢查訂單數量限制
+        total_orders = len(self.grid_orders_by_id)
+        max_orders_limit = 180  # 預留一些空間，避免達到200上限
+
+        if total_orders >= max_orders_limit:
+            logger.warning("訂單數量已達上限 %d/%d，暫停補充訂單", total_orders, max_orders_limit)
             return
 
         # 獲取餘額
@@ -613,17 +632,23 @@ class GridStrategy(MarketMaker):
         quote_balance = balances.get('quote_available', 0)
 
         refilled = 0
+        available_slots = max_orders_limit - total_orders
 
         for price in self.grid_levels:
+            if refilled >= available_slots:
+                logger.warning("已達到可用訂單槽位上限，停止補充")
+                break
+
             if abs(price - current_price) / current_price < 0.001:
                 continue
 
             if price < current_price:
                 # 檢查是否有買單
                 if price not in self.grid_buy_orders_by_price or not self.grid_buy_orders_by_price[price]:
-                    # 檢查是否有依賴關係
-                    if price in self.grid_dependencies:
-                        logger.debug("價格 %.4f 的買單依賴未解除，暫不補充", price)
+                    # 檢查網格點位是否被鎖定（買單成交等待賣單成交）
+                    if price in self.grid_level_locks:
+                        logger.debug("網格點位 %.4f 已鎖定，等待賣單 %.4f 成交，暫不補充買單",
+                                   price, self.grid_level_locks[price])
                         continue
 
                     if quote_balance >= price * self.order_quantity:
@@ -640,7 +665,8 @@ class GridStrategy(MarketMaker):
                             refilled += 1
 
         if refilled > 0:
-            logger.info("補充了 %d 個網格訂單", refilled)
+            logger.info("補充了 %d 個網格訂單 (總計: %d/%d)",
+                       refilled, len(self.grid_orders_by_id), max_orders_limit)
 
     def calculate_prices(self) -> Tuple[List[float], List[float]]:
         """計算價格 - 網格策略不需要這個方法，返回空列表"""
