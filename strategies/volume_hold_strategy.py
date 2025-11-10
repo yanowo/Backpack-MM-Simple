@@ -92,6 +92,7 @@ class VolumeHoldStrategyConfig:
     pause_between_symbols: float = 30.0
     random_split_range: Tuple[float, float] = (0.45, 0.55)
     run_once: bool = False
+    enable_hedge: bool = True
 
     @classmethod
     def from_file(cls, path: str) -> "VolumeHoldStrategyConfig":
@@ -184,6 +185,7 @@ class VolumeHoldStrategyConfig:
             pause_between_symbols=float(payload.get("pause_between_symbols", 30)),
             random_split_range=(low, high),
             run_once=bool(payload.get("run_once", False)),
+            enable_hedge=bool(payload.get("enable_hedge", True)),
         )
         if not config.base_url and any(acc.base_url is None for acc in accounts):
             raise StrategyConfigError("base_url missing; configure global base_url or per-account base_url entries.")
@@ -205,6 +207,10 @@ class VolumeHoldStrategy:
         self._hedge_backlog: Dict[int, Dict[str, Dict[str, float]]] = {
             idx: {} for idx in range(len(self._clients))
         }
+        self._maker_price_stats: Dict[str, Dict[str, float]] = {}
+        self._hedge_price_stats: Dict[str, Dict[int, Dict[str, float]]] = {}
+        self._hedge_recorded_trades: List[Set[str]] = [set() for _ in self._clients]
+        self._hedge_enabled = bool(config.enable_hedge)
 
     # ------------------------------------------------------------------ lifecycle
     def stop(self) -> None:
@@ -234,6 +240,7 @@ class VolumeHoldStrategy:
                     else:
                         self._hold_position(symbol_plan)
                         self._flatten_position(primary_idx, hedger_indices, symbol_plan, entry_summary)
+                        self._print_cycle_summary(symbol_plan.symbol)
                 except Exception:
                     logger.exception("Cycle for %s failed", symbol_plan.symbol)
 
@@ -284,12 +291,14 @@ class VolumeHoldStrategy:
                 post_only=self.config.post_only,
                 reduce_only=False,
                 limits=limits,
+                account_label=self._account_labels[primary_idx],
             )
             filled_base = sum(fill["quantity"] for fill in fills)
             if filled_base <= 0:
                 logger.info("Slice produced no fills, retrying another order...")
                 self._sleep_with_stop(self._slice_delay())
                 continue
+            self._record_maker_fill(plan.symbol, fills)
 
             avg_price = self._weighted_average(fills)
             filled_notional = filled_base * avg_price
@@ -344,12 +353,14 @@ class VolumeHoldStrategy:
                 post_only=self.config.post_only,
                 reduce_only=True,
                 limits=limits,
+                account_label=self._account_labels[primary_idx],
             )
             filled_base = sum(fill["quantity"] for fill in fills)
             if filled_base <= 0:
                 logger.info("Exit slice produced no fills, retrying...")
                 self._sleep_with_stop(self._slice_delay())
                 continue
+            self._record_maker_fill(plan.symbol, fills)
 
             remaining_base = max(remaining_base - filled_base, 0.0)
             logger.info(
@@ -384,11 +395,21 @@ class VolumeHoldStrategy:
         post_only: bool,
         reduce_only: bool,
         limits: MarketConstraints,
+        account_label: str,
     ) -> List[Dict[str, float]]:
         rounded_qty = max(round_to_precision(quantity, limits.base_precision), limits.min_order_size)
         rounded_price = round_to_tick_size(price, limits.tick_size)
         submitted_at = time.time()
-        self._refresh_client_nonce(client)
+        logger.info(
+            "Submitting %s order: account=%s side=%s qty=%.8f price=%.8f post_only=%s reduce_only=%s",
+            symbol,
+            account_label,
+            side,
+            rounded_qty,
+            rounded_price,
+            post_only,
+            reduce_only,
+        )
         order = {
             "symbol": symbol,
             "side": side,
@@ -398,7 +419,12 @@ class VolumeHoldStrategy:
             "postOnly": post_only,
             "reduceOnly": reduce_only,
         }
-        response = client.execute_order(order)
+        logger.debug(
+            "execute_order payload=%s thread=%s",
+            order,
+            threading.get_ident(),
+        )
+        response = self._execute_with_nonce_retry(client, order, account_label)
         if isinstance(response, dict) and response.get("error"):
             logger.error("Limit order rejected for %s: %s", symbol, response["error"])
             return []
@@ -468,7 +494,11 @@ class VolumeHoldStrategy:
             self._sleep_with_stop(self.config.order_poll_interval)
 
         if filled_qty + tolerance < target_qty:
-            client.cancel_all_orders(symbol)
+            cancel_result = client.cancel_all_orders(symbol)
+            if isinstance(cancel_result, dict) and cancel_result.get("error"):
+                logger.error("Cancel all orders for %s failed: %s", symbol, cancel_result["error"])
+            else:
+                logger.info("Cancel all orders for %s response: %s", symbol, cancel_result)
 
         return fills
 
@@ -500,15 +530,6 @@ class VolumeHoldStrategy:
                     limits.base_precision,
                 )
                 continue
-            if rounded < limits.min_order_size:
-                logger.debug(
-                    "Hedge qty %.8f smaller than exchange min %.8f for %s (%s) - submitting anyway",
-                    rounded,
-                    limits.min_order_size,
-                    symbol,
-                    self._account_labels[hedger_idx],
-                )
-            self._refresh_client_nonce(self._clients[hedger_idx])
             payload = {
                 "symbol": symbol,
                 "side": side,
@@ -516,7 +537,23 @@ class VolumeHoldStrategy:
                 "quantity": str(rounded),
                 "reduceOnly": reduce_only,
             }
-            response = self._clients[hedger_idx].execute_order(payload)
+            logger.info(
+                "Submitting hedge order: account=%s side=%s qty=%.8f reduce_only=%s",
+                self._account_labels[hedger_idx],
+                side,
+                rounded,
+                reduce_only,
+            )
+            logger.debug(
+                "execute_order hedge payload=%s thread=%s",
+                payload,
+                threading.get_ident(),
+            )
+            response = self._execute_with_nonce_retry(
+                self._clients[hedger_idx],
+                payload,
+                self._account_labels[hedger_idx],
+            )
             if isinstance(response, dict) and response.get("error"):
                 logger.error(
                     "Hedge order failed (%s -> %s): %s",
@@ -534,6 +571,7 @@ class VolumeHoldStrategy:
                 rounded,
                 order_ids[0] if order_ids else "N/A",
             )
+            self._record_hedge_fill(hedger_idx, symbol, order_ids)
 
     def _split_base_quantity(
         self,
@@ -672,6 +710,8 @@ class VolumeHoldStrategy:
         return max(self.config.slice_delay_seconds + jitter, 0)
 
     def _resolve_hedgers(self, primary_idx: int) -> List[int]:
+        if not self._hedge_enabled:
+            return []
         indices = list(range(len(self._clients)))
         indices.remove(primary_idx)
         return indices[:2]
@@ -681,13 +721,148 @@ class VolumeHoldStrategy:
         self._current_primary_index = (self._current_primary_index + 1) % len(self._clients)
 
     @staticmethod
-    def _refresh_client_nonce(client: LighterClient) -> None:
+    def _refresh_client_nonce(client: LighterClient) -> Optional[int]:
         refresh = getattr(client, "refresh_nonce", None)
         if callable(refresh):
             try:
-                refresh()
+                return refresh()
             except Exception as exc:
                 logger.debug("Failed to refresh nonce: %s", exc)
+        return None
+
+    def _execute_with_nonce_retry(
+        self,
+        client: LighterClient,
+        order: Dict[str, Any],
+        account_label: str,
+        *,
+        max_retries: int = 3,
+    ) -> Dict[str, Any]:
+        """Execute an order, refreshing nonce when the exchange rejects it."""
+        last_response: Dict[str, Any] = {}
+        for attempt in range(1, max_retries + 1):
+            response = client.execute_order(order)
+            if not (isinstance(response, dict) and response.get("error")):
+                return response
+            last_response = response
+            error_text = str(response.get("error") or "")
+            invalid_nonce = "invalid nonce" in error_text.lower()
+            if invalid_nonce and attempt < max_retries:
+                refreshed = self._refresh_client_nonce(client)
+                refreshed_next = refreshed + 1 if refreshed is not None else None
+                current_nonce = getattr(client, "debug_current_nonce", lambda: None)()
+                logger.warning(
+                    "Invalid nonce for %s (%s %s). Local=%s refreshed=%s (next=%s). Retrying %d/%d...",
+                    account_label,
+                    order.get("symbol"),
+                    order.get("side"),
+                    current_nonce,
+                    refreshed,
+                    refreshed_next,
+                    attempt,
+                    max_retries,
+                )
+                time.sleep(0.25)
+                continue
+            if invalid_nonce:
+                refreshed = self._refresh_client_nonce(client)
+                refreshed_next = refreshed + 1 if refreshed is not None else None
+                current_nonce = getattr(client, "debug_current_nonce", lambda: None)()
+                logger.error(
+                    "Nonce still invalid for %s after %d attempts. Local=%s refreshed=%s (next=%s). Last error: %s",
+                    account_label,
+                    max_retries,
+                    current_nonce,
+                    refreshed,
+                    refreshed_next,
+                    response.get("error"),
+                )
+            break
+        return last_response
+
+    def _record_maker_fill(self, symbol: str, fills: Iterable[Dict[str, float]]) -> None:
+        if not fills:
+            return
+        stats = self._maker_price_stats.setdefault(symbol, {"qty": 0.0, "notional": 0.0})
+        for fill in fills:
+            qty = float(fill.get("quantity") or 0)
+            price = float(fill.get("price") or 0)
+            if qty <= 0 or price <= 0:
+                continue
+            stats["qty"] += qty
+            stats["notional"] += qty * price
+
+    def _record_hedge_fill(self, hedger_idx: int, symbol: str, order_ids: List[str]) -> None:
+        if not order_ids:
+            return
+        client = self._clients[hedger_idx]
+        trades = client.get_fill_history(symbol, limit=20)
+        if isinstance(trades, dict) and trades.get("error"):
+            logger.warning(
+                "Unable to fetch hedge fills for %s (%s): %s",
+                self._account_labels[hedger_idx],
+                symbol,
+                trades["error"],
+            )
+            return
+        stats = self._hedge_price_stats.setdefault(symbol, {}).setdefault(
+            hedger_idx,
+            {"qty": 0.0, "notional": 0.0},
+        )
+        recorded = self._hedge_recorded_trades[hedger_idx]
+        matched = False
+        for trade in trades:
+            order_id = str(trade.get("order_id") or "")
+            if order_id not in order_ids:
+                continue
+            trade_id = str(trade.get("trade_id") or "")
+            if trade_id in recorded:
+                continue
+            qty = float(trade.get("quantity") or trade.get("size") or 0)
+            price = float(trade.get("price") or 0)
+            if qty <= 0 or price <= 0:
+                continue
+            recorded.add(trade_id)
+            stats["qty"] += qty
+            stats["notional"] += qty * price
+            matched = True
+        if not matched:
+            logger.debug(
+                "No hedge fill records matched for %s (order_ids=%s)",
+                self._account_labels[hedger_idx],
+                order_ids,
+            )
+
+    def _print_cycle_summary(self, symbol: str) -> None:
+        maker_stats = self._maker_price_stats.get(symbol)
+        hedger_stats = self._hedge_price_stats.get(symbol, {})
+        if not maker_stats or maker_stats.get("qty", 0) <= 0:
+            return
+        maker_avg = maker_stats["notional"] / maker_stats["qty"]
+        logger.info(
+            "[SUMMARY] %s Maker total %.8f @ %.5f",
+            symbol,
+            maker_stats["qty"],
+            maker_avg,
+        )
+        for hedger_idx, stats in hedger_stats.items():
+            qty = stats.get("qty", 0.0)
+            if qty <= 0:
+                continue
+            avg = stats["notional"] / qty
+            slippage = avg - maker_avg
+            logger.info(
+                "[SUMMARY] Hedge %s total %.8f @ %.5f (slippage %.8f)",
+                self._account_labels[hedger_idx],
+                qty,
+                avg,
+                slippage,
+            )
+        self._maker_price_stats.pop(symbol, None)
+        if symbol in self._hedge_price_stats:
+            self._hedge_price_stats.pop(symbol, None)
+        for record in self._hedge_recorded_trades:
+            record.clear()
 
     @staticmethod
     def _normalize_timestamp(value: Any) -> Optional[float]:

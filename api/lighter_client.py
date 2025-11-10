@@ -483,8 +483,8 @@ class LighterClient(BaseExchangeClient):
 
     # ---- Signer helpers --------------------------------------------------------
     def _ensure_signer_client(self) -> Optional[SimpleSignerClient]:
-        if self._signer is not None:
-            return self._signer
+        # if self._signer is not None:
+        #     return self._signer
 
         if not self.private_key or self.account_index is None:
             return None
@@ -515,17 +515,26 @@ class LighterClient(BaseExchangeClient):
         self._auth_expiry = 0.0
         return signer
 
-    def refresh_nonce(self) -> bool:
-        """Refresh signer nonce from the exchange (best effort)."""
+    def refresh_nonce(self) -> Optional[int]:
+        """Refresh signer nonce from the exchange (best effort).
+
+        Returns the cached nonce (previous value, i.e. next usable minus one) if successful.
+        """
         signer = self._ensure_signer_client()
         if not signer:
-            return False
+            return None
         try:
-            signer._fetch_nonce()
-            return True
+            return signer._fetch_nonce()
         except Exception as exc:  # pragma: no cover - signer fetch rarely fails
             logger.debug("Lighter nonce refresh failed: %s", exc)
-            return False
+            return None
+
+    def debug_current_nonce(self) -> Optional[int]:
+        """Return the last cached nonce for debugging."""
+        signer = self._ensure_signer_client()
+        if not signer:
+            return None
+        return getattr(signer, "_nonce", None)
 
     def _get_auth_token(self) -> Optional[str]:
         signer = self._ensure_signer_client()
@@ -1188,7 +1197,7 @@ class LighterClient(BaseExchangeClient):
                 except (TypeError, ValueError):
                     continue
 
-        return {
+        response = {
             "id": str(client_order_index),
             "clientOrderIndex": client_order_index,
             "symbol": symbol,
@@ -1198,6 +1207,19 @@ class LighterClient(BaseExchangeClient):
             "status": "pending",
             "txHash": tx_response.get("tx_hash") if tx_response else None,
         }
+
+        book = self.get_open_orders(symbol)
+        if isinstance(book, dict) and "error" not in book:
+            found = False
+            for entry in book:
+                cid = entry.get("clientOrderIndex") or entry.get("id")
+                if cid is not None and int(cid) == client_order_index:
+                    found = True
+                    break
+            if not found:
+                response["status"] = "rejected"
+                response["error"] = "postOnly_cancelled"
+        return response
 
     def get_open_orders(self, symbol: Optional[str] = None) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         if not symbol:
