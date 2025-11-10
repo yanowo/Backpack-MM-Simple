@@ -1,0 +1,56 @@
+{
+    "base_url": "https://mainnet.zklighter.elliot.ai",
+    "hold_minutes": 17,
+    "entry_price_offset_bps": 5,
+    "exit_price_offset_bps": 5,
+    "slice_delay_seconds": 8,
+    "slice_delay_jitter_seconds": 4,
+    "slice_fill_timeout": 10,
+    "pause_between_symbols": 30,
+    "random_split_range": [0.45, 0.55],
+    "default_target_notional": 5000,
+    "default_slice_count": 50,
+    "coinlist": [
+        {
+            "symbol": "USELESS",
+            "target_notional": 500,
+            "slice_notional": 50,
+            "notes": "amt per trade"
+        },
+        {
+            "symbol": "FF",
+            "target_notional": 500,
+            "slice_notional": 50
+        },
+        {
+            "symbol": "SKY",
+            "target_notional": 500,
+            "slice_notional": 50
+        },
+        {
+            "symbol": "0G",
+            "target_notional": 500,
+            "slice_notional": 50
+        }
+    ],
+    "accounts": [
+        {
+            "label": "Acct-primary",
+            "api_private_key": "",
+            "api_key_index": 3,
+            "account_address": ""
+        },
+        {
+            "label": "Acct-hedge1",
+            "api_private_key": "",
+            "account_address": "",
+            "api_key_index": 2
+        },
+        {
+            "label": "Acct-hedge2",
+            "api_private_key": "private key",
+            "account_address": "<wallet address>",
+            "api_key_index": 4
+        }
+    ]
+}

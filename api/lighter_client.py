@@ -703,7 +703,7 @@ class LighterClient(BaseExchangeClient):
             else item.get("tick_size") or self._infer_tick_size(item.get("supported_price_decimals"))
         )
 
-        market_id = item.get("market_id") or item.get("id")
+        market_id = item.get("market_id",'0') or item.get("id",'0')
         last_price = item.get("last_trade_price") or item.get("lastPrice")
 
         try:

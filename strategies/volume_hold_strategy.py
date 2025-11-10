@@ -373,6 +373,7 @@ class VolumeHoldStrategy:
             self._dispatch_hedges(plan.symbol, "Bid", filled_base, hedgers, limits, reduce_only=True)
             self._sleep_with_stop(self._slice_delay())
 
+        # TODO：检查三个账号是否为 0
         logger.info("Exit leg for %s finished; remaining base %.8f", plan.symbol, remaining_base)
 
     def _hold_position(self, plan: SymbolPlan) -> None:
