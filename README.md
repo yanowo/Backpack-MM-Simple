@@ -11,6 +11,7 @@
 | **Backpack** | ✅ | ✅ | ✅ | [註冊連結](https://backpack.exchange/refer/yan) |
 | **Aster** | ❌ | ✅ | ✅ | [註冊連結](https://www.asterdex.com/referral/1a7b6E) |
 | **Paradex** | ❌ | ✅ | ✅ | [註冊連結](https://app.paradex.trade/r/yanowo) |
+| **Ligher** | ❌ | ✅ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
@@ -366,3 +367,26 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 - [現貨做市策略](docs/SPOT_MARKET_MAKING.md)
 - [永續合約做市策略](docs/PERP_MARKET_MAKING.md)
 - [Maker-Taker 對沖策略](docs/MAKER_TAKER_HEDGE.md)
+
+---
+
+## 貢獻者
+
+感謝以下貢獻者對本項目的支持：
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://x.com/practice_y11">
+        <img src="https://github.com/yanowo.png" width="100px;" alt="Yan"/><br />
+        <sub><b>Yan</b></sub>
+      </a><br />
+    </td>
+    <td align="center">
+      <a href="https://x.com/0xYuCry">
+        <img src="https://github.com/0xYuCry.png" width="100px;" alt="0xYuCry"/><br />
+        <sub><b>0xYuCry</b></sub>
+      </a><br />
+    </td>
+  </tr>
+</table>
