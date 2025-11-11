@@ -543,20 +543,9 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     if not api_key or not secret_key:
         print("錯誤：未找到對應交易所的 API Key 或 Secret Key，請先設置環境變數或配置檔案。")
         return
-    # lighter 額外檢查：account_index
-    if exchange == 'lighter':
-        # 優先用現有變數/配置/環境變數；若無則提示輸入
-        account_index = (
-            (exchange_config or {}).get('account_index')
-            or os.getenv('LIGHTER_ACCOUNT_INDEX')
-            or input("請輸入 Lighter Account Index: ").strip()
-        )
-        if not account_index:
-            print("錯誤：未提供 Lighter Account Index。")
-            return
-        # 如需後續用到，建議放入 config（如果你有 config 物件）
-        if exchange_config is not None:
-            exchange_config['account_index'] = account_index
+
+    # 初始化 exchange_config
+    exchange_config = None
 
     if exchange == 'backpack':
         exchange_config = {
