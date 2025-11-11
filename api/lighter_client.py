@@ -353,11 +353,11 @@ def _compact_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in data.items() if value is not None}
 
 def _get_lihgter_account_index(address):
-    # 通过钱包地址查找主账户
+    # 通過錢包地址查找主賬户
     from eth_utils import to_checksum_address
     import requests
 
-    # 转换为 EIP-55 校验格式
+    # 轉換為 EIP-55 校驗格式
     checksum_address = to_checksum_address(address.lower())
     url = 'https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value='
     full_url = url + checksum_address
@@ -993,7 +993,7 @@ class LighterClient(BaseExchangeClient):
         locked = max(collateral - available, 0.0)
         total = available + locked
 
-        # Lighter使用USDC作为统一抵押品，同时提供USD/USDT别名以兼容不同策略
+        # Lighter使用USDC作為統一抵押品，同時提供USD/USDT別名以兼容不同策略
         balance_info = {
             "asset": "USDC",
             "available": available,
@@ -1004,8 +1004,8 @@ class LighterClient(BaseExchangeClient):
 
         return {
             "USDC": balance_info,
-            "USD": balance_info,   # 别名，指向同一数据
-            "USDT": balance_info,  # 别名，指向同一数据
+            "USD": balance_info,   # 別名，指向同一數據
+            "USDT": balance_info,  # 別名，指向同一數據
         }
 
     def get_collateral(self, subaccount_id: Optional[str] = None) -> Dict[str, Any]:
@@ -1728,7 +1728,7 @@ class LighterClient(BaseExchangeClient):
             "fee_asset": fee_asset,
             "taker_fee": taker_fee_raw,
             "maker_fee": maker_fee_raw,
-            # 如果没有 fee 项，就用 maker_fee 或 taker_fee 推断出来的，默认不推算
+            # 如果沒有 fee 項，就用 maker_fee 或 taker_fee 推斷出來的，默認不推算
             "fee_rate_inferred": bool(
                 self._allow_fee_rate_inference and not fee_amount_explicit and rate_candidate is not None
             ),
