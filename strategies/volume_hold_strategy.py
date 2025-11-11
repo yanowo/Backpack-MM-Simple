@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import threading
@@ -70,6 +71,7 @@ class MarketConstraints:
     quote_precision: int
     min_order_size: float
     tick_size: float
+    min_quote_value: float = 10.0
 
 
 @dataclass
@@ -209,6 +211,7 @@ class VolumeHoldStrategy:
         self._hedge_backlog: Dict[int, Dict[str, Dict[str, float]]] = {
             idx: {} for idx in range(len(self._clients))
         }
+        self._hedge_cycle_positions: Dict[str, Dict[int, float]] = {}
         self._maker_price_stats: Dict[str, Dict[str, float]] = {}
         self._hedge_price_stats: Dict[str, Dict[int, Dict[str, float]]] = {}
         self._hedge_recorded_trades: List[Set[str]] = [set() for _ in self._clients]
@@ -600,7 +603,17 @@ class VolumeHoldStrategy:
             logger.warning("No hedger accounts configured for %s fill %.8f", symbol, qty)
             return
         allocations = self._split_base_quantity(qty, hedger_indices, limits)
+        min_trade_qty = self._estimate_minimum_trade_qty(symbol, side, hedger_indices, limits)
+        if not reduce_only and len(hedger_indices) > 1:
+            threshold = max(min_trade_qty, limits.min_order_size)
+            if qty < threshold * len(hedger_indices):
+                target_pos = self._select_small_fill_target(hedger_indices)
+                allocations = [0.0 for _ in hedger_indices]
+                allocations[target_pos] = round_to_precision(qty, limits.base_precision)
+        if reduce_only:
+            allocations = self._apply_remaining_caps(symbol, hedger_indices, allocations, qty, limits)
 
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
         for list_index, hedger_idx in enumerate(hedger_indices):
             alloc = allocations[list_index]
             alloc += self._drain_backlog(hedger_idx, symbol, side)
@@ -618,6 +631,17 @@ class VolumeHoldStrategy:
                 self._enqueue_backlog(hedger_idx, symbol, side, alloc)
                 continue
             price = round_to_tick_size(price, limits.tick_size)
+            min_required = self._effective_min_quantity(price, limits)
+            if rounded > 0 and rounded + epsilon < min_required:
+                logger.warning(
+                    "Hedge qty %.8f below venue minimum %.8f at price %.8f for %s, deferring remainder",
+                    rounded,
+                    min_required,
+                    price,
+                    self._account_labels[hedger_idx],
+                )
+                self._enqueue_backlog(hedger_idx, symbol, side, rounded)
+                continue
             payload = {
                 "symbol": symbol,
                 "side": side,
@@ -662,7 +686,7 @@ class VolumeHoldStrategy:
                 rounded,
                 order_ids[0] if order_ids else "N/A",
             )
-            self._record_hedge_fill(hedger_idx, symbol, order_ids)
+            self._record_hedge_fill(hedger_idx, symbol, order_ids, side)
 
     def _split_base_quantity(
         self,
@@ -714,6 +738,87 @@ class VolumeHoldStrategy:
             rounded[-1] = round_to_precision(rounded[-1] + drift, limits.base_precision)
         return rounded
 
+    def _effective_min_quantity(self, price: float, limits: MarketConstraints) -> float:
+        if price <= 0:
+            return limits.min_order_size
+        min_qty = limits.min_order_size
+        min_quote = max(float(getattr(limits, "min_quote_value", 0.0) or 0.0), 0.0)
+        if min_quote > 0:
+            precision = max(limits.base_precision, 0)
+            factor = 10 ** precision
+            required = math.ceil((min_quote / price) * factor) / factor
+            min_qty = max(min_qty, required)
+        return round_to_precision(min_qty, limits.base_precision)
+
+    def _estimate_minimum_trade_qty(
+        self,
+        symbol: str,
+        side: str,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+    ) -> float:
+        if not hedger_indices:
+            return limits.min_order_size
+        reference_idx = hedger_indices[0]
+        price = self._compute_aggressive_price(self._clients[reference_idx], symbol, side)
+        if price is None:
+            return limits.min_order_size
+        return self._effective_min_quantity(price, limits)
+
+    def _apply_remaining_caps(
+        self,
+        symbol: str,
+        hedger_indices: Sequence[int],
+        allocations: List[float],
+        total_quantity: float,
+        limits: MarketConstraints,
+    ) -> List[float]:
+        """Clamp hedge allocations so we only unwind what was previously assigned."""
+        book = self._hedge_cycle_positions.get(symbol)
+        if not book:
+            return allocations
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        remaining = [max(book.get(idx, 0.0), 0.0) for idx in hedger_indices]
+        total_capacity = sum(remaining)
+        if total_capacity <= epsilon:
+            return allocations
+
+        adjusted = [0.0 for _ in allocations]
+        qty_left = total_quantity
+
+        # First pass: clamp planned allocation by each account's remaining exposure.
+        for idx, planned in enumerate(allocations):
+            allowance = min(planned, remaining[idx], qty_left)
+            allowance = round_to_precision(allowance, limits.base_precision)
+            adjusted[idx] = allowance
+            remaining[idx] = max(round_to_precision(remaining[idx] - allowance, limits.base_precision), 0.0)
+            qty_left = max(round_to_precision(qty_left - allowance, limits.base_precision), 0.0)
+
+        if qty_left <= epsilon:
+            return adjusted
+
+        # Second pass: distribute any leftover to whoever still has exposure.
+        for idx in range(len(hedger_indices)):
+            if qty_left <= epsilon:
+                break
+            cap = remaining[idx]
+            if cap <= epsilon:
+                continue
+            add = min(cap, qty_left)
+            add = round_to_precision(add, limits.base_precision)
+            adjusted[idx] = round_to_precision(adjusted[idx] + add, limits.base_precision)
+            remaining[idx] = max(round_to_precision(cap - add, limits.base_precision), 0.0)
+            qty_left = max(round_to_precision(qty_left - add, limits.base_precision), 0.0)
+
+        if qty_left > epsilon:
+            logger.warning(
+                "Symbol %s hedge unwind still missing %.8f after capping; assigning remainder to last hedger.",
+                symbol,
+                qty_left,
+            )
+            adjusted[-1] = round_to_precision(adjusted[-1] + qty_left, limits.base_precision)
+        return adjusted
+
     def _drain_backlog(self, account_idx: int, symbol: str, side: str) -> float:
         store = self._hedge_backlog.setdefault(account_idx, {}).setdefault(symbol, {})
         qty = store.pop(side, 0.0)
@@ -740,6 +845,18 @@ class VolumeHoldStrategy:
         ]
         backlog_stats.sort(key=lambda item: item[0])
         return backlog_stats[0][1]
+
+    def _update_cycle_position(self, symbol: str, hedger_idx: int, delta: float) -> None:
+        if abs(delta) <= 1e-12:
+            return
+        store = self._hedge_cycle_positions.setdefault(symbol, {})
+        next_value = store.get(hedger_idx, 0.0) + delta
+        if next_value <= 1e-12:
+            store.pop(hedger_idx, None)
+        else:
+            store[hedger_idx] = next_value
+        if not store:
+            self._hedge_cycle_positions.pop(symbol, None)
 
     def _flush_backlog(self, symbol: str, hedger_indices: Sequence[int], limits: MarketConstraints) -> None:
         for hedger_idx in hedger_indices:
@@ -784,6 +901,8 @@ class VolumeHoldStrategy:
                     )
                 else:
                     store[side] = 0.0
+                    order_ids = self._extract_order_identifiers(response)
+                    self._record_hedge_fill(hedger_idx, symbol, order_ids, side)
 
 
     def _weighted_average(self, fills: Iterable[Dict[str, float]]) -> float:
@@ -885,6 +1004,7 @@ class VolumeHoldStrategy:
             quote_precision=int(metadata["quote_precision"]),
             min_order_size=float(metadata["min_order_size"]),
             tick_size=float(metadata["tick_size"]),
+            min_quote_value=float(metadata.get("min_quote_value") or 10.0),
         )
         self._market_cache[symbol] = limits
         return limits
@@ -981,9 +1101,13 @@ class VolumeHoldStrategy:
             stats["qty"] += qty
             stats["notional"] += qty * price
 
-    def _record_hedge_fill(self, hedger_idx: int, symbol: str, order_ids: List[str]) -> None:
-        if not order_ids:
-            return
+    def _record_hedge_fill(
+        self,
+        hedger_idx: int,
+        symbol: str,
+        order_ids: List[str],
+        side: Optional[str] = None,
+    ) -> None:
         client = self._clients[hedger_idx]
         trades = client.get_fill_history(symbol, limit=20)
         if isinstance(trades, dict) and trades.get("error"):
@@ -1000,10 +1124,19 @@ class VolumeHoldStrategy:
         )
         recorded = self._hedge_recorded_trades[hedger_idx]
         matched = False
+        id_filter: Set[str] = {str(order_id) for order_id in order_ids if order_id is not None}
+        fallback_threshold = time.time() - 5.0
         for trade in trades:
             order_id = str(trade.get("order_id") or "")
-            if order_id not in order_ids:
-                continue
+            trade_ts = self._normalize_timestamp(trade.get("timestamp"))
+            matches_identifier = bool(id_filter) and order_id in id_filter
+            is_recent = trade_ts is not None and trade_ts >= fallback_threshold
+            if id_filter:
+                if not matches_identifier and not is_recent:
+                    continue
+            else:
+                if not is_recent:
+                    continue
             trade_id = str(trade.get("trade_id") or "")
             if trade_id in recorded:
                 continue
@@ -1014,6 +1147,10 @@ class VolumeHoldStrategy:
             recorded.add(trade_id)
             stats["qty"] += qty
             stats["notional"] += qty * price
+            if side == "Ask":
+                self._update_cycle_position(symbol, hedger_idx, qty)
+            elif side == "Bid":
+                self._update_cycle_position(symbol, hedger_idx, -qty)
             matched = True
         if not matched:
             logger.debug(
@@ -1050,6 +1187,7 @@ class VolumeHoldStrategy:
         self._maker_price_stats.pop(symbol, None)
         if symbol in self._hedge_price_stats:
             self._hedge_price_stats.pop(symbol, None)
+        self._hedge_cycle_positions.pop(symbol, None)
         for record in self._hedge_recorded_trades:
             record.clear()
 
