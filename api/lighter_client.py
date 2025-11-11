@@ -265,8 +265,6 @@ class SimpleSignerClient:
 
         url = f"{self.base_url}/api/v1/sendTxBatch"
 
-        # 根據官方示例：tx_types 和 tx_infos 應該是 JSON 數組字符串
-        # 參考：https://github.com/elliottech/lighter-python/blob/main/examples/send_tx_batch.py
         tx_types = []
         tx_infos = []
 
