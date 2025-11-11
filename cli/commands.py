@@ -49,12 +49,30 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
         ]
         # Paradex 使用 StarkNet 賬户地址和私鑰進行認證
     elif exchange == "lighter":
+        # Lighter私鑰候選項（支持多個環境變量名）
         api_candidates = [
             os.getenv("LIGHTER_PRIVATE_KEY"),
+            os.getenv("LIGHTER_API_KEY"),
         ]
-        secret_candidates = [
+        # Account Index候選項
+        account_index_candidates = [
             os.getenv("LIGHTER_ACCOUNT_INDEX"),
         ]
+        # 如果沒有account_index，嘗試通過地址自動獲取
+        account_index_value = next((value for value in account_index_candidates if value), None)
+        if not account_index_value:
+            lighter_address = os.getenv("LIGHTER_ADDRESS")
+            if lighter_address:
+                try:
+                    from api.lighter_client import _get_lihgter_account_index
+                    account_index_value = str(_get_lihgter_account_index(lighter_address))
+                    logger.info(f"通過地址 {lighter_address} 自動獲取到 account_index: {account_index_value}")
+                except Exception as e:
+                    logger.warning(f"無法通過地址自動獲取account_index: {e}")
+                    account_index_value = None
+
+        # 將account_index作為secret_candidates返回
+        secret_candidates = [account_index_value] if account_index_value else []
     else:
         api_candidates = [
             os.getenv("BACKPACK_KEY"),
@@ -81,28 +99,74 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
     config_api_key = api_key or config.get('api_key')
     config_secret_key = secret_key or config.get('secret_key') or config.get('private_key')
 
-    if config_api_key:
-        config['api_key'] = config_api_key
-    else:
-        config.pop('api_key', None)
+    # Lighter特殊處理：api_key是private_key，secret_key是account_index
+    if exchange == 'lighter':
+        if config_api_key:
+            config['api_private_key'] = config_api_key
+            config.pop('api_key', None)
+        if config_secret_key:
+            config['account_index'] = config_secret_key
+            config.pop('secret_key', None)
+            config.pop('private_key', None)
 
-    if config_secret_key:
-        # lighter 與 paradex 一樣使用 private_key
-        if exchange in ('paradex', 'lighter'):
+        # 確保其他必要的Lighter配置存在
+        if 'base_url' not in config:
+            config['base_url'] = os.getenv('LIGHTER_BASE_URL')
+        if 'api_key_index' not in config:
+            api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
+            if api_key_index:
+                config['api_key_index'] = api_key_index
+        if 'chain_id' not in config:
+            chain_id = os.getenv('LIGHTER_CHAIN_ID')
+            if chain_id:
+                config['chain_id'] = chain_id
+        if 'verify_ssl' not in config:
+            verify_ssl_env = os.getenv('LIGHTER_VERIFY_SSL')
+            if verify_ssl_env is not None:
+                config['verify_ssl'] = verify_ssl_env.lower() not in ('0', 'false', 'no')
+    # Paradex使用private_key
+    elif exchange == 'paradex':
+        if config_api_key:
+            config['api_key'] = config_api_key
+        if config_secret_key:
             config['private_key'] = config_secret_key
             config.pop('secret_key', None)
+    # 其他交易所使用傳統的api_key/secret_key
+    else:
+        if config_api_key:
+            config['api_key'] = config_api_key
         else:
+            config.pop('api_key', None)
+
+        if config_secret_key:
             config['secret_key'] = config_secret_key
             config.pop('private_key', None)
-    else:
-        config.pop('secret_key', None)
-        config.pop('private_key', None)
+        else:
+            config.pop('secret_key', None)
+            config.pop('private_key', None)
 
-    cache_suffix = (
-        f"{config.get('api_key', '')}_{config.get('secret_key', '') or config.get('private_key', '')}"
-        if config.get('api_key') or config.get('secret_key') or config.get('private_key')
-        else 'public'
-    )
+    # 生成緩存鍵
+    if exchange == 'lighter':
+        # Lighter使用api_private_key和account_index
+        cache_suffix = (
+            f"{config.get('api_private_key', '')}_{config.get('account_index', '')}"
+            if config.get('api_private_key') or config.get('account_index')
+            else 'public'
+        )
+    elif exchange == 'paradex':
+        # Paradex使用private_key
+        cache_suffix = (
+            f"{config.get('account_address', '')}_{config.get('private_key', '')}"
+            if config.get('account_address') or config.get('private_key')
+            else 'public'
+        )
+    else:
+        # 其他交易所使用api_key/secret_key
+        cache_suffix = (
+            f"{config.get('api_key', '')}_{config.get('secret_key', '')}"
+            if config.get('api_key') or config.get('secret_key')
+            else 'public'
+        )
     cache_key = f"{exchange}:{cache_suffix}"
 
     if cache_key not in _client_cache:
@@ -197,12 +261,22 @@ def get_balance_command(api_key, secret_key):
                 print("\n當前餘額:")
                 has_balance = False
                 if isinstance(balances, dict):
+                    # 對於Lighter，USDC/USD/USDT是別名，只顯示一次
+                    seen_objects = set()
                     for coin, details in balances.items():
                         if isinstance(details, dict):
+                            # 使用id()檢查是否是同一對象（別名）
+                            obj_id = id(details)
+                            if obj_id in seen_objects:
+                                continue
+                            seen_objects.add(obj_id)
+
                             available = float(details.get('available', 0))
                             locked = float(details.get('locked', 0))
                             if available > 0 or locked > 0:
-                                print(f"{coin}: 可用 {details.get('available', 0)}, 凍結 {details.get('locked', 0)}")
+                                # 對於Lighter，顯示實際資產名稱（USDC）
+                                asset_name = details.get('asset', coin)
+                                print(f"{asset_name}: 可用 {details.get('available', 0)}, 凍結 {details.get('locked', 0)}")
                                 has_balance = True
                     if not has_balance:
                         print("無餘額記錄")
@@ -212,15 +286,42 @@ def get_balance_command(api_key, secret_key):
             # Paradex 的抵押品信息格式不同
             if exchange == 'paradex':
                 if isinstance(collateral, dict) and "error" in collateral:
-                    print(f"獲取賬戶摘要失敗: {collateral['error']}")
+                    print(f"獲取賬户摘要失敗: {collateral['error']}")
                 elif isinstance(collateral, dict) and collateral.get('account'):
-                    print("\n賬戶摘要:")
-                    print(f"賬戶地址: {collateral.get('account', 'N/A')}")
-                    print(f"賬戶價值: {collateral.get('account_value', '0')} USDC")
+                    print("\n賬户摘要:")
+                    print(f"賬户地址: {collateral.get('account', 'N/A')}")
+                    print(f"賬户價值: {collateral.get('account_value', '0')} USDC")
                     print(f"總抵押品: {collateral.get('total_collateral', '0')} USDC")
                     print(f"可用抵押品: {collateral.get('free_collateral', '0')} USDC")
                     print(f"初始保證金: {collateral.get('initial_margin', '0')} USDC")
                     print(f"維持保證金: {collateral.get('maintenance_margin', '0')} USDC")
+            elif exchange == 'lighter':
+                # Lighter 的抵押品信息格式
+                if isinstance(collateral, dict) and "error" in collateral:
+                    print(f"獲取抵押品失敗: {collateral['error']}")
+                elif isinstance(collateral, dict):
+                    total_collateral = collateral.get('totalCollateral', 0)
+                    available_collateral = collateral.get('availableCollateral', 0)
+                    total_asset_value = collateral.get('totalAssetValue', 0)
+                    cross_asset_value = collateral.get('crossAssetValue', 0)
+
+                    print("\n賬户摘要:")
+                    print(f"總抵押品: {total_collateral} USDC")
+                    print(f"可用抵押品: {available_collateral} USDC")
+                    if total_asset_value:
+                        print(f"總資產價值: {total_asset_value} USDC")
+                    if cross_asset_value:
+                        print(f"跨倉資產價值: {cross_asset_value} USDC")
+
+                    # 顯示持倉信息（如果有）
+                    assets = collateral.get('assets', [])
+                    if assets:
+                        print("\n抵押品資產:")
+                        for item in assets:
+                            symbol = item.get('symbol', '')
+                            total = item.get('totalQuantity', '')
+                            available = item.get('availableQuantity', '')
+                            print(f"{symbol}: 總量 {total}, 可用 {available}")
             else:
                 # 其他交易所的抵押品信息
                 if isinstance(collateral, dict) and "error" in collateral:
@@ -472,8 +573,8 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
         }
     elif exchange == 'paradex':
         exchange_config = {
-            'private_key': secret_key,  # Paradex 使用 StarkNet 私钥
-            'account_address': api_key or os.getenv('PARADEX_ACCOUNT_ADDRESS'),  # StarkNet 账户地址
+            'private_key': secret_key,  # Paradex 使用 StarkNet 私鑰
+            'account_address': api_key or os.getenv('PARADEX_ACCOUNT_ADDRESS'),  # StarkNet 賬户地址
             'base_url': os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1'),
         }
     elif exchange == 'lighter':
@@ -1072,7 +1173,7 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_datab
     if not USE_DATABASE:
         print("提示: 資料庫寫入功能已關閉，統計與歷史查詢功能將不可用。")
 
-    # 显示当前交易所
+    # 顯示當前交易所
     exchange_display = {
         'backpack': 'Backpack',
         'aster': 'Aster',

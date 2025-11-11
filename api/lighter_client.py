@@ -993,14 +993,19 @@ class LighterClient(BaseExchangeClient):
         locked = max(collateral - available, 0.0)
         total = available + locked
 
+        # Lighter使用USDC作为统一抵押品，同时提供USD/USDT别名以兼容不同策略
+        balance_info = {
+            "asset": "USDC",
+            "available": available,
+            "locked": locked,
+            "total": total,
+            "collateral": collateral,
+        }
+
         return {
-            "USDC": {
-                "asset": "USDC",
-                "available": available,
-                "locked": locked,
-                "total": total,
-                "collateral": collateral,
-            }
+            "USDC": balance_info,
+            "USD": balance_info,   # 别名，指向同一数据
+            "USDT": balance_info,  # 别名，指向同一数据
         }
 
     def get_collateral(self, subaccount_id: Optional[str] = None) -> Dict[str, Any]:

@@ -16,8 +16,8 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 ## 功能特點
 
-- **Web 控制台**：直觀的圖形化界面，實時監控交易狀態和策略表現
-- **多交易所架構**：支援 Backpack、Aster、Paradex，可擴展至其他交易所
+- **Web 控制枱**：直觀的圖形化界面，實時監控交易狀態和策略表現
+- **多交易所架構**：支援 Backpack、Aster、Paradex、Lighter，可擴展至其他交易所
 - **三種策略模式**：
   - [現貨做市](docs/SPOT_MARKET_MAKING.md)：多層訂單 + 智能重平衡
   - [永續做市](docs/PERP_MARKET_MAKING.md)：倉位管理 + 風險中性
@@ -62,7 +62,7 @@ lemon_trader/
 │   ├── __init__.py
 │   └── commands.py       # 命令行命令
 │
-├── web/                  # Web 控制台界面
+├── web/                  # Web 控制枱界面
 │   ├── __init__.py
 │   ├── server.py         # Flask Web 服務器
 │   ├── templates/        # HTML 模板
@@ -74,9 +74,9 @@ lemon_trader/
 │           └── app.js
 │
 ├── docs/                 # 策略文檔
-│   ├── SPOT_MARKET_MAKING.md      # 現貨做市策略說明
-│   ├── PERP_MARKET_MAKING.md      # 永續合約做市策略說明
-│   └── MAKER_TAKER_HEDGE.md       # Maker-Taker 對沖策略說明
+│   ├── SPOT_MARKET_MAKING.md      # 現貨做市策略説明
+│   ├── PERP_MARKET_MAKING.md      # 永續合約做市策略説明
+│   └── MAKER_TAKER_HEDGE.md       # Maker-Taker 對沖策略説明
 │
 ├── config.py             # 配置文件
 ├── logger.py             # 日誌配置
@@ -140,11 +140,15 @@ PARADEX_BASE_URL=https://api.prod.paradex.trade/v1
 # WS 代理格式 http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
 PARADEX_PROXY_WEBSOCKET=
 
+# Lighter Exchange
 LIGHTER_PRIVATE_KEY=your_private_key
 LIGHTER_PUBLIC_KEY=your_public_key
 LIGHTER_API_KEY_INDEX=your_API_key_index
 LIGHTER_ADDRESS=<your_wallet_address (ignored if LIGHTER_ACCOUNT_INDEX is set)>
-# 如果使用主账户，直接将钱包地址填入 LIGHTER_ADDRESS 环境变量即可，无需查找 account_index。如果你需要使用子账户，请在浏览器中打开 https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value=你的钱包地址，在返回结果中搜索 "account_index"手动查找并填写对应的 account_index。。
+# 如果使用主賬户，直接將錢包地址填入 LIGHTER_ADDRESS 環境變量即可，無需查找 account_index
+# 如果你需要使用子賬户，請按照以下步驟查找 account_index
+# 請在瀏覽器中打開 https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value=你的錢包地址
+# 在返回結果中搜索 "account_index"手動查找並填寫對應的 account_index
 LIGHTER_ACCOUNT_INDEX=
 LIGHTER_BASE_URL=https://mainnet.zklighter.elliot.ai
 
@@ -155,23 +159,23 @@ LIGHTER_BASE_URL=https://mainnet.zklighter.elliot.ai
 
 本程序提供三種運行模式，您可以根據需求選擇：
 
-### 運行模式說明
+### 運行模式説明
 
 | 模式 | 命令 | 適用場景 | 特點 |
 |------|------|---------|------|
-| **Web 控制台** | `python run.py --web` | 可視化操作和監控 | 圖形界面、實時數據、易於上手 |
+| **Web 控制枱** | `python run.py --web` | 可視化操作和監控 | 圖形界面、實時數據、易於上手 |
 | **命令行界面 (CLI)** | `python run.py --cli` | 交互式配置 | 菜單導航、逐步配置、適合測試 |
 | **快速啟動** | `python run.py [參數]` | 自動化運行 | 直接啟動、適合腳本化部署 |
 
-> **推薦順序**：新手建議先用 Web 控制台熟悉功能 → CLI 測試參數 → 快速啟動自動化運行
+> **推薦順序**：新手建議先用 Web 控制枱熟悉功能 → CLI 測試參數 → 快速啟動自動化運行
 
 ---
 
-### 模式一：Web 控制台
+### 模式一：Web 控制枱
 
-程序提供了直觀的 Web 控制台界面，方便可視化管理和監控交易策略。
+程序提供了直觀的 Web 控制枱界面，方便可視化管理和監控交易策略。
 
-![Web 控制台界面](dashboard.png)
+![Web 控制枱界面](dashboard.png)
 
 #### 啟動步驟
 
@@ -180,7 +184,7 @@ LIGHTER_BASE_URL=https://mainnet.zklighter.elliot.ai
 python run.py --web
 ```
 
-#### 訪問控制台
+#### 訪問控制枱
 
 啟動後，在瀏覽器中訪問：
 ```
@@ -199,7 +203,7 @@ http://localhost:5000
   - 永續合約參數（目標倉位、最大倉位、止損止盈等）
   - 現貨重平衡參數
 - **數據展示**：
-  - 當前價格和余額（只顯示報價資產 USDT/USDC/USD）
+  - 當前價格和餘額（只顯示報價資產 USDT/USDC/USD）
   - 交易統計（買賣筆數、成交量、手續費）
   - 盈虧分析（已實現/未實現盈虧、累計盈虧、磨損率）
   - 運行時間統計
@@ -207,7 +211,7 @@ http://localhost:5000
 #### 使用示例
 
 1. 啟動 Web 服務器
-2. 在瀏覽器打開控制台
+2. 在瀏覽器打開控制枱
 3. 配置環境變量（API Key 需提前在 .env 文件中設置）
 4. 選擇交易所和交易對
 5. 設置策略參數
@@ -289,13 +293,13 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 ```
 
 > **適合場景**：自動化部署、定時任務、批量運行  
-> **完整示例和參數說明請查看**：[策略文檔](#-策略文檔)
+> **完整示例和參數説明請查看**：[策略文檔](#-策略文檔)
 
 ---
 
 ### 策略文檔
 
-詳細的策略說明、參數配置和最佳實踐：
+詳細的策略説明、參數配置和最佳實踐：
 - [現貨做市策略](docs/SPOT_MARKET_MAKING.md) - 多層訂單、智能重平衡
 - [永續合約做市策略](docs/PERP_MARKET_MAKING.md) - 倉位管理、風險中性
 - [Maker-Taker 對沖策略](docs/MAKER_TAKER_HEDGE.md) - 即時對沖、零持倉
@@ -328,7 +332,7 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 - `--base-asset-target`: 基礎資產目標比例 (0-100)
 - `--rebalance-threshold`: 重平觸發閾值
 
-> **完整參數說明和使用示例請查看各策略文檔**
+> **完整參數説明和使用示例請查看各策略文檔**
 
 ### 資料庫寫入選項
 
