@@ -422,7 +422,8 @@ class VolumeHoldStrategy:
             self._dispatch_hedges(plan.symbol, "Bid", filled_base, hedgers, limits, reduce_only=True)
             self._sleep_with_stop(self._slice_delay())
 
-        # TODO：检查三个账号是否为 0
+        if hedgers:
+            self._flush_backlog(plan.symbol, hedgers, limits)
         logger.info("Exit leg for %s finished; remaining base %.8f", plan.symbol, remaining_base)
 
     def _hold_position(self, plan: SymbolPlan) -> None:
@@ -666,6 +667,13 @@ class VolumeHoldStrategy:
         if bucket_count == 1:
             return [total_quantity]
 
+        min_total_needed = limits.min_order_size * bucket_count
+        if total_quantity < min_total_needed:
+            allocations = [0.0 for _ in hedger_indices]
+            target_pos = self._select_small_fill_target(hedger_indices)
+            allocations[target_pos] = total_quantity
+            return allocations
+
         low, high = self.config.random_split_range
         raw_allocations: List[float]
         if bucket_count == 2:
@@ -690,8 +698,8 @@ class VolumeHoldStrategy:
 
         # Adjust final bucket to fix rounding drift
         total_rounded = sum(rounded)
-        drift = round(total_quantity - total_rounded, limits.base_precision)
-        if abs(drift) >= 10 ** (-limits.base_precision):
+        drift = round_to_precision(total_quantity - total_rounded, limits.base_precision)
+        if abs(drift) >= max(1e-12, 10 ** (-limits.base_precision)):
             rounded[-1] = round_to_precision(rounded[-1] + drift, limits.base_precision)
         return rounded
 
@@ -705,6 +713,66 @@ class VolumeHoldStrategy:
             return
         store = self._hedge_backlog.setdefault(account_idx, {}).setdefault(symbol, {})
         store[side] = store.get(side, 0.0) + qty
+
+    def _peek_backlog(self, account_idx: int) -> float:
+        total = 0.0
+        symbol_map = self._hedge_backlog.get(account_idx, {})
+        for side_map in symbol_map.values():
+            total += sum(abs(val) for val in side_map.values())
+        return total
+
+    def _select_small_fill_target(self, hedger_indices: Sequence[int]) -> int:
+        if not hedger_indices:
+            return 0
+        backlog_stats = [
+            (self._peek_backlog(idx), pos) for pos, idx in enumerate(hedger_indices)
+        ]
+        backlog_stats.sort(key=lambda item: item[0])
+        return backlog_stats[0][1]
+
+    def _flush_backlog(self, symbol: str, hedger_indices: Sequence[int], limits: MarketConstraints) -> None:
+        for hedger_idx in hedger_indices:
+            store = self._hedge_backlog.get(hedger_idx, {}).get(symbol)
+            if not store:
+                continue
+            for side, qty in list(store.items()):
+                if qty <= 0:
+                    continue
+                rounded = max(round_to_precision(qty, limits.base_precision), limits.min_order_size)
+                price = self._compute_aggressive_price(self._clients[hedger_idx], symbol, side)
+                if price is None:
+                    logger.error("Unable to flush backlog for %s (%s) due to missing price", symbol, self._account_labels[hedger_idx])
+                    continue
+                payload = {
+                    "symbol": symbol,
+                    "side": side,
+                    "orderType": "Limit",
+                    "quantity": str(rounded),
+                    "price": str(round_to_tick_size(price, limits.tick_size)),
+                    "reduceOnly": True,
+                    "timeInForce": "GTC",
+                    "price_protection": False,
+                }
+                logger.info(
+                    "Flushing backlog: account=%s side=%s qty=%.8f",
+                    self._account_labels[hedger_idx],
+                    side,
+                    rounded,
+                )
+                response = self._execute_with_nonce_retry(
+                    self._clients[hedger_idx],
+                    payload,
+                    self._account_labels[hedger_idx],
+                )
+                if isinstance(response, dict) and response.get("error"):
+                    logger.error(
+                        "Backlog flush failed (%s %s): %s",
+                        self._account_labels[hedger_idx],
+                        symbol,
+                        response["error"],
+                    )
+                else:
+                    store[side] = 0.0
 
 
     def _weighted_average(self, fills: Iterable[Dict[str, float]]) -> float:
