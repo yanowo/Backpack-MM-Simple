@@ -279,13 +279,66 @@ class GridStrategy(MarketMaker):
         # 批量下單
         placed_orders = 0
         if orders_to_place:
-            logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
-            result = self.client.execute_order_batch(orders_to_place)
+            # 檢查客戶端是否支持批量下單
+            has_batch_method = hasattr(self.client, 'execute_order_batch') and callable(getattr(self.client, 'execute_order_batch'))
 
-            if isinstance(result, dict) and "error" in result:
-                logger.error("批量下單失敗: %s", result['error'])
-                # 如果批量下單失敗，回退到逐個下單
-                logger.info("回退到逐個下單模式...")
+            if has_batch_method:
+                logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
+                result = self.client.execute_order_batch(orders_to_place)
+
+                if isinstance(result, dict) and "error" in result:
+                    logger.error("批量下單失敗: %s", result['error'])
+                    # 如果批量下單失敗，回退到逐個下單
+                    logger.info("回退到逐個下單模式...")
+                    for i, order in enumerate(orders_to_place):
+                        price = float(order['price'])
+                        side = order['side']
+                        result_single = self.client.execute_order(order)
+
+                        if isinstance(result_single, dict) and "error" not in result_single:
+                            order_id = result_single.get('id')
+                            self._record_grid_order(order_id, price, side, self.order_quantity)
+                            placed_orders += 1
+                            logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
+                        else:
+                            logger.error("掛單失敗: %s", result_single.get('error', 'unknown'))
+                else:
+                    # 批量下單成功，記錄所有訂單
+                    if isinstance(result, list):
+                        # 創建原始訂單的映射表 (price, side) -> order
+                        order_map = {}
+                        for order in orders_to_place:
+                            key = (float(order['price']), order['side'])
+                            order_map[key] = order
+
+                        for order_result in result:
+                            if 'id' in order_result:
+                                order_id = order_result['id']
+                                # 從返回結果中獲取價格和方向
+                                result_price = float(order_result.get('price', 0))
+                                result_side = order_result.get('side', '')
+
+                                # 查找對應的原始訂單
+                                key = (result_price, result_side)
+                                if key in order_map:
+                                    original_order = order_map[key]
+                                    price = float(original_order['price'])
+                                    side = original_order['side']
+                                    quantity = float(original_order['quantity'])
+                                    self._record_grid_order(order_id, price, side, quantity)
+                                    placed_orders += 1
+                                else:
+                                    # 如果無法匹配，使用返回結果中的數據
+                                    logger.warning("無法匹配訂單 %s，使用返回數據", order_id)
+                                    price = result_price
+                                    side = result_side
+                                    quantity = float(order_result.get('quantity', self.order_quantity))
+                                    self._record_grid_order(order_id, price, side, quantity)
+                                    placed_orders += 1
+                        logger.info("批量下單成功: %d 個訂單", placed_orders)
+            else:
+                # 客戶端不支持批量下單，直接逐個下單
+                logger.info("該交易所不支持批量下單，使用逐個下單模式: %d 個訂單", len(orders_to_place))
                 for i, order in enumerate(orders_to_place):
                     price = float(order['price'])
                     side = order['side']
@@ -298,40 +351,6 @@ class GridStrategy(MarketMaker):
                         logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
                     else:
                         logger.error("掛單失敗: %s", result_single.get('error', 'unknown'))
-            else:
-                # 批量下單成功，記錄所有訂單
-                if isinstance(result, list):
-                    # 創建原始訂單的映射表 (price, side) -> order
-                    order_map = {}
-                    for order in orders_to_place:
-                        key = (float(order['price']), order['side'])
-                        order_map[key] = order
-
-                    for order_result in result:
-                        if 'id' in order_result:
-                            order_id = order_result['id']
-                            # 從返回結果中獲取價格和方向
-                            result_price = float(order_result.get('price', 0))
-                            result_side = order_result.get('side', '')
-
-                            # 查找對應的原始訂單
-                            key = (result_price, result_side)
-                            if key in order_map:
-                                original_order = order_map[key]
-                                price = float(original_order['price'])
-                                side = original_order['side']
-                                quantity = float(original_order['quantity'])
-                                self._record_grid_order(order_id, price, side, quantity)
-                                placed_orders += 1
-                            else:
-                                # 如果無法匹配，使用返回結果中的數據
-                                logger.warning("無法匹配訂單 %s，使用返回數據", order_id)
-                                price = result_price
-                                side = result_side
-                                quantity = float(order_result.get('quantity', self.order_quantity))
-                                self._record_grid_order(order_id, price, side, quantity)
-                                placed_orders += 1
-                    logger.info("批量下單成功: %d 個訂單", placed_orders)
 
         logger.info("網格初始化完成: 共放置 %d 個訂單", placed_orders)
         self.grid_initialized = True

@@ -138,7 +138,7 @@ def main():
         base_url = os.getenv('LIGHTER_BASE_URL')
         account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
         account_address = os.getenv('LIGHTER_ADDRESS')
-        if not account_index:
+        if not account_index and account_address:
             from api.lighter_client import _get_lihgter_account_index
             account_index = _get_lihgter_account_index(account_address)
         api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
@@ -152,25 +152,6 @@ def main():
         }
         if chain_id is not None:
             exchange_config['chain_id'] = chain_id
-        if not api_key:
-            logger.error("缺少 Lighter 私鑰，請使用 --api-key 或環境變量 LIGHTER_PRIVATE_KEY 提供")
-            sys.exit(1)
-        if not exchange_config.get('account_index'):
-            logger.error("缺少 Lighter Account Index，請透過環境變量 LIGHTER_ACCOUNT_INDEX 提供")
-    elif exchange == 'paradex':
-        private_key = os.getenv('PARADEX_PRIVATE_KEY', '')  # StarkNet 私鑰
-        account_address = os.getenv('PARADEX_ACCOUNT_ADDRESS')  # StarkNet 帳户地址
-        ws_proxy = os.getenv('PARADEX_PROXY_WEBSOCKET')
-        base_url = os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1')
-
-        secret_key = private_key
-        api_key = ''  # Paradex 不需要 API Key
-
-        exchange_config = {
-            'private_key': private_key,
-            'account_address': account_address,
-            'base_url': base_url,
-        }
     else:
         logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex' 或 'lighter'")
         sys.exit(1)
@@ -417,6 +398,11 @@ def main():
         print("  --web     啟動Web界面")
         print("  --cli     啟動命令行界面")
         print("  直接指定  --symbol 和 --spread 參數運行做市策略")
+        print("\n支持的交易所：")
+        print("  backpack  Backpack 交易所 (默認)")
+        print("  aster     Aster 永續合約交易所")
+        print("  paradex   Paradex 永續合約交易所")
+        print("  lighter   Lighter 永續合約交易所")
         print("\n資料庫參數：")
         print("  --enable-db            啟用資料庫寫入")
         print("  --disable-db           停用資料庫寫入 (預設)")
@@ -425,9 +411,30 @@ def main():
         print("  --disable-rebalance       關閉重平功能")
         print("  --base-asset-target 30    設置基礎資產目標比例為30%")
         print("  --rebalance-threshold 15  設置重平觸發閾值為15%")
-        print("\n範例：")
-        print("  python run.py --symbol SOL_USDC --spread 0.5 --enable-rebalance --base-asset-target 25 --rebalance-threshold 12")
-        print("  python run.py --symbol SOL_USDC --spread 0.5 --market-type perp --target-position 1.0 --max-position 2")
+        print("\n=== 範例：現貨做市 ===")
+        print("  # Backpack 現貨做市")
+        print("  python run.py --exchange backpack --symbol SOL_USDC --spread 0.5")
+        print("\n=== 範例：現貨網格 ===")
+        print("  # Backpack 現貨網格（自動價格範圍）")
+        print("  python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --grid-num 10")
+        print("  # Backpack 現貨網格（手動設定價格範圍）")
+        print("  python run.py --exchange backpack --symbol SOL_USDC --strategy grid --grid-lower 140 --grid-upper 160 --grid-num 10")
+        print("\n=== 範例：永續合約做市 ===")
+        print("  # Aster 永續合約做市")
+        print("  python run.py --exchange aster --symbol BTCUSDT --spread 0.3 --market-type perp --max-position 0.5")
+        print("  # Paradex 永續合約做市")
+        print("  python run.py --exchange paradex --symbol BTC-USD-PERP --spread 0.3 --market-type perp --max-position 0.5")
+        print("  # Lighter 永續合約做市")
+        print("  python run.py --exchange lighter --symbol BTCUSDT --spread 0.3 --market-type perp --max-position 0.5")
+        print("\n=== 範例：永續合約網格 ===")
+        print("  # Aster 永續網格（中性網格，自動價格）")
+        print("  python run.py --exchange aster --symbol BTCUSDT --strategy perp_grid --auto-price --grid-num 10 --grid-type neutral")
+        print("  # Paradex 永續網格（做多網格）")
+        print("  python run.py --exchange paradex --symbol BTC-USD-PERP --strategy perp_grid --grid-lower 45000 --grid-upper 50000 --grid-num 10 --grid-type long")
+        print("  # Lighter 永續網格（做空網格）")
+        print("  python run.py --exchange lighter --symbol BTCUSDT --strategy perp_grid --grid-lower 45000 --grid-upper 50000 --grid-num 10 --grid-type short")
+        print("  # 永續網格（帶止損止盈）")
+        print("  python run.py --exchange aster --symbol ETHUSDT --strategy perp_grid --auto-price --grid-num 15 --stop-loss 100 --take-profit 200")
         print("\n使用 --help 查看完整幫助")
 
 if __name__ == "__main__":
