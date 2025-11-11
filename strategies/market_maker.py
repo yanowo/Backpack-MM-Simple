@@ -1994,7 +1994,7 @@ class MarketMaker:
         )
 
         if self.active_buy_orders and self.active_sell_orders:
-            buy_price = float(self.active_buy_orders[0].get('price', 0))
+            buy_price = float(self.active_buy_orders[-1].get('price', 0))
             sell_price = float(self.active_sell_orders[0].get('price', 0))
             spread = sell_price - buy_price
             spread_pct = (spread / buy_price * 100) if buy_price > 0 else 0
