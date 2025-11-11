@@ -93,7 +93,7 @@ class VolumeHoldStrategyConfig:
     random_split_range: Tuple[float, float] = (0.45, 0.55)
     run_once: bool = False
     enable_hedge: bool = True
-    primary_time_in_force: str = "FOK"
+    primary_time_in_force: str = "IOC"
 
     @classmethod
     def from_file(cls, path: str) -> "VolumeHoldStrategyConfig":
@@ -187,7 +187,7 @@ class VolumeHoldStrategyConfig:
             random_split_range=(low, high),
             run_once=bool(payload.get("run_once", False)),
             enable_hedge=bool(payload.get("enable_hedge", True)),
-            primary_time_in_force=str(payload.get("primary_time_in_force", "GTC")),
+            primary_time_in_force=str(payload.get("primary_time_in_force", "IOC")),
         )
         if not config.base_url and any(acc.base_url is None for acc in accounts):
             raise StrategyConfigError("base_url missing; configure global base_url or per-account base_url entries.")
@@ -213,7 +213,7 @@ class VolumeHoldStrategy:
         self._hedge_price_stats: Dict[str, Dict[int, Dict[str, float]]] = {}
         self._hedge_recorded_trades: List[Set[str]] = [set() for _ in self._clients]
         self._hedge_enabled = bool(config.enable_hedge)
-        self._primary_time_in_force = str(config.primary_time_in_force or "GTC").upper()
+        self._primary_time_in_force = str(config.primary_time_in_force or "IOC").upper()
 
     # ------------------------------------------------------------------ lifecycle
     def stop(self) -> None:
@@ -461,12 +461,16 @@ class VolumeHoldStrategy:
             post_only,
             reduce_only,
         )
-        time_in_force = getattr(self, "_primary_time_in_force", "GTC")
+        time_in_force = getattr(self, "_primary_time_in_force", "IOC")
         tif_upper = time_in_force.upper()
         post_only_flag = post_only
         if tif_upper in ("FOK", "IOC") and post_only_flag:
             logger.warning("PostOnly disabled because timeInForce=%s is incompatible.", tif_upper)
             post_only_flag = False
+        # Lighter signer requires NilOrderExpiry (0) for IOC/FOK limit orders, otherwise it rejects the request.
+        order_expiry: Optional[int] = None
+        if tif_upper in ("FOK", "IOC"):
+            order_expiry = 0
         order = {
             "symbol": symbol,
             "side": side,
@@ -477,6 +481,8 @@ class VolumeHoldStrategy:
             "reduceOnly": reduce_only,
             "timeInForce": tif_upper,
         }
+        if order_expiry is not None:
+            order["orderExpiry"] = order_expiry
         logger.debug(
             "execute_order payload=%s thread=%s",
             order,

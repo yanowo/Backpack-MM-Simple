@@ -1164,7 +1164,9 @@ class LighterClient(BaseExchangeClient):
             if scaled_trigger_price is None:
                 return {"error": "Invalid trigger price"}
 
-        expiry_raw = order_details.get("orderExpiry") or order_details.get("order_expiry")
+        expiry_raw = order_details.get("orderExpiry")
+        if expiry_raw is None:
+            expiry_raw = order_details.get("order_expiry")
         default_expiry = (
             SimpleSignerClient.DEFAULT_IOC_EXPIRY
             if order_type == SimpleSignerClient.ORDER_TYPE_MARKET
