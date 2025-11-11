@@ -729,6 +729,181 @@ class ParadexClient(BaseExchangeClient):
         # 返回原始結果或錯誤
         return result
 
+    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> Any:
+        """批量執行訂單
+
+        Paradex 批量下單限制：每批最多 10 個訂單
+
+        Args:
+            orders_details: 訂單詳情列表
+
+        Returns:
+            成功訂單列表或錯誤信息
+        """
+        if not orders_details:
+            return {"error": "訂單列表為空"}
+
+        # Paradex 限制每批最多 10 個訂單
+        if len(orders_details) > 10:
+            logger.warning("Paradex 批量下單限制為 10 個訂單，當前 %d 個，將拆分為多批", len(orders_details))
+
+        # 將訂單拆分為多批（每批最多 10 個）
+        batch_size = 10
+        all_results = []
+        all_errors = []
+
+        for batch_start in range(0, len(orders_details), batch_size):
+            batch = orders_details[batch_start:batch_start + batch_size]
+
+            # 構建批量訂單請求
+            batch_orders = []
+
+            for order_details in batch:
+                symbol = order_details.get("symbol")
+                if not symbol:
+                    logger.warning("跳過無效訂單: 缺少交易對")
+                    all_errors.append({"error": "缺少交易對", "order": order_details})
+                    continue
+
+                side = order_details.get("side", "").upper()
+                if side not in ["BUY", "SELL", "BID", "ASK"]:
+                    logger.warning("跳過無效訂單: 無效的買賣方向 %s", side)
+                    all_errors.append({"error": f"無效的買賣方向: {side}", "order": order_details})
+                    continue
+
+                # 標準化方向
+                if side == "BID":
+                    side = "BUY"
+                elif side == "ASK":
+                    side = "SELL"
+
+                order_type = order_details.get("orderType") or order_details.get("type", "LIMIT")
+                size = order_details.get("quantity") or order_details.get("size")
+
+                if not size:
+                    logger.warning("跳過無效訂單: 缺少數量")
+                    all_errors.append({"error": "缺少數量", "order": order_details})
+                    continue
+
+                # 生成簽名時間戳（毫秒）
+                signature_timestamp = int(time.time() * 1000)
+
+                # 構建訂單數據用於簽名
+                order_data_for_signature = {
+                    "market": symbol,
+                    "side": side,
+                    "type": order_type.upper(),
+                    "size": float(size),
+                }
+
+                # 限價單需要價格
+                if order_type.upper() == "LIMIT":
+                    price = order_details.get("price")
+                    if price:
+                        order_data_for_signature["price"] = float(price)
+                    else:
+                        logger.warning("跳過無效訂單: 限價單缺少價格")
+                        all_errors.append({"error": "限價單缺少價格", "order": order_details})
+                        continue
+
+                # 生成訂單簽名
+                try:
+                    signature = self._sign_order(order_data_for_signature, signature_timestamp)
+                except Exception as e:
+                    logger.error("訂單簽名失敗: %s", e)
+                    all_errors.append({"error": f"訂單簽名失敗: {e}", "order": order_details})
+                    continue
+
+                # 構建單個訂單 payload
+                order_payload = {
+                    "market": symbol,
+                    "side": side,
+                    "type": order_type.upper(),
+                    "size": str(size),
+                    "signature": signature,
+                    "signature_timestamp": signature_timestamp,
+                }
+
+                # 添加價格（限價單）
+                if order_type.upper() == "LIMIT" and "price" in order_data_for_signature:
+                    order_payload["price"] = str(order_data_for_signature["price"])
+
+                # 處理 instruction（時間有效性）
+                time_in_force = order_details.get("timeInForce", "GTC").upper()
+                post_only = order_details.get("postOnly", False)
+
+                if post_only:
+                    order_payload["instruction"] = "POST_ONLY"
+                elif time_in_force == "IOC":
+                    order_payload["instruction"] = "IOC"
+                else:
+                    order_payload["instruction"] = "GTC"
+
+                # 可選參數
+                if "clientId" in order_details:
+                    order_payload["client_id"] = order_details["clientId"]
+
+                # 處理 reduceOnly 標誌
+                flags = []
+                if order_details.get("reduceOnly"):
+                    flags.append("REDUCE_ONLY")
+                if flags:
+                    order_payload["flags"] = flags
+
+                batch_orders.append(order_payload)
+
+            # 如果這批沒有有效訂單，跳過
+            if not batch_orders:
+                continue
+
+            # 發送批量請求
+            logger.info("發送批量訂單請求: %d 個訂單", len(batch_orders))
+
+            # Paradex API 期望直接接收訂單數組，而不是包裝在對象中
+            result = self.make_request(
+                "POST",
+                "/orders/batch",
+                instruction=True,
+                data=batch_orders,  # 直接發送數組
+                retry_count=self.max_retries
+            )
+
+            if isinstance(result, dict):
+                # 處理成功的訂單
+                if "orders" in result:
+                    all_results.extend(result["orders"])
+                    logger.info("批量下單成功: %d 個訂單", len(result["orders"]))
+
+                # 處理失敗的訂單（過濾掉 None 值）
+                if "errors" in result and result["errors"]:
+                    # Paradex API 返回的 errors 數組中，成功的訂單對應 None，失敗的訂單才有錯誤信息
+                    real_errors = [e for e in result["errors"] if e is not None]
+                    if real_errors:
+                        all_errors.extend(real_errors)
+                        logger.warning("批量下單部分失敗: %d 個錯誤", len(real_errors))
+
+                # 如果整個批次失敗
+                if "error" in result and "orders" not in result:
+                    logger.error("批量下單失敗: %s", result["error"])
+                    all_errors.append({"error": result["error"], "batch": batch_orders})
+
+        # 返回結果
+        if all_results:
+            # 有成功的訂單
+            if all_errors:
+                # 部分成功
+                return {
+                    "orders": all_results,
+                    "errors": all_errors,
+                    "partial_success": True
+                }
+            else:
+                # 全部成功
+                return all_results
+        else:
+            # 全部失敗
+            return {"error": "批量下單全部失敗", "errors": all_errors}
+
     def get_open_orders(self, symbol: Optional[str] = None) -> Any:
         """獲取開放訂單"""
         params = {}
@@ -760,13 +935,24 @@ class ParadexClient(BaseExchangeClient):
 
         return result
 
-    def cancel_all_orders(self, symbol: str) -> Dict[str, Any]:
-        """取消所有訂單"""
+    def cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """批量取消訂單
+
+        Args:
+            symbol: 交易對符號（可選）。如果提供，只取消該市場的訂單；否則取消所有訂單
+
+        Returns:
+            取消結果
+        """
+        params = {}
+        if symbol:
+            params["market"] = symbol
+
         result = self.make_request(
             "DELETE",
             "/orders",
             instruction=True,
-            data={"market": symbol},
+            params=params,
             retry_count=self.max_retries
         )
 

@@ -306,16 +306,64 @@ class PerpGridStrategy(PerpetualMarketMaker):
                             logger.error("掛單失敗: %s", result_single.get('error', 'unknown'))
                 else:
                     # 批量下單成功，記錄所有訂單
+                    # 處理不同交易所的響應格式
+                    orders_list = []
+
                     if isinstance(result, list):
-                        for order_result in result:
-                            if 'id' in order_result:
-                                order_id = order_result['id']
-                                price = float(order_result.get('price', 0))
-                                side = order_result.get('side', '')
-                                quantity = float(order_result.get('quantity', self.order_quantity))
-                                self._record_grid_order(order_id, price, side, quantity)
-                                placed_orders += 1
-                        logger.info("批量下單成功: %d 個訂單", placed_orders)
+                        # 直接返回訂單數組（Backpack、Lighter、Paradex 成功時）
+                        orders_list = result
+                    elif isinstance(result, dict):
+                        # 包含 orders 字段的響應（Paradex 部分成功時）
+                        if "orders" in result:
+                            orders_list = result["orders"]
+                            # 記錄錯誤（過濾掉 None 值）
+                            if "errors" in result and result.get("errors"):
+                                # Paradex API 返回的 errors 中，成功的訂單對應 None
+                                real_errors = [e for e in result["errors"] if e is not None]
+                                if real_errors:
+                                    logger.warning("批量下單部分失敗，錯誤數量: %d", len(real_errors))
+                                    for error_info in real_errors[:3]:  # 只記錄前3個錯誤
+                                        logger.warning("錯誤詳情: %s", error_info)
+
+                    # 記錄所有成功的訂單
+                    for order_result in orders_list:
+                        if not isinstance(order_result, dict):
+                            continue
+
+                        # 獲取訂單ID（兼容不同字段名）
+                        order_id = (
+                            order_result.get('id') or
+                            order_result.get('order_id') or
+                            order_result.get('orderId')
+                        )
+
+                        if not order_id:
+                            logger.warning("訂單結果缺少ID，跳過: %s", order_result)
+                            continue
+
+                        # 獲取價格
+                        price = float(order_result.get('price', 0))
+
+                        # 獲取方向（兼容不同格式）
+                        side = order_result.get('side', '')
+                        if side.upper() in ['BUY', 'LONG']:
+                            side = 'Bid'
+                        elif side.upper() in ['SELL', 'SHORT', 'ASK']:
+                            side = 'Ask'
+
+                        # 獲取數量（兼容不同字段名）
+                        quantity_raw = (
+                            order_result.get('quantity') or
+                            order_result.get('size') or
+                            order_result.get('origQty') or
+                            self.order_quantity
+                        )
+                        quantity = float(quantity_raw)
+
+                        self._record_grid_order(order_id, price, side, quantity)
+                        placed_orders += 1
+
+                    logger.info("批量下單成功: %d 個訂單", placed_orders)
             else:
                 # 客戶端不支持批量下單，直接逐個下單
                 logger.info("該交易所不支持批量下單，使用逐個下單模式: %d 個訂單", len(orders_to_place))
