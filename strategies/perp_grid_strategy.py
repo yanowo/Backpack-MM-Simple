@@ -307,36 +307,14 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 else:
                     # 批量下單成功，記錄所有訂單
                     if isinstance(result, list):
-                        # 創建原始訂單的映射表 (price, side) -> order
-                        order_map = {}
-                        for order in orders_to_place:
-                            key = (float(order['price']), order['side'])
-                            order_map[key] = order
-
                         for order_result in result:
                             if 'id' in order_result:
                                 order_id = order_result['id']
-                                # 從返回結果中獲取價格和方向
-                                result_price = float(order_result.get('price', 0))
-                                result_side = order_result.get('side', '')
-
-                                # 查找對應的原始訂單
-                                key = (result_price, result_side)
-                                if key in order_map:
-                                    original_order = order_map[key]
-                                    price = float(original_order['price'])
-                                    side = original_order['side']
-                                    quantity = float(original_order['quantity'])
-                                    self._record_grid_order(order_id, price, side, quantity)
-                                    placed_orders += 1
-                                else:
-                                    # 如果無法匹配，使用返回結果中的數據
-                                    logger.warning("無法匹配訂單 %s，使用返回數據", order_id)
-                                    price = result_price
-                                    side = result_side
-                                    quantity = float(order_result.get('quantity', self.order_quantity))
-                                    self._record_grid_order(order_id, price, side, quantity)
-                                    placed_orders += 1
+                                price = float(order_result.get('price', 0))
+                                side = order_result.get('side', '')
+                                quantity = float(order_result.get('quantity', self.order_quantity))
+                                self._record_grid_order(order_id, price, side, quantity)
+                                placed_orders += 1
                         logger.info("批量下單成功: %d 個訂單", placed_orders)
             else:
                 # 客戶端不支持批量下單，直接逐個下單
