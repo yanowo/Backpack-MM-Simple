@@ -93,7 +93,7 @@ class VolumeHoldStrategyConfig:
     random_split_range: Tuple[float, float] = (0.45, 0.55)
     run_once: bool = False
     enable_hedge: bool = True
-    primary_time_in_force: str = "IOC"
+    primary_time_in_force: str = "GTC"
 
     @classmethod
     def from_file(cls, path: str) -> "VolumeHoldStrategyConfig":
@@ -187,7 +187,7 @@ class VolumeHoldStrategyConfig:
             random_split_range=(low, high),
             run_once=bool(payload.get("run_once", False)),
             enable_hedge=bool(payload.get("enable_hedge", True)),
-            primary_time_in_force=str(payload.get("primary_time_in_force", "IOC")),
+            primary_time_in_force=str(payload.get("primary_time_in_force", "GTC")),
         )
         if not config.base_url and any(acc.base_url is None for acc in accounts):
             raise StrategyConfigError("base_url missing; configure global base_url or per-account base_url entries.")
@@ -213,7 +213,7 @@ class VolumeHoldStrategy:
         self._hedge_price_stats: Dict[str, Dict[int, Dict[str, float]]] = {}
         self._hedge_recorded_trades: List[Set[str]] = [set() for _ in self._clients]
         self._hedge_enabled = bool(config.enable_hedge)
-        self._primary_time_in_force = str(config.primary_time_in_force or "IOC").upper()
+        self._primary_time_in_force = str(config.primary_time_in_force or "GTC").upper()
 
     # ------------------------------------------------------------------ lifecycle
     def stop(self) -> None:
@@ -461,7 +461,7 @@ class VolumeHoldStrategy:
             post_only,
             reduce_only,
         )
-        time_in_force = getattr(self, "_primary_time_in_force", "IOC")
+        time_in_force = getattr(self, "_primary_time_in_force", "GTC")
         tif_upper = time_in_force.upper()
         post_only_flag = post_only
         if tif_upper in ("FOK", "IOC") and post_only_flag:
@@ -576,6 +576,11 @@ class VolumeHoldStrategy:
                 logger.error("Cancel all orders for %s failed: %s", symbol, cancel_result["error"])
             else:
                 logger.info("Cancel all orders for %s response: %s", symbol, cancel_result)
+            post_cancel_trades = client.get_fill_history(symbol, limit=200)
+            if isinstance(post_cancel_trades, dict) and post_cancel_trades.get("error"):
+                logger.error("Failed to fetch fills after cancel for %s: %s", symbol, post_cancel_trades["error"])
+            else:
+                consume_trades(post_cancel_trades)
 
         return fills
 
