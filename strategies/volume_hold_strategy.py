@@ -274,13 +274,21 @@ class VolumeHoldStrategy:
 
             slice_quantity = self._notional_to_quantity(slice_notional, reference_price, limits)
             if slice_quantity < limits.min_order_size:
-                logger.warning(
-                    "Slice quantity %.8f below min size %.8f for %s; increasing to minimum.",
-                    slice_quantity,
-                    limits.min_order_size,
-                    plan.symbol,
-                )
-                slice_quantity = limits.min_order_size
+                is_final_slice = slice_notional < plan.slice_notional  # 最后一刀 = 剩余不足
+                if is_final_slice:
+                    logger.info(
+                        "Final slice too small (qty %.8f < min %.8f), treat as done; skipping last order.",
+                        slice_quantity, limits.min_order_size
+                    )
+                    target_remaining = 0.0
+                    break
+                else:
+                    logger.info(
+                        "Slice qty %.8f below min %.8f for %s; skipping this slice and retry later.",
+                        slice_quantity, limits.min_order_size, plan.symbol
+                    )
+                    self._sleep_with_stop(self._slice_delay())
+                    continue
 
             fills = self._submit_limit_order(
                 client=client,
