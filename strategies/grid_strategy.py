@@ -615,14 +615,6 @@ class GridStrategy(MarketMaker):
         if not current_price:
             return
 
-        # 檢查訂單數量限制
-        total_orders = len(self.grid_orders_by_id)
-        max_orders_limit = 180  # 預留一些空間，避免達到200上限
-
-        if total_orders >= max_orders_limit:
-            logger.warning("訂單數量已達上限 %d/%d，暫停補充訂單", total_orders, max_orders_limit)
-            return
-
         # 獲取餘額
         balances = self.get_balance()
         if not balances:
@@ -632,13 +624,8 @@ class GridStrategy(MarketMaker):
         quote_balance = balances.get('quote_available', 0)
 
         refilled = 0
-        available_slots = max_orders_limit - total_orders
 
         for price in self.grid_levels:
-            if refilled >= available_slots:
-                logger.warning("已達到可用訂單槽位上限，停止補充")
-                break
-
             if abs(price - current_price) / current_price < 0.001:
                 continue
 
@@ -665,8 +652,8 @@ class GridStrategy(MarketMaker):
                             refilled += 1
 
         if refilled > 0:
-            logger.info("補充了 %d 個網格訂單 (總計: %d/%d)",
-                       refilled, len(self.grid_orders_by_id), max_orders_limit)
+            logger.info("補充了 %d 個網格訂單 (總計: %d)",
+                       refilled, len(self.grid_orders_by_id))
 
     def calculate_prices(self) -> Tuple[List[float], List[float]]:
         """計算價格 - 網格策略不需要這個方法，返回空列表"""
