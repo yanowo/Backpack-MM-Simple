@@ -143,6 +143,25 @@ def main():
         }
         if chain_id is not None:
             exchange_config['chain_id'] = chain_id
+        if not api_key:
+            logger.error("缺少 Lighter 私鑰，請使用 --api-key 或環境變量 LIGHTER_PRIVATE_KEY 提供")
+            sys.exit(1)
+        if not exchange_config.get('account_index'):
+            logger.error("缺少 Lighter Account Index，請透過環境變量 LIGHTER_ACCOUNT_INDEX 提供")
+    elif exchange == 'paradex':
+        private_key = os.getenv('PARADEX_PRIVATE_KEY', '')  # StarkNet 私鑰
+        account_address = os.getenv('PARADEX_ACCOUNT_ADDRESS')  # StarkNet 帳户地址
+        ws_proxy = os.getenv('PARADEX_PROXY_WEBSOCKET')
+        base_url = os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1')
+
+        secret_key = private_key
+        api_key = ''  # Paradex 不需要 API Key
+
+        exchange_config = {
+            'private_key': private_key,
+            'account_address': account_address,
+            'base_url': base_url,
+        }
     else:
         logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex' 或 'lighter'")
         sys.exit(1)
@@ -150,7 +169,7 @@ def main():
     # 檢查API密鑰
     if exchange == 'paradex':
         if not secret_key or not account_address:
-            logger.error("Paradex 需要提供 StarkNet 私鑰與帳戶地址，請確認環境變數已設定")
+            logger.error("Paradex 需要提供 StarkNet 私鑰與帳户地址，請確認環境變數已設定")
             sys.exit(1)
     elif exchange == 'lighter':
         if not api_key:
