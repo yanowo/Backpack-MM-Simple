@@ -7,7 +7,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from api.lighter_client import LighterClient
 from logger import setup_logger
@@ -274,6 +274,44 @@ class VolumeHoldStrategy:
 
             slice_quantity = self._notional_to_quantity(slice_notional, reference_price, limits)
             if slice_quantity < limits.min_order_size:
+                required_notional = limits.min_order_size * reference_price
+                if required_notional <= target_remaining:
+                    logger.info(
+                        "Adjusting slice from %.8f to %.8f %s so it meets venue minimum.",
+                        slice_notional,
+                        required_notional,
+                        plan.symbol,
+                    )
+                    slice_notional = required_notional
+                    slice_quantity = limits.min_order_size
+                else:
+                    is_final_slice = slice_notional < plan.slice_notional
+                    if is_final_slice:
+                        logger.info(
+                            "Final slice too small (qty %.8f < min %.8f), treat as done; skipping last order.",
+                            slice_quantity, limits.min_order_size
+                        )
+                        target_remaining = 0.0
+                        break
+                    else:
+                        logger.info(
+                            "Slice qty %.8f below min %.8f for %s; skipping this slice and retry later.",
+                            slice_quantity, limits.min_order_size, plan.symbol
+                        )
+                        self._sleep_with_stop(self._slice_delay())
+                        continue
+            min_quote = float(limits.min_order_size * reference_price)
+            if slice_notional < min_quote:
+                logger.debug(
+                    "Slice notional %.8f below minimum quote %.8f, adjusting",
+                    slice_notional,
+                    min_quote,
+                )
+                slice_notional = min_quote
+                slice_quantity = max(
+                    limits.min_order_size,
+                    round_to_precision(slice_notional / reference_price, limits.base_precision),
+                )
                 is_final_slice = slice_notional < plan.slice_notional  # 最后一刀 = 剩余不足
                 if is_final_slice:
                     logger.info(
@@ -468,32 +506,38 @@ class VolumeHoldStrategy:
         match_ids: Set[str] = {str(value) for value in match_order_ids if value is not None}
         fallback_threshold = max(order_start_time - 1.0, 0.0)
 
+        def consume_trades(trades_payload: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
+            nonlocal filled_qty
+            if isinstance(trades_payload, dict):
+                return
+            for trade in trades_payload or []:
+                order_id = trade.get("order_id")
+                trade_ts = self._normalize_timestamp(trade.get("timestamp"))
+                matches_identifier = order_id is not None and str(order_id) in match_ids
+                is_recent = trade_ts is not None and trade_ts >= fallback_threshold
+                if match_ids:
+                    if not matches_identifier and not is_recent:
+                        continue
+                else:
+                    if not is_recent:
+                        continue
+                trade_id = str(trade.get("trade_id"))
+                if trade_id in seen_trades:
+                    continue
+                qty = float(trade.get("quantity") or trade.get("size") or 0)
+                price = float(trade.get("price") or 0)
+                if qty <= 0 or price <= 0:
+                    continue
+                seen_trades.add(trade_id)
+                fills.append({"quantity": qty, "price": price})
+                filled_qty += qty
+
         while not self._stop_event.is_set():
             trades = client.get_fill_history(symbol, limit=50)
             if isinstance(trades, dict) and trades.get("error"):
                 logger.error("Failed to fetch fills for %s: %s", symbol, trades["error"])
             else:
-                for trade in trades:
-                    order_id = trade.get("order_id")
-                    trade_ts = self._normalize_timestamp(trade.get("timestamp"))
-                    matches_identifier = order_id is not None and str(order_id) in match_ids
-                    is_recent = trade_ts is not None and trade_ts >= fallback_threshold
-                    if match_ids:
-                        if not matches_identifier and not is_recent:
-                            continue
-                    else:
-                        if not is_recent:
-                            continue
-                    trade_id = str(trade.get("trade_id"))
-                    if trade_id in seen_trades:
-                        continue
-                    qty = float(trade.get("quantity") or trade.get("size") or 0)
-                    price = float(trade.get("price") or 0)
-                    if qty <= 0 or price <= 0:
-                        continue
-                    seen_trades.add(trade_id)
-                    fills.append({"quantity": qty, "price": price})
-                    filled_qty += qty
+                consume_trades(trades)
 
             if filled_qty + tolerance >= target_qty:
                 break
@@ -501,6 +545,13 @@ class VolumeHoldStrategy:
                 logger.warning("Fill wait timeout for %s (filled %.8f / %.8f)", symbol, filled_qty, target_qty)
                 break
             self._sleep_with_stop(self.config.order_poll_interval)
+
+        if filled_qty + tolerance < target_qty:
+            extra_trades = client.get_fill_history(symbol, limit=200)
+            if isinstance(extra_trades, dict) and extra_trades.get("error"):
+                logger.error("Failed to fetch final fills for %s: %s", symbol, extra_trades["error"])
+            else:
+                consume_trades(extra_trades)
 
         if filled_qty + tolerance < target_qty:
             cancel_result = client.cancel_all_orders(symbol)
@@ -539,12 +590,21 @@ class VolumeHoldStrategy:
                     limits.base_precision,
                 )
                 continue
+            price = self._compute_aggressive_price(self._clients[hedger_idx], symbol, side)
+            if price is None:
+                logger.error("Unable to compute hedge price for %s", symbol)
+                self._enqueue_backlog(hedger_idx, symbol, side, alloc)
+                continue
+            price = round_to_tick_size(price, limits.tick_size)
             payload = {
                 "symbol": symbol,
                 "side": side,
-                "orderType": "Market",
+                "orderType": "Limit",
                 "quantity": str(rounded),
+                "price": str(price),
                 "reduceOnly": reduce_only,
+                "timeInForce": "GTC",
+                "price_protection": False,
             }
             logger.info(
                 "Submitting hedge order: account=%s side=%s qty=%.8f reduce_only=%s",
@@ -691,6 +751,37 @@ class VolumeHoldStrategy:
             price = max(price, best_bid + 1e-9)
         if best_ask:
             price = min(price, best_ask)
+        return price
+
+    def _compute_aggressive_price(
+        self,
+        client: LighterClient,
+        symbol: str,
+        side: str,
+    ) -> Optional[float]:
+        """Derive aggressive limit price to emulate market order behaviour."""
+        book = client.get_order_book(symbol, limit=5)
+        if isinstance(book, dict) and book.get("error"):
+            logger.error("Failed to fetch order book for %s: %s", symbol, book["error"])
+            return None
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+        if side == "Bid":
+            base = best_ask or best_bid
+            if base is None:
+                return None
+            price = base * 1.002
+            if best_ask:
+                price = max(price, best_ask)
+            return price
+        base = best_bid or best_ask
+        if base is None:
+            return None
+        price = base * 0.998
+        if best_bid:
+            price = min(price, best_bid)
         return price
 
     def _get_market_limits(self, client: LighterClient, symbol: str) -> MarketConstraints:

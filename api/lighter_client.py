@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import itertools
 import json
 import os
@@ -1070,6 +1071,7 @@ class LighterClient(BaseExchangeClient):
 
         base_precision = int(market.get("base_precision", 3))
         quote_precision = int(market.get("quote_precision", 3))
+        min_order_size = float(market.get("min_order_size", 0) or 0)
 
         order_type_raw = (order_details.get("orderType") or order_details.get("type") or "limit").upper()
         order_type_map = {
@@ -1089,6 +1091,10 @@ class LighterClient(BaseExchangeClient):
         quantity_value = order_details.get("quantity") or order_details.get("size")
         if quantity_value is None:
             return {"error": "Both price and quantity are required"}
+        try:
+            quantity_float = float(quantity_value)
+        except (TypeError, ValueError):
+            return {"error": "Invalid quantity value"}
 
         scaled_price = self._scale_to_int(price_value, quote_precision)
         scaled_quantity = self._scale_to_int(quantity_value, base_precision)
@@ -1117,6 +1123,20 @@ class LighterClient(BaseExchangeClient):
 
         if scaled_price is None or scaled_quantity is None:
             return {"error": "Invalid price or quantity format"}
+        min_quote_value = float(market.get("min_quote_value") or 0.0)
+        if min_quote_value <= 0:
+            min_quote_value = 10.0
+        price_float = float(price_value)
+        if price_float <= 0:
+            return {"error": "Price must be positive"}
+        required_base = min_quote_value / price_float
+        precision_multiplier = 10 ** base_precision
+        required_base = math.ceil(required_base * precision_multiplier) / precision_multiplier
+        effective_min_quantity = max(min_order_size, required_base)
+        if quantity_float < effective_min_quantity:
+            return {
+                "error": f"Quantity {quantity_float} below minimum {effective_min_quantity}",
+            }
 
         time_in_force_raw = (order_details.get("timeInForce") or order_details.get("time_in_force") or "GTC").upper()
         post_only = bool(order_details.get("postOnly") or order_details.get("post_only"))
