@@ -215,6 +215,7 @@ class VolumeHoldStrategy:
         self._maker_price_stats: Dict[str, Dict[str, float]] = {}
         self._hedge_price_stats: Dict[str, Dict[int, Dict[str, float]]] = {}
         self._hedge_recorded_trades: List[Set[str]] = [set() for _ in self._clients]
+        self._wear_cumulative = {"wear_notional": 0.0, "maker_qty": 0.0}
         self._hedge_enabled = bool(config.enable_hedge)
         self._primary_time_in_force = str(config.primary_time_in_force or "GTC").upper()
 
@@ -1171,6 +1172,8 @@ class VolumeHoldStrategy:
             maker_stats["qty"],
             maker_avg,
         )
+        combined_qty = 0.0
+        combined_notional = 0.0
         for hedger_idx, stats in hedger_stats.items():
             qty = stats.get("qty", 0.0)
             if qty <= 0:
@@ -1184,6 +1187,35 @@ class VolumeHoldStrategy:
                 avg,
                 slippage,
             )
+            combined_qty += qty
+            combined_notional += stats["notional"]
+
+        if combined_qty > 0:
+            hedge_avg = combined_notional / combined_qty
+            wear_per_unit = hedge_avg - maker_avg
+            # Use the smaller of maker vs hedge executed size to avoid over-counting.
+            nominal_qty = min(maker_stats["qty"], combined_qty)
+            wear_notional = wear_per_unit * nominal_qty
+            wear_rate = wear_notional / max(2 * maker_stats["qty"], 1e-12)
+            logger.info(
+                "[SUMMARY] Cycle wear per-unit=%.8f notional=%.8f rate=%.6f%%",
+                wear_per_unit,
+                wear_notional,
+                wear_rate * 100,
+            )
+            self._wear_cumulative["wear_notional"] += wear_notional
+            self._wear_cumulative["maker_qty"] += maker_stats["qty"]
+            global_wear_rate = (
+                self._wear_cumulative["wear_notional"]
+                / max(2 * self._wear_cumulative["maker_qty"], 1e-12)
+            )
+            logger.info(
+                "[SUMMARY] Global wear notional=%.8f rate=%.6f%% over maker_qty %.8f",
+                self._wear_cumulative["wear_notional"],
+                global_wear_rate * 100,
+                self._wear_cumulative["maker_qty"],
+            )
+
         self._maker_price_stats.pop(symbol, None)
         if symbol in self._hedge_price_stats:
             self._hedge_price_stats.pop(symbol, None)

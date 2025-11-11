@@ -1,8 +1,8 @@
 {
     "base_url": "https://mainnet.zklighter.elliot.ai",
     "hold_minutes": 17,
-    "entry_price_offset_bps": 5,
-    "exit_price_offset_bps": 5,
+    "entry_price_offset_bps": 0,
+    "exit_price_offset_bps": 0,
     "slice_delay_seconds": 8,
     "slice_delay_jitter_seconds": 4,
     "slice_fill_timeout": 10,
@@ -13,23 +13,13 @@
     "coinlist": [
         {
             "symbol": "USELESS",
-            "target_notional": 500,
+            "target_notional": 150,
             "slice_notional": 50,
             "notes": "amt per trade"
         },
         {
             "symbol": "FF",
-            "target_notional": 500,
-            "slice_notional": 50
-        },
-        {
-            "symbol": "SKY",
-            "target_notional": 500,
-            "slice_notional": 50
-        },
-        {
-            "symbol": "0G",
-            "target_notional": 500,
+            "target_notional": 150,
             "slice_notional": 50
         }
     ],
