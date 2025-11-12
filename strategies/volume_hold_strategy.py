@@ -1225,18 +1225,19 @@ class VolumeHoldStrategy:
         order: Dict[str, Any],
         account_label: str,
         *,
-        max_retries: int = 3,
+        max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Execute an order, refreshing nonce when the exchange rejects it."""
         last_response: Dict[str, Any] = {}
-        for attempt in range(1, max_retries + 1):
+        retries = max_retries if isinstance(max_retries, int) and max_retries > 0 else 1
+        for attempt in range(1, retries + 1):
             response = client.execute_order(order)
             if not (isinstance(response, dict) and response.get("error")):
                 return response
             last_response = response
             error_text = str(response.get("error") or "")
             invalid_nonce = "invalid nonce" in error_text.lower()
-            if invalid_nonce and attempt < max_retries:
+            if invalid_nonce and attempt < retries:
                 refreshed = self._refresh_client_nonce(client)
                 refreshed_next = refreshed + 1 if refreshed is not None else None
                 current_nonce = getattr(client, "debug_current_nonce", lambda: None)()
@@ -1249,7 +1250,7 @@ class VolumeHoldStrategy:
                     refreshed,
                     refreshed_next,
                     attempt,
-                    max_retries,
+                    retries,
                 )
                 time.sleep(0.25)
                 continue
@@ -1260,7 +1261,7 @@ class VolumeHoldStrategy:
                 logger.error(
                     "Nonce still invalid for %s after %d attempts. Local=%s refreshed=%s (next=%s). Last error: %s",
                     account_label,
-                    max_retries,
+                    retries,
                     current_nonce,
                     refreshed,
                     refreshed_next,
