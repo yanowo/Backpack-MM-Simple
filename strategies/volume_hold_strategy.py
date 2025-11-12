@@ -384,6 +384,7 @@ class VolumeHoldStrategy:
         client = self._clients[primary_idx]
         limits = self._get_market_limits(client, plan.symbol)
         remaining_base = float(target_base_quantity)
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
         if remaining_base <= 0:
             logger.warning("No base quantity to unwind for %s", plan.symbol)
             return
@@ -399,6 +400,15 @@ class VolumeHoldStrategy:
                 self._notional_to_quantity(plan.slice_notional, reference_price, limits),
                 remaining_base,
             )
+            min_exit_qty = self._effective_min_quantity(reference_price, limits)
+            if slice_quantity + epsilon < min_exit_qty:
+                logger.info(
+                    "Exit remainder %.8f %s below venue minimum %.8f; stopping flatten loop.",
+                    remaining_base,
+                    plan.symbol,
+                    min_exit_qty,
+                )
+                break
 
             fills = self._submit_limit_order(
                 client=client,
