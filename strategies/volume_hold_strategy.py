@@ -212,6 +212,7 @@ class VolumeHoldStrategy:
             idx: {} for idx in range(len(self._clients))
         }
         self._hedge_cycle_positions: Dict[str, Dict[int, float]] = {}
+        self._theoretical_positions: Dict[str, Dict[int, float]] = {}
         self._maker_price_stats: Dict[str, Dict[str, float]] = {}
         self._hedge_price_stats: Dict[str, Dict[int, Dict[str, float]]] = {}
         self._hedge_recorded_trades: List[Set[str]] = [set() for _ in self._clients]
@@ -352,6 +353,7 @@ class VolumeHoldStrategy:
                 self._sleep_with_stop(self._slice_delay())
                 continue
             self._record_maker_fill(plan.symbol, fills)
+            self._update_theoretical_position(plan.symbol, primary_idx, filled_base, limits)
 
             avg_price = self._weighted_average(fills)
             filled_notional = filled_base * avg_price
@@ -366,7 +368,7 @@ class VolumeHoldStrategy:
                 plan.target_notional,
             )
 
-            self._dispatch_hedges(plan.symbol, "Ask", filled_base, hedgers, limits, reduce_only=False)
+            self._dispatch_hedges(primary_idx, plan.symbol, "Ask", filled_base, hedgers, limits, reduce_only=False)
             self._sleep_with_stop(self._slice_delay())
 
         return total_base_filled
@@ -385,6 +387,7 @@ class VolumeHoldStrategy:
         if remaining_base <= 0:
             logger.warning("No base quantity to unwind for %s", plan.symbol)
             return
+        self._sync_hedge_positions(plan.symbol, hedgers, limits)
 
         while not self._stop_event.is_set() and remaining_base > limits.min_order_size / 2:
             reference_price = self._compute_reference_price(client, plan.symbol, "Ask", plan.exit_offset_bps)
@@ -414,6 +417,7 @@ class VolumeHoldStrategy:
                 self._sleep_with_stop(self._slice_delay())
                 continue
             self._record_maker_fill(plan.symbol, fills)
+            self._update_theoretical_position(plan.symbol, primary_idx, -filled_base, limits)
 
             remaining_base = max(remaining_base - filled_base, 0.0)
             logger.info(
@@ -423,11 +427,11 @@ class VolumeHoldStrategy:
                 plan.symbol,
                 remaining_base,
             )
-            self._dispatch_hedges(plan.symbol, "Bid", filled_base, hedgers, limits, reduce_only=True)
+            self._dispatch_hedges(primary_idx, plan.symbol, "Bid", filled_base, hedgers, limits, reduce_only=True)
             self._sleep_with_stop(self._slice_delay())
 
         if hedgers:
-            self._flush_backlog(plan.symbol, hedgers, limits)
+            self._flush_backlog(plan.symbol, primary_idx, hedgers, limits)
         logger.info("Exit leg for %s finished; remaining base %.8f", plan.symbol, remaining_base)
 
     def _hold_position(self, plan: SymbolPlan) -> None:
@@ -590,6 +594,7 @@ class VolumeHoldStrategy:
 
     def _dispatch_hedges(
         self,
+        primary_idx: Optional[int],
         symbol: str,
         side: str,
         qty: float,
@@ -687,7 +692,10 @@ class VolumeHoldStrategy:
                 rounded,
                 order_ids[0] if order_ids else "N/A",
             )
-            self._record_hedge_fill(hedger_idx, symbol, order_ids, side)
+            delta = rounded if side == "Bid" else -rounded
+            self._update_theoretical_position(symbol, hedger_idx, delta, limits)
+            self._record_hedge_fill(hedger_idx, symbol, order_ids, side, limits)
+        self._log_position_snapshot(symbol, primary_idx, hedger_indices)
 
     def _split_base_quantity(
         self,
@@ -859,7 +867,64 @@ class VolumeHoldStrategy:
         if not store:
             self._hedge_cycle_positions.pop(symbol, None)
 
-    def _flush_backlog(self, symbol: str, hedger_indices: Sequence[int], limits: MarketConstraints) -> None:
+    def _sync_hedge_positions(
+        self,
+        symbol: str,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+    ) -> None:
+        if not hedger_indices:
+            return
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        store = self._hedge_cycle_positions.setdefault(symbol, {})
+        for hedger_idx in hedger_indices:
+            client = self._clients[hedger_idx]
+            try:
+                positions = client.get_positions(symbol)
+            except Exception as exc:  # pragma: no cover - defensive against HTTP issues
+                logger.warning(
+                    "Unable to sync hedge position for %s (%s): %s",
+                    symbol,
+                    self._account_labels[hedger_idx],
+                    exc,
+                )
+                continue
+            if isinstance(positions, dict) and positions.get("error"):
+                logger.warning(
+                    "Unable to sync hedge position for %s (%s): %s",
+                    symbol,
+                    self._account_labels[hedger_idx],
+                    positions["error"],
+                )
+                continue
+            qty = 0.0
+            if isinstance(positions, list):
+                for entry in positions:
+                    if not isinstance(entry, dict):
+                        continue
+                    raw = entry.get("netQuantity") or entry.get("rawSize") or entry.get("size")
+                    try:
+                        qty = abs(float(raw))
+                    except (TypeError, ValueError):
+                        qty = 0.0
+                    break
+            qty = round_to_precision(qty, limits.base_precision)
+            if qty <= epsilon:
+                store.pop(hedger_idx, None)
+            else:
+                store[hedger_idx] = qty
+        if store:
+            self._hedge_cycle_positions[symbol] = store
+        else:
+            self._hedge_cycle_positions.pop(symbol, None)
+
+    def _flush_backlog(
+        self,
+        symbol: str,
+        primary_idx: Optional[int],
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+    ) -> None:
         for hedger_idx in hedger_indices:
             store = self._hedge_backlog.get(hedger_idx, {}).get(symbol)
             if not store:
@@ -903,8 +968,112 @@ class VolumeHoldStrategy:
                 else:
                     store[side] = 0.0
                     order_ids = self._extract_order_identifiers(response)
-                    self._record_hedge_fill(hedger_idx, symbol, order_ids, side)
+                    delta = rounded if side == "Bid" else -rounded
+                    self._update_theoretical_position(symbol, hedger_idx, delta, limits)
+                    self._record_hedge_fill(hedger_idx, symbol, order_ids, side, limits)
+        self._log_position_snapshot(symbol, primary_idx, hedger_indices)
 
+
+    def _update_theoretical_position(
+        self,
+        symbol: str,
+        account_idx: int,
+        delta: float,
+        limits: MarketConstraints,
+    ) -> None:
+        if abs(delta) <= 1e-12:
+            return
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        book = self._theoretical_positions.setdefault(symbol, {})
+        next_value = round_to_precision(book.get(account_idx, 0.0) + delta, limits.base_precision)
+        if abs(next_value) <= epsilon:
+            book.pop(account_idx, None)
+        else:
+            book[account_idx] = next_value
+        if not book:
+            self._theoretical_positions.pop(symbol, None)
+
+    def _get_theoretical_position(self, symbol: str, account_idx: int) -> float:
+        return self._theoretical_positions.get(symbol, {}).get(account_idx, 0.0)
+
+    def _get_actual_position(self, account_idx: int, symbol: str) -> Optional[float]:
+        client = self._clients[account_idx]
+        try:
+            positions = client.get_positions(symbol)
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch actual position for %s (%s): %s",
+                symbol,
+                self._account_labels[account_idx],
+                exc,
+            )
+            return None
+        if isinstance(positions, dict) and positions.get("error"):
+            logger.warning(
+                "Failed to fetch actual position for %s (%s): %s",
+                symbol,
+                self._account_labels[account_idx],
+                positions["error"],
+            )
+            return None
+        if isinstance(positions, list):
+            for entry in positions:
+                if not isinstance(entry, dict):
+                    continue
+                raw = entry.get("netQuantity") or entry.get("rawSize") or entry.get("size")
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
+
+    def _log_position_snapshot(
+        self,
+        symbol: str,
+        primary_idx: Optional[int],
+        hedger_indices: Sequence[int],
+    ) -> None:
+        participants: List[int] = []
+        if primary_idx is not None:
+            participants.append(primary_idx)
+        for hedger_idx in hedger_indices:
+            if hedger_idx not in participants:
+                participants.append(hedger_idx)
+        if not participants:
+            return
+        entries: List[str] = []
+        for account_idx in participants:
+            theory = self._get_theoretical_position(symbol, account_idx)
+            actual = self._get_actual_position(account_idx, symbol)
+            entries.append(self._format_position_entry(symbol, account_idx, theory, actual))
+        logger.info("[POSITION] %s %s", symbol, " | ".join(entries))
+
+    def _format_position_entry(
+        self,
+        symbol: str,
+        account_idx: int,
+        theoretical: float,
+        actual: Optional[float],
+    ) -> str:
+        label = self._account_labels[account_idx]
+        theory_side = self._describe_side(theoretical)
+        theory_qty = abs(theoretical)
+        if actual is None:
+            actual_desc = "实际 N/A"
+        else:
+            actual_side = self._describe_side(actual)
+            actual_desc = f"实际 {abs(actual):.8f} {symbol} {actual_side}"
+        return f"{label}: 理论 {theory_qty:.8f} {symbol} {theory_side} / {actual_desc}"
+
+    @staticmethod
+    def _describe_side(value: Optional[float]) -> str:
+        if value is None:
+            return "UNKNOWN"
+        if value > 0:
+            return "LONG"
+        if value < 0:
+            return "SHORT"
+        return "FLAT"
 
     def _weighted_average(self, fills: Iterable[Dict[str, float]]) -> float:
         total_notional = 0.0
@@ -1107,57 +1276,69 @@ class VolumeHoldStrategy:
         hedger_idx: int,
         symbol: str,
         order_ids: List[str],
-        side: Optional[str] = None,
+        side: Optional[str],
+        limits: MarketConstraints,
     ) -> None:
         client = self._clients[hedger_idx]
-        trades = client.get_fill_history(symbol, limit=20)
-        if isinstance(trades, dict) and trades.get("error"):
-            logger.warning(
-                "Unable to fetch hedge fills for %s (%s): %s",
-                self._account_labels[hedger_idx],
-                symbol,
-                trades["error"],
-            )
-            return
         stats = self._hedge_price_stats.setdefault(symbol, {}).setdefault(
             hedger_idx,
             {"qty": 0.0, "notional": 0.0},
         )
         recorded = self._hedge_recorded_trades[hedger_idx]
-        matched = False
         id_filter: Set[str] = {str(order_id) for order_id in order_ids if order_id is not None}
-        fallback_threshold = time.time() - 5.0
-        for trade in trades:
-            order_id = str(trade.get("order_id") or "")
-            trade_ts = self._normalize_timestamp(trade.get("timestamp"))
-            matches_identifier = bool(id_filter) and order_id in id_filter
-            is_recent = trade_ts is not None and trade_ts >= fallback_threshold
-            if id_filter:
-                if not matches_identifier and not is_recent:
+        matched = False
+        max_attempts = 3
+        delay = max(min(self.config.order_poll_interval, 1.0), 0.25)
+
+        for attempt in range(max_attempts):
+            trades = client.get_fill_history(symbol, limit=20)
+            if isinstance(trades, dict) and trades.get("error"):
+                logger.warning(
+                    "Unable to fetch hedge fills for %s (%s): %s",
+                    self._account_labels[hedger_idx],
+                    symbol,
+                    trades["error"],
+                )
+                break
+            fallback_threshold = time.time() - 5.0
+            for trade in trades or []:
+                order_id = str(trade.get("order_id") or "")
+                trade_ts = self._normalize_timestamp(trade.get("timestamp"))
+                matches_identifier = bool(id_filter) and order_id in id_filter
+                is_recent = trade_ts is not None and trade_ts >= fallback_threshold
+                if id_filter:
+                    if not matches_identifier and not is_recent:
+                        continue
+                else:
+                    if not is_recent:
+                        continue
+                trade_id = str(trade.get("trade_id") or "")
+                if trade_id in recorded:
                     continue
-            else:
-                if not is_recent:
+                qty = float(trade.get("quantity") or trade.get("size") or 0)
+                price = float(trade.get("price") or 0)
+                if qty <= 0 or price <= 0:
                     continue
-            trade_id = str(trade.get("trade_id") or "")
-            if trade_id in recorded:
-                continue
-            qty = float(trade.get("quantity") or trade.get("size") or 0)
-            price = float(trade.get("price") or 0)
-            if qty <= 0 or price <= 0:
-                continue
-            recorded.add(trade_id)
-            stats["qty"] += qty
-            stats["notional"] += qty * price
-            if side == "Ask":
-                self._update_cycle_position(symbol, hedger_idx, qty)
-            elif side == "Bid":
-                self._update_cycle_position(symbol, hedger_idx, -qty)
-            matched = True
-        if not matched:
-            logger.debug(
-                "No hedge fill records matched for %s (order_ids=%s)",
+                recorded.add(trade_id)
+                stats["qty"] += qty
+                stats["notional"] += qty * price
+                if side == "Ask":
+                    self._update_cycle_position(symbol, hedger_idx, qty)
+                elif side == "Bid":
+                    self._update_cycle_position(symbol, hedger_idx, -qty)
+                matched = True
+            if matched or self._stop_event.is_set():
+                break
+            if attempt < max_attempts - 1:
+                self._sleep_with_stop(delay)
+
+        if not matched and side in ("Ask", "Bid"):
+            self._sync_hedge_positions(symbol, [hedger_idx], limits)
+            logger.warning(
+                "No hedge fills matched for %s (%s); refreshed position snapshot instead (order_ids=%s)",
                 self._account_labels[hedger_idx],
-                order_ids,
+                symbol,
+                order_ids or ["N/A"],
             )
 
     def _print_cycle_summary(self, symbol: str) -> None:
@@ -1220,6 +1401,7 @@ class VolumeHoldStrategy:
         if symbol in self._hedge_price_stats:
             self._hedge_price_stats.pop(symbol, None)
         self._hedge_cycle_positions.pop(symbol, None)
+        self._theoretical_positions.pop(symbol, None)
         for record in self._hedge_recorded_trades:
             record.clear()
 
