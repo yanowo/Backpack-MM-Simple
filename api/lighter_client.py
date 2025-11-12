@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import itertools
 import json
 import os
@@ -324,42 +325,34 @@ class SimpleSignerClient:
         trigger_price: int = NIL_TRIGGER_PRICE,
         order_expiry: int = DEFAULT_28_DAY_ORDER_EXPIRY,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        last_payload: Optional[Dict[str, Any]] = None
-        for attempt in range(2):
-            nonce = self._next_nonce()
-            payload, error = self._decode_str_or_err(
-                self.signer.SignCreateOrder(
-                    ctypes.c_int(market_index),
-                    ctypes.c_longlong(client_order_index),
-                    ctypes.c_longlong(base_amount),
-                    ctypes.c_int(price),
-                    ctypes.c_int(int(is_ask)),
-                    ctypes.c_int(order_type),
-                    ctypes.c_int(time_in_force),
-                    ctypes.c_int(int(reduce_only)),
-                    ctypes.c_int(trigger_price),
-                    ctypes.c_longlong(order_expiry),
-                    ctypes.c_longlong(nonce),
-                )
+        nonce = self._next_nonce()
+        payload, error = self._decode_str_or_err(
+            self.signer.SignCreateOrder(
+                ctypes.c_int(market_index),
+                ctypes.c_longlong(client_order_index),
+                ctypes.c_longlong(base_amount),
+                ctypes.c_int(price),
+                ctypes.c_int(int(is_ask)),
+                ctypes.c_int(order_type),
+                ctypes.c_int(time_in_force),
+                ctypes.c_int(int(reduce_only)),
+                ctypes.c_int(trigger_price),
+                ctypes.c_longlong(order_expiry),
+                ctypes.c_longlong(nonce),
             )
-            if error:
-                return None, None, error
-            try:
-                last_payload = json.loads(payload) if payload else None
-            except json.JSONDecodeError:
-                last_payload = {"raw": payload}
+        )
+        if error:
+            return None, None, error
+        try:
+            parsed_payload = json.loads(payload) if payload else None
+        except json.JSONDecodeError:
+            parsed_payload = {"raw": payload}
 
-            try:
-                response = self._send_tx(self.TX_TYPE_CREATE_ORDER, payload or "")
-                return last_payload, response, None
-            except SimpleSignerError as exc:
-                message = str(exc)
-                if "invalid nonce" in message.lower() and attempt == 0:
-                    self._fetch_nonce()
-                    time.sleep(0.25)
-                    continue
-                return last_payload, None, message
-        return last_payload, None, "Unable to submit order after nonce retries"
+        try:
+            response = self._send_tx(self.TX_TYPE_CREATE_ORDER, payload or "")
+            return parsed_payload, response, None
+        except SimpleSignerError as exc:
+            return parsed_payload, None, str(exc)
 
     def cancel_order(
         self,
@@ -367,34 +360,26 @@ class SimpleSignerClient:
         market_index: int,
         order_index: int,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        last_payload: Optional[Dict[str, Any]] = None
-        for attempt in range(2):
-            nonce = self._next_nonce()
-            payload, error = self._decode_str_or_err(
-                self.signer.SignCancelOrder(
-                    ctypes.c_int(market_index),
-                    ctypes.c_longlong(order_index),
-                    ctypes.c_longlong(nonce),
-                )
+        nonce = self._next_nonce()
+        payload, error = self._decode_str_or_err(
+            self.signer.SignCancelOrder(
+                ctypes.c_int(market_index),
+                ctypes.c_longlong(order_index),
+                ctypes.c_longlong(nonce),
             )
-            if error:
-                return None, None, error
-            try:
-                last_payload = json.loads(payload) if payload else None
-            except json.JSONDecodeError:
-                last_payload = {"order_index": order_index, "raw": payload}
+        )
+        if error:
+            return None, None, error
+        try:
+            parsed_payload = json.loads(payload) if payload else None
+        except json.JSONDecodeError:
+            parsed_payload = {"order_index": order_index, "raw": payload}
 
-            try:
-                response = self._send_tx(self.TX_TYPE_CANCEL_ORDER, payload or "")
-                return last_payload, response, None
-            except SimpleSignerError as exc:
-                message = str(exc)
-                if "invalid nonce" in message.lower() and attempt == 0:
-                    self._fetch_nonce()
-                    time.sleep(0.25)
-                    continue
-                return last_payload, None, message
-        return last_payload, None, "Unable to cancel order after nonce retries"
+        try:
+            response = self._send_tx(self.TX_TYPE_CANCEL_ORDER, payload or "")
+            return parsed_payload, response, None
+        except SimpleSignerError as exc:
+            return parsed_payload, None, str(exc)
 
     def create_order_batch(
         self,
@@ -534,7 +519,6 @@ class LighterClient(BaseExchangeClient):
         self._alias_map: Dict[str, str] = {}
         self._market_id_map: Dict[int, Dict[str, Any]] = {}
         self._allow_fee_rate_inference: bool = bool(config.get("allow_fee_rate_inference", False))
-        self._market_fetch_retries: int = max(1, int(config.get("market_fetch_retries", 3)))
 
         self.account_index: Optional[int] = self._as_int(
             config.get("account_index")
@@ -652,6 +636,27 @@ class LighterClient(BaseExchangeClient):
         self._auth_token = None
         self._auth_expiry = 0.0
         return signer
+
+    def refresh_nonce(self) -> Optional[int]:
+        """Refresh signer nonce from the exchange (best effort).
+
+        Returns the cached nonce (previous value, i.e. next usable minus one) if successful.
+        """
+        signer = self._ensure_signer_client()
+        if not signer:
+            return None
+        try:
+            return signer._fetch_nonce()
+        except Exception as exc:  # pragma: no cover - signer fetch rarely fails
+            logger.debug("Lighter nonce refresh failed: %s", exc)
+            return None
+
+    def debug_current_nonce(self) -> Optional[int]:
+        """Return the last cached nonce for debugging."""
+        signer = self._ensure_signer_client()
+        if not signer:
+            return None
+        return getattr(signer, "_nonce", None)
 
     def _get_auth_token(self) -> Optional[str]:
         signer = self._ensure_signer_client()
@@ -820,7 +825,7 @@ class LighterClient(BaseExchangeClient):
             else item.get("tick_size") or self._infer_tick_size(item.get("supported_price_decimals"))
         )
 
-        market_id = item.get("market_id") or item.get("id")
+        market_id = item.get("market_id",'0') or item.get("id",'0')
         last_price = item.get("last_trade_price") or item.get("lastPrice")
 
         try:
@@ -854,39 +859,15 @@ class LighterClient(BaseExchangeClient):
         }
 
     def _fetch_markets(self) -> List[Dict[str, Any]]:
-        last_error: Optional[str] = None
-        for attempt in range(1, self._market_fetch_retries + 1):
-            payload = self.make_request("GET", "/api/v1/orderBookDetails")
-            if isinstance(payload, dict) and "error" in payload:
-                last_error = payload["error"]
-                logger.error(
-                    "Failed to fetch Lighter markets (attempt %d/%d): %s",
-                    attempt,
-                    self._market_fetch_retries,
-                    last_error,
-                )
-                if attempt < self._market_fetch_retries:
-                    time.sleep(min(1.0, 0.2 * attempt))
-                continue
-
-            details = payload.get("order_book_details") if isinstance(payload, dict) else None
-            if not isinstance(details, list):
-                logger.error(
-                    "Unexpected market metadata format (attempt %d/%d): %s",
-                    attempt,
-                    self._market_fetch_retries,
-                    type(details).__name__,
-                )
-                if attempt < self._market_fetch_retries:
-                    time.sleep(min(1.0, 0.2 * attempt))
-                    continue
-                return []
-
-            return [entry for entry in details if isinstance(entry, dict)]
-
-        if last_error:
-            logger.error("Failed to fetch Lighter markets after retries: %s", last_error)
-        return []
+        payload = self.make_request("GET", "/api/v1/orderBookDetails")
+        if isinstance(payload, dict) and payload.get("error"):
+            logger.error("Failed to fetch Lighter markets: %s", payload["error"])
+            return []
+        details = payload.get("order_book_details") if isinstance(payload, dict) else None
+        if not isinstance(details, list):
+            logger.error("Unexpected market metadata format: %s", type(details).__name__)
+            return []
+        return [entry for entry in details if isinstance(entry, dict)]
 
     def _ensure_market_cache(self) -> None:
         if self._market_cache:
@@ -1385,6 +1366,7 @@ class LighterClient(BaseExchangeClient):
 
         base_precision = int(market.get("base_precision", 3))
         quote_precision = int(market.get("quote_precision", 3))
+        min_order_size = float(market.get("min_order_size", 0) or 0)
 
         order_type_raw = (order_details.get("orderType") or order_details.get("type") or "limit").upper()
         order_type_map = {
@@ -1432,6 +1414,19 @@ class LighterClient(BaseExchangeClient):
 
         if scaled_price is None or scaled_quantity is None:
             return {"error": "Invalid price or quantity format"}
+        min_quote_value = float(market.get("min_quote_value") or 0.0)
+        quantity_float = float(quantity_value)
+        # 最小下单金额 10u
+        price_float = float(price_value)
+        min_quote_value = 10.0
+        required_base = min_quote_value / price_float
+        precision_multiplier = 10 ** base_precision
+        required_base = math.ceil(required_base * precision_multiplier) / precision_multiplier
+        effective_min_quantity = max(min_order_size, required_base)
+        if quantity_float < effective_min_quantity:
+            return {
+                "error": f"Quantity {quantity_float} below minimum {effective_min_quantity}",
+            }
 
         time_in_force_raw = (order_details.get("timeInForce") or order_details.get("time_in_force") or "GTC").upper()
         post_only = bool(order_details.get("postOnly") or order_details.get("post_only"))
