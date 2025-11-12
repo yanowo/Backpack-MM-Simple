@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import time
 from typing import Any, Dict, List, Optional, Set
 from decimal import Decimal, InvalidOperation
@@ -375,6 +376,174 @@ class AsterClient(BaseExchangeClient):
             return result
         return self._normalize_order_fields(result)
 
+    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> Any:
+        """批量執行訂單
+
+        Aster 批量下單限制：每批最多 5 個訂單
+
+        Args:
+            orders_details: 訂單詳情列表
+
+        Returns:
+            成功訂單列表或錯誤信息
+        """
+        if not orders_details:
+            return {"error": "訂單列表為空"}
+
+        # Aster 限制每批最多 5 個訂單
+        if len(orders_details) > 5:
+            logger.warning("Aster 批量下單限制為 5 個訂單，當前 %d 個，將拆分為多批", len(orders_details))
+
+        # 將訂單拆分為多批（每批最多 5 個）
+        batch_size = 5
+        all_results = []
+        all_errors = []
+
+        for batch_start in range(0, len(orders_details), batch_size):
+            batch = orders_details[batch_start:batch_start + batch_size]
+
+            # 構建批量訂單請求
+            batch_orders = []
+
+            for order_details in batch:
+                symbol = order_details.get("symbol")
+                if not symbol:
+                    logger.warning("跳過無效訂單: 缺少交易對")
+                    all_errors.append({"error": "缺少交易對", "order": order_details})
+                    continue
+
+                resolved_symbol = self._resolve_symbol(symbol)
+                if not resolved_symbol:
+                    logger.warning("跳過無效訂單: 未知交易對 %s", symbol)
+                    all_errors.append({"error": f"未知交易對: {symbol}", "order": order_details})
+                    continue
+
+                side = order_details.get("side")
+                if not side:
+                    logger.warning("跳過無效訂單: 缺少買賣方向")
+                    all_errors.append({"error": "缺少買賣方向", "order": order_details})
+                    continue
+
+                # 標準化方向
+                if side.lower() in {"bid", "buy"}:
+                    normalized_side = "BUY"
+                elif side.lower() in {"ask", "sell"}:
+                    normalized_side = "SELL"
+                else:
+                    logger.warning("跳過無效訂單: 不支持的方向 %s", side)
+                    all_errors.append({"error": f"不支持的方向: {side}", "order": order_details})
+                    continue
+
+                order_type = order_details.get("orderType") or order_details.get("type")
+                if not order_type:
+                    logger.warning("跳過無效訂單: 缺少訂單類型")
+                    all_errors.append({"error": "缺少訂單類型", "order": order_details})
+                    continue
+
+                normalized_type = order_type.upper()
+
+                # 構建單個訂單
+                order_payload = {
+                    "symbol": resolved_symbol,
+                    "side": normalized_side,
+                    "type": normalized_type
+                }
+
+                # 添加時間有效性
+                time_in_force = order_details.get("timeInForce")
+                if normalized_type == "LIMIT":
+                    order_payload["timeInForce"] = (time_in_force or "GTC").upper()
+                elif time_in_force:
+                    order_payload["timeInForce"] = time_in_force.upper()
+
+                # 添加數量
+                quantity = order_details.get("quantity") or order_details.get("size")
+                if quantity is not None:
+                    order_payload["quantity"] = str(quantity)
+                else:
+                    logger.warning("跳過無效訂單: 缺少數量")
+                    all_errors.append({"error": "缺少數量", "order": order_details})
+                    continue
+
+                # 添加價格（限價單）
+                price = order_details.get("price")
+                if price is not None and normalized_type != "MARKET":
+                    order_payload["price"] = str(price)
+
+                # 添加止損價格
+                stop_price = order_details.get("stopPrice")
+                if stop_price is not None:
+                    order_payload["stopPrice"] = str(stop_price)
+
+                # 添加可選參數
+                for key in ["reduceOnly", "closePosition", "priceProtect"]:
+                    if key in order_details:
+                        order_payload[key] = self._bool_to_lower(order_details[key])
+
+                if "positionSide" in order_details:
+                    order_payload["positionSide"] = order_details["positionSide"].upper()
+
+                if "clientId" in order_details:
+                    order_payload["newClientOrderId"] = order_details["clientId"]
+
+                if "workingType" in order_details:
+                    order_payload["workingType"] = order_details["workingType"]
+
+                batch_orders.append(order_payload)
+
+            # 如果這批沒有有效訂單，跳過
+            if not batch_orders:
+                continue
+
+            # 發送批量請求
+            logger.info("發送批量訂單請求: %d 個訂單", len(batch_orders))
+
+            # Aster/Binance Futures API 要求 batchOrders 作為 JSON 字符串
+            result = self.make_request(
+                "POST",
+                "/fapi/v1/batchOrders",
+                api_key=self.api_key,
+                secret_key=self.secret_key,
+                instruction=True,
+                data={"batchOrders": json.dumps(batch_orders)},
+                retry_count=self.max_retries
+            )
+
+            # 處理響應
+            if isinstance(result, list):
+                for item in result:
+                    if isinstance(item, dict):
+                        # 檢查是否是錯誤
+                        if "code" in item and "msg" in item:
+                            all_errors.append(item)
+                            logger.warning("批量下單部分失敗: %s", item.get("msg"))
+                        else:
+                            # 成功的訂單
+                            normalized_order = self._normalize_order_fields(dict(item))
+                            all_results.append(normalized_order)
+                logger.info("批量下單完成: %d 成功, %d 失敗", len(all_results), len(all_errors))
+            elif isinstance(result, dict) and "error" in result:
+                # 整個批次失敗
+                logger.error("批量下單失敗: %s", result["error"])
+                all_errors.append({"error": result["error"], "batch": batch_orders})
+
+        # 返回結果
+        if all_results:
+            # 有成功的訂單
+            if all_errors:
+                # 部分成功
+                return {
+                    "orders": all_results,
+                    "errors": all_errors,
+                    "partial_success": True
+                }
+            else:
+                # 全部成功
+                return all_results
+        else:
+            # 全部失敗
+            return {"error": "批量下單全部失敗", "errors": all_errors}
+
     def get_open_orders(self, symbol: Optional[str] = None) -> Any:
         params: Dict[str, Any] = {}
         if symbol:
@@ -399,6 +568,7 @@ class AsterClient(BaseExchangeClient):
         return normalized
 
     def cancel_all_orders(self, symbol: str) -> Dict[str, Any]:
+        """取消指定交易對的所有訂單"""
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
             return self._unknown_symbol_error(symbol)
