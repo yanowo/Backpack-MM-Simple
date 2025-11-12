@@ -1305,7 +1305,7 @@ class LighterClient(BaseExchangeClient):
             )
             order_expiry = self._as_int(expiry_raw, default=default_expiry)
 
-            # 處理客戶端訂單 ID
+            # 處理客户端訂單 ID
             client_order_raw = (
                 order_details.get("clientOrderIndex")
                 or order_details.get("clientOrderId")
@@ -1885,49 +1885,41 @@ class LighterClient(BaseExchangeClient):
         price = self._safe_float(trade.get("price"))
         usd_amount = self._safe_float(trade.get("usd_amount"))
 
-        maker_account = self._as_int(
-            trade.get("maker_account_index") or trade.get("makerAccountIndex")
-        )
-        taker_account = self._as_int(
-            trade.get("taker_account_index") or trade.get("takerAccountIndex")
-        )
+        # Lighter API 實際返回的是 ask_account_id 和 bid_account_id，而不是 maker/taker_account_index
         ask_account = self._as_int(
             trade.get("ask_account_id") or trade.get("askAccountId")
         )
         bid_account = self._as_int(
             trade.get("bid_account_id") or trade.get("bidAccountId")
         )
-        maker_is_ask = self._as_bool(
+
+        # 獲取 is_maker_ask 字段（這個字段是可靠的）
+        # 注意：不能使用 or 運算符，因為 False 會被當作假值跳過
+        maker_is_ask_raw = (
             trade.get("is_maker_ask")
-            or trade.get("maker_is_ask")
-            or trade.get("makerIsAsk")
-            or trade.get("maker_side_is_ask")
+            if trade.get("is_maker_ask") is not None
+            else trade.get("maker_is_ask")
+            if trade.get("maker_is_ask") is not None
+            else trade.get("makerIsAsk")
+            if trade.get("makerIsAsk") is not None
+            else trade.get("maker_side_is_ask")
         )
-        taker_is_ask = self._as_bool(
-            trade.get("is_taker_ask")
-            or trade.get("taker_is_ask")
-            or trade.get("takerIsAsk")
-            or trade.get("taker_side_is_ask")
-        )
-        maker_is_buy = self._as_bool(
-            trade.get("maker_is_buy") or trade.get("is_maker_buy") or trade.get("makerIsBuy")
-        )
-        taker_is_buy = self._as_bool(
-            trade.get("taker_is_buy") or trade.get("is_taker_buy") or trade.get("takerIsBuy")
-        )
+        maker_is_ask = self._as_bool(maker_is_ask_raw)
 
-        if maker_account is None or taker_account is None:
-            if maker_is_ask is True:
-                if maker_account is None:
-                    maker_account = ask_account
-                if taker_account is None:
-                    taker_account = bid_account
-            elif maker_is_ask is False:
-                if maker_account is None:
-                    maker_account = bid_account
-                if taker_account is None:
-                    taker_account = ask_account
+        # 根據 is_maker_ask 推斷 maker 和 taker 的賬户
+        maker_account: Optional[int] = None
+        taker_account: Optional[int] = None
 
+        if maker_is_ask is True:
+            # maker 在 ask 方（賣出），taker 在 bid 方（買入）
+            maker_account = ask_account
+            taker_account = bid_account
+        elif maker_is_ask is False:
+            # maker 在 bid 方（買入），taker 在 ask 方（賣出）
+            maker_account = bid_account
+            taker_account = ask_account
+
+        # 通過賬户索引匹配判斷當前用户的角色（maker 或 taker）
         is_maker: Optional[bool] = None
         if self.account_index is not None:
             if maker_account is not None and maker_account == int(self.account_index):
@@ -1935,105 +1927,46 @@ class LighterClient(BaseExchangeClient):
             elif taker_account is not None and taker_account == int(self.account_index):
                 is_maker = False
 
+        # 根據用户角色和 is_maker_ask 推斷交易方向
         side: Optional[str] = None
+
         if is_maker is True:
-            if maker_is_ask is None and maker_is_buy is not None:
-                maker_is_ask = not maker_is_buy
-            if maker_is_ask is not None:
-                side = "Ask" if maker_is_ask else "Bid"
+            # 當前用户是 maker
+            if maker_is_ask is True:
+                side = "Ask"  # maker 賣出
+            elif maker_is_ask is False:
+                side = "Bid"  # maker 買入
         elif is_maker is False:
-            if taker_is_ask is None and taker_is_buy is not None:
-                taker_is_ask = not taker_is_buy
-            if taker_is_ask is None and maker_is_ask is not None:
-                taker_is_ask = not maker_is_ask
-            if taker_is_ask is not None:
-                side = "Ask" if taker_is_ask else "Bid"
+            # 當前用户是 taker，方向與 maker 相反
+            if maker_is_ask is True:
+                side = "Bid"  # maker 賣出，則 taker 買入
+            elif maker_is_ask is False:
+                side = "Ask"  # maker 買入，則 taker 賣出
 
+        # 如果無法通過賬户匹配判斷角色，則根據賬户所在方直接判斷方向
         if side is None:
-            generic_side = trade.get("side") or trade.get("taker_side") or trade.get("maker_side")
-            if isinstance(generic_side, str):
-                side_upper = generic_side.upper()
-                if side_upper in ("BUY", "BID"):
-                    side = "Bid"
-                elif side_upper in ("SELL", "ASK"):
-                    side = "Ask"
+            if ask_account is not None and self.account_index is not None:
+                if ask_account == int(self.account_index):
+                    side = "Ask"  # 當前用户在 ask 方，即賣出
+            if bid_account is not None and self.account_index is not None:
+                if bid_account == int(self.account_index):
+                    side = "Bid"  # 當前用户在 bid 方，即買入
 
-        if side is None and maker_is_ask is not None:
-            side = "Ask" if maker_is_ask else "Bid"
-
+        # 如果還是無法判斷，記錄警告並使用默認值
         if side is None:
+            logger.warning(
+                f"Trade {trade_id}: 無法確定交易方向 "
+                f"(account_index={self.account_index}, ask_account={ask_account}, "
+                f"bid_account={bid_account}, is_maker_ask={maker_is_ask})"
+            )
+            # 兜底默認值
             side = "Bid"
 
-        maker_fee_raw = self._safe_float(trade.get("maker_fee"))
-        taker_fee_raw = self._safe_float(trade.get("taker_fee"))
-
-        if is_maker is None:
-            if maker_fee_raw is not None and (taker_fee_raw is None or abs(maker_fee_raw) >= abs(taker_fee_raw)):
-                is_maker = True
-            elif taker_fee_raw is not None:
-                is_maker = False
-
-        fee_amount: Optional[float] = None
-        fee_amount_explicit = False
-        for key in (
-            "fee",
-            "fee_amount",
-            "fee_paid",
-            "feeValue",
-            "fee_value",
-            "maker_fee_paid",
-            "taker_fee_paid",
-        ):
-            value = self._safe_float(trade.get(key))
-            if value is not None:
-                fee_amount = value
-                fee_amount_explicit = True
-                break
-
-        notional: Optional[float] = None
-        if usd_amount is not None:
-            notional = abs(usd_amount)
-        elif size is not None and price is not None:
-            notional = abs(size * price)
-
-        rate_candidate: Optional[float] = None
-        if is_maker is True and maker_fee_raw is not None:
-            rate_candidate = maker_fee_raw
-        elif is_maker is False and taker_fee_raw is not None:
-            rate_candidate = taker_fee_raw
-        elif maker_fee_raw is not None:
-            rate_candidate = maker_fee_raw
-        elif taker_fee_raw is not None:
-            rate_candidate = taker_fee_raw
-
-        if (
-            self._allow_fee_rate_inference
-            and rate_candidate is not None
-            and notional is not None
-            and not fee_amount_explicit
-        ):
-            rate = rate_candidate
-            if abs(rate) > 1:
-                rate = rate / 1_000_000.0
-            computed_fee = notional * rate
-            if (
-                fee_amount is None
-                or fee_amount == 0.0
-                or (notional > 0 and abs(fee_amount) > notional * 0.1)
-            ):
-                fee_amount = computed_fee
-
-        if fee_amount is None:
-            fee_amount = 0.0
-
-        fee_asset = (
-            trade.get("fee_asset")
-            or trade.get("feeAsset")
-            or trade.get("maker_fee_asset")
-            or trade.get("taker_fee_asset")
-            or trade.get("fee_currency")
-            or trade.get("feeCurrency")
-        )
+        # Lighter API 不返回手續費信息
+        # 根據測試結果，API 不返回任何 fee 相關字段
+        fee_amount = 0.0
+        fee_source = "api_not_provided"
+        fee_asset = None
 
         order_identifier = (
             trade.get("order_id")
@@ -2057,15 +1990,13 @@ class LighterClient(BaseExchangeClient):
             "usd_amount": usd_amount,
             "fee": fee_amount,
             "fee_asset": fee_asset,
-            "taker_fee": taker_fee_raw,
-            "maker_fee": maker_fee_raw,
-            # 如果沒有 fee 項，就用 maker_fee 或 taker_fee 推斷出來的，默認不推算
-            "fee_rate_inferred": bool(
-                self._allow_fee_rate_inference and not fee_amount_explicit and rate_candidate is not None
-            ),
+            "fee_source": fee_source,  # 記錄手續費來源，用於調試和數據質量監控
             "is_maker": is_maker,
             "maker_account_index": maker_account,
             "taker_account_index": taker_account,
+            "ask_account_id": ask_account,  # 保留原始 API 字段用於調試
+            "bid_account_id": bid_account,  # 保留原始 API 字段用於調試
+            "is_maker_ask": maker_is_ask,  # 保留原始 API 字段用於調試
             "timestamp": timestamp,
             "tx_hash": trade.get("tx_hash"),
         }
