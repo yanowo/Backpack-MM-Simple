@@ -24,7 +24,7 @@ app = Flask(__name__,
             static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.config['SECRET_KEY'] = os.urandom(24)
 
-# 配置SocketIO以提高连接稳定性
+# 配置SocketIO以提高連接穩定性
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
@@ -165,7 +165,7 @@ def start_bot():
         # 檢查API密鑰
         if exchange == 'paradex':
             if not secret_key or not account_address:
-                return jsonify({'success': False, 'message': 'Paradex需要提供StarkNet私鑰與帳戶地址'}), 400
+                return jsonify({'success': False, 'message': 'Paradex需要提供StarkNet私鑰與帳户地址'}), 400
         else:
             if not api_key or not secret_key:
                 return jsonify({'success': False, 'message': 'API密鑰未配置，請檢查環境變量'}), 400
@@ -392,7 +392,7 @@ def get_config():
 @socketio.on('connect')
 def handle_connect():
     """WebSocket連接建立"""
-    logger.info("客戶端已連接")
+    logger.info("客户端已連接")
     emit('connected', {'message': '已連接到服務器'})
     # 如果機器人正在運行，發送當前狀態
     if bot_status['running']:
@@ -402,7 +402,7 @@ def handle_connect():
 @socketio.on('disconnect')
 def handle_disconnect():
     """WebSocket連接斷開"""
-    logger.info("客戶端已斷開連接")
+    logger.info("客户端已斷開連接")
 
 
 @socketio.on('ping')
@@ -429,14 +429,14 @@ def collect_strategy_stats():
 
         # 獲取餘額 - 只獲取報價資產（USDT/USDC/USD）
         try:
-            # 獲取客戶端實例
+            # 獲取客户端實例
             client = current_strategy.client if hasattr(current_strategy, 'client') else None
 
             if client:
                 # 獲取完整餘額信息
                 balances = client.get_balance()
 
-                # 只初始化報價資產余額變量
+                # 只初始化報價資產餘額變量
                 quote_balance = 0.0
 
                 # 檢查是否有錯誤
@@ -452,12 +452,19 @@ def collect_strategy_stats():
                             logger.debug(f"Paradex 資產映射: {quote_asset_key} -> USDC")
                             quote_asset_key = 'USDC'
 
+                    # Lighter 特殊處理：統一使用 USDC（因為返回了別名）
+                    if current_strategy.exchange.lower() == 'lighter':
+                        # Lighter 返回 USDC/USD/USDT 三個別名，優先使用 USDC
+                        if 'USDC' in balances:
+                            logger.debug(f"Lighter 使用 USDC 作為報價資產 (原始: {quote_asset_key})")
+                            quote_asset_key = 'USDC'
+
                     # 嘗試多個可能的報價資產名稱（USDT, USDC, USD）
                     possible_quote_keys = [quote_asset_key]
                     if quote_asset_key not in ['USDT', 'USDC', 'USD']:
                         possible_quote_keys.extend(['USDC', 'USDT', 'USD'])
 
-                    # 獲取報價資產余額
+                    # 獲取報價資產餘額
                     for key in possible_quote_keys:
                         if key in balances:
                             quote_info = balances[key]
@@ -477,13 +484,13 @@ def collect_strategy_stats():
                                     else:
                                         quote_balance = 0.0
 
-                                logger.debug(f"[{current_strategy.exchange}] 報價資產 {key} 余額: {quote_balance:.2f}")
+                                logger.debug(f"[{current_strategy.exchange}] 報價資產 {key} 餘額: {quote_balance:.2f}")
                                 break  # 找到就退出循環
                             except (ValueError, TypeError) as e:
-                                logger.error(f"轉換報價資產余額失敗: {e}, quote_info={quote_info}")
+                                logger.error(f"轉換報價資產餘額失敗: {e}, quote_info={quote_info}")
                                 continue
                     else:
-                        logger.error(f"[{current_strategy.exchange}] 未找到報價資產余額，嘗試的鍵: {possible_quote_keys}")
+                        logger.error(f"[{current_strategy.exchange}] 未找到報價資產餘額，嘗試的鍵: {possible_quote_keys}")
                         quote_balance = 0.0
                 else:
                     if has_error:
@@ -491,12 +498,12 @@ def collect_strategy_stats():
                     else:
                         logger.error(f"[{current_strategy.exchange}] 獲取餘額返回格式不正確: type={type(balances)}")
 
-                # 設置統計數據（不再獲取基礎資產，總余額直接使用報價資產余額）
+                # 設置統計數據（不再獲取基礎資產，總餘額直接使用報價資產餘額）
                 stats['base_balance'] = 0.0  # 不再顯示基礎資產
                 stats['quote_balance'] = round(quote_balance, 2)
-                stats['total_balance_usd'] = round(quote_balance, 2)  # 總余額就是報價資產余額
+                stats['total_balance_usd'] = round(quote_balance, 2)  # 總餘額就是報價資產餘額
             else:
-                # 如果沒有客戶端，使用原有方法獲取報價資產
+                # 如果沒有客户端，使用原有方法獲取報價資產
                 quote_balance_result = current_strategy.get_asset_balance(current_strategy.quote_asset)
 
                 # 處理可能返回元組的情況
@@ -715,7 +722,7 @@ def stop_stats_update():
 
 
 def broadcast_status_update(data: Dict[str, Any]):
-    """廣播狀態更新到所有連接的客戶端"""
+    """廣播狀態更新到所有連接的客户端"""
     global bot_status
     bot_status['last_update'] = datetime.now().isoformat()
     bot_status['stats'] = data

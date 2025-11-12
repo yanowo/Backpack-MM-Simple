@@ -22,7 +22,6 @@ def parse_arguments():
     parser.add_argument('--web', action='store_true', help='啟動Web界面')
     
     # 基本參數
-
     parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex', 'lighter'], default='backpack', help='交易所選擇 (backpack、aster、paradex 或 lighter)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
@@ -42,8 +41,16 @@ def parse_arguments():
     parser.add_argument('--inventory-skew', type=float, default=0.0, help='永續倉位偏移調整係數 (0-1)')
     parser.add_argument('--stop-loss', type=float, help='永續倉位止損觸發值 (以報價資產計價)')
     parser.add_argument('--take-profit', type=float, help='永續倉位止盈觸發值 (以報價資產計價)')
-    parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'volume_hold'], default='standard', help='策略選擇 (standard、maker_hedge 或 volume_hold)')
-    parser.add_argument('--strategy-config', type=str, help='高階策略專用的 JSON 配置檔路徑（如 volume_hold）')
+    parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'grid', 'perp_grid'], default='standard', help='策略選擇 (standard, maker_hedge, grid 或 perp_grid)')
+
+    # 網格策略參數
+    parser.add_argument('--grid-upper', type=float, help='網格上限價格')
+    parser.add_argument('--grid-lower', type=float, help='網格下限價格')
+    parser.add_argument('--grid-num', type=int, default=10, help='網格數量 (默認: 10)')
+    parser.add_argument('--auto-price', action='store_true', help='自動設置網格價格範圍')
+    parser.add_argument('--price-range', type=float, default=5.0, help='自動模式下的價格範圍百分比 (默認: 5.0)')
+    parser.add_argument('--grid-mode', choices=['arithmetic', 'geometric'], default='arithmetic', help='網格模式 (arithmetic 或 geometric)')
+    parser.add_argument('--grid-type', choices=['neutral', 'long', 'short'], default='neutral', help='永續網格類型 (neutral, long 或 short)')
 
     # 數據庫選項
     parser.add_argument('--enable-db', dest='enable_db', action='store_true', help='啟用資料庫寫入功能')
@@ -169,7 +176,7 @@ def main():
             logger.error("缺少 Lighter Account Index，請透過環境變量 LIGHTER_ACCOUNT_INDEX 提供")
     elif exchange == 'paradex':
         private_key = os.getenv('PARADEX_PRIVATE_KEY', '')  # StarkNet 私鑰
-        account_address = os.getenv('PARADEX_ACCOUNT_ADDRESS')  # StarkNet 帳戶地址
+        account_address = os.getenv('PARADEX_ACCOUNT_ADDRESS')  # StarkNet 帳户地址
         ws_proxy = os.getenv('PARADEX_PROXY_WEBSOCKET')
         base_url = os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1')
 
@@ -181,14 +188,42 @@ def main():
             'account_address': account_address,
             'base_url': base_url,
         }
+    elif exchange == 'lighter':
+        api_key = os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
+        secret_key = os.getenv('LIGHTER_SECRET_KEY') or api_key
+        ws_proxy = os.getenv('LIGHTER_PROXY_WEBSOCKET') or os.getenv('LIGHTER_WS_PROXY')
+        base_url = os.getenv('LIGHTER_BASE_URL')
+        account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+        account_address = os.getenv('LIGHTER_ADDRESS')
+        if not account_index and account_address:
+            from api.lighter_client import _get_lihgter_account_index
+            account_index = _get_lihgter_account_index(account_address)
+        api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
+        chain_id = os.getenv('LIGHTER_CHAIN_ID')
+
+        exchange_config = {
+            'api_private_key': api_key,
+            'account_index': account_index,
+            'api_key_index': api_key_index,
+            'base_url': base_url,
+        }
+        if chain_id is not None:
+            exchange_config['chain_id'] = chain_id
     else:
-        logger.error("不支持的交易所，請選擇 'backpack', 'aster', 'lighter' 或 'paradex'")
+        logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex' 或 'lighter'")
         sys.exit(1)
 
     # 檢查API密鑰
     if exchange == 'paradex':
         if not secret_key or not account_address:
-            logger.error("Paradex 需要提供 StarkNet 私鑰與帳戶地址，請確認環境變數已設定")
+            logger.error("Paradex 需要提供 StarkNet 私鑰與帳户地址，請確認環境變數已設定")
+            sys.exit(1)
+    elif exchange == 'lighter':
+        if not api_key:
+            logger.error("缺少 Lighter 私鑰，請使用 --api-key 或環境變量 LIGHTER_PRIVATE_KEY 提供")
+            sys.exit(1)
+        if not exchange_config.get('account_index'):
+            logger.error("缺少 Lighter Account Index，請透過環境變量 LIGHTER_ACCOUNT_INDEX 提供")
             sys.exit(1)
     else:
         if not api_key or not secret_key:
@@ -219,18 +254,88 @@ def main():
         except ImportError as e:
             logger.error(f"啟動命令行界面時出錯: {str(e)}")
             sys.exit(1)
-    elif args.symbol and args.spread is not None:
-        # 如果指定了交易對和價差，直接運行做市策略
+    elif args.symbol and (args.spread is not None or args.strategy in ['grid', 'perp_grid']):
+        # 如果指定了交易對，直接運行策略（做市或網格）
         try:
             from strategies.market_maker import MarketMaker
             from strategies.maker_taker_hedge import MakerTakerHedgeStrategy
             from strategies.perp_market_maker import PerpetualMarketMaker
+            from strategies.grid_strategy import GridStrategy
+            from strategies.perp_grid_strategy import PerpGridStrategy
             
             # 處理重平設置
             market_type = args.market_type
 
             strategy_name = args.strategy
-            if market_type == 'perp':
+
+            # 網格策略處理
+            if strategy_name == 'grid':
+                logger.info("啟動現貨網格交易策略")
+                logger.info(f"  網格數量: {args.grid_num}")
+                logger.info(f"  網格模式: {args.grid_mode}")
+                if args.auto_price:
+                    logger.info(f"  自動價格範圍: ±{args.price_range}%")
+                else:
+                    logger.info(f"  價格範圍: {args.grid_lower} ~ {args.grid_upper}")
+
+                market_maker = GridStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=args.symbol,
+                    grid_upper_price=args.grid_upper,
+                    grid_lower_price=args.grid_lower,
+                    grid_num=args.grid_num,
+                    order_quantity=args.quantity,
+                    auto_price_range=args.auto_price,
+                    price_range_percent=args.price_range,
+                    grid_mode=args.grid_mode,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=args.enable_db
+                )
+
+            elif strategy_name == 'perp_grid':
+                logger.info("啟動永續合約網格交易策略")
+                logger.info(f"  網格數量: {args.grid_num}")
+                logger.info(f"  網格模式: {args.grid_mode}")
+                logger.info(f"  網格類型: {args.grid_type}")
+                logger.info(f"  最大持倉量: {args.max_position}")
+                if args.auto_price:
+                    logger.info(f"  自動價格範圍: ±{args.price_range}%")
+                else:
+                    logger.info(f"  價格範圍: {args.grid_lower} ~ {args.grid_upper}")
+
+                market_maker = PerpGridStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=args.symbol,
+                    grid_upper_price=args.grid_upper,
+                    grid_lower_price=args.grid_lower,
+                    grid_num=args.grid_num,
+                    order_quantity=args.quantity,
+                    auto_price_range=args.auto_price,
+                    price_range_percent=args.price_range,
+                    grid_mode=args.grid_mode,
+                    grid_type=args.grid_type,
+                    target_position=args.target_position,
+                    max_position=args.max_position,
+                    position_threshold=args.position_threshold,
+                    inventory_skew=args.inventory_skew,
+                    stop_loss=args.stop_loss,
+                    take_profit=args.take_profit,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=args.enable_db
+                )
+
+                if args.stop_loss is not None:
+                    logger.info(f"  止損閾值: {args.stop_loss} {market_maker.quote_asset}")
+                if args.take_profit is not None:
+                    logger.info(f"  止盈閾值: {args.take_profit} {market_maker.quote_asset}")
+
+            elif market_type == 'perp':
                 logger.info(f"啟動永續合約做市模式 (策略: {strategy_name}, 交易所: {exchange})")
                 logger.info(f"  目標持倉量: {abs(args.target_position)}")
                 logger.info(f"  最大持倉量: {args.max_position}")
@@ -350,6 +455,11 @@ def main():
         print("  --web     啟動Web界面")
         print("  --cli     啟動命令行界面")
         print("  直接指定  --symbol 和 --spread 參數運行做市策略")
+        print("\n支持的交易所：")
+        print("  backpack  Backpack 交易所 (默認)")
+        print("  aster     Aster 永續合約交易所")
+        print("  paradex   Paradex 永續合約交易所")
+        print("  lighter   Lighter 永續合約交易所")
         print("\n資料庫參數：")
         print("  --enable-db            啟用資料庫寫入")
         print("  --disable-db           停用資料庫寫入 (預設)")
@@ -358,9 +468,30 @@ def main():
         print("  --disable-rebalance       關閉重平功能")
         print("  --base-asset-target 30    設置基礎資產目標比例為30%")
         print("  --rebalance-threshold 15  設置重平觸發閾值為15%")
-        print("\n範例：")
-        print("  python run.py --symbol SOL_USDC --spread 0.5 --enable-rebalance --base-asset-target 25 --rebalance-threshold 12")
-        print("  python run.py --symbol SOL_USDC --spread 0.5 --market-type perp --target-position 1.0 --max-position 2")
+        print("\n=== 範例：現貨做市 ===")
+        print("  # Backpack 現貨做市")
+        print("  python run.py --exchange backpack --symbol SOL_USDC --spread 0.5")
+        print("\n=== 範例：現貨網格 ===")
+        print("  # Backpack 現貨網格（自動價格範圍）")
+        print("  python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --grid-num 10")
+        print("  # Backpack 現貨網格（手動設定價格範圍）")
+        print("  python run.py --exchange backpack --symbol SOL_USDC --strategy grid --grid-lower 140 --grid-upper 160 --grid-num 10")
+        print("\n=== 範例：永續合約做市 ===")
+        print("  # Aster 永續合約做市")
+        print("  python run.py --exchange aster --symbol BTCUSDT --spread 0.3 --market-type perp --max-position 0.5")
+        print("  # Paradex 永續合約做市")
+        print("  python run.py --exchange paradex --symbol BTC-USD-PERP --spread 0.3 --market-type perp --max-position 0.5")
+        print("  # Lighter 永續合約做市")
+        print("  python run.py --exchange lighter --symbol BTCUSDT --spread 0.3 --market-type perp --max-position 0.5")
+        print("\n=== 範例：永續合約網格 ===")
+        print("  # Aster 永續網格（中性網格，自動價格）")
+        print("  python run.py --exchange aster --symbol BTCUSDT --strategy perp_grid --auto-price --grid-num 10 --grid-type neutral")
+        print("  # Paradex 永續網格（做多網格）")
+        print("  python run.py --exchange paradex --symbol BTC-USD-PERP --strategy perp_grid --grid-lower 45000 --grid-upper 50000 --grid-num 10 --grid-type long")
+        print("  # Lighter 永續網格（做空網格）")
+        print("  python run.py --exchange lighter --symbol BTCUSDT --strategy perp_grid --grid-lower 45000 --grid-upper 50000 --grid-num 10 --grid-type short")
+        print("  # 永續網格（帶止損止盈）")
+        print("  python run.py --exchange aster --symbol ETHUSDT --strategy perp_grid --auto-price --grid-num 15 --stop-loss 100 --take-profit 200")
         print("\n使用 --help 查看完整幫助")
 
 if __name__ == "__main__":

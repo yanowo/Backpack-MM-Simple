@@ -251,6 +251,53 @@ class SimpleSignerClient:
             raise SimpleSignerError(f"Transaction rejected ({response.status_code}): {message}")
         return payload
 
+    def _send_tx_batch(self, tx_list: List[Tuple[int, str]], price_protection: bool = True) -> Dict[str, Any]:
+        """發送批量交易
+
+        Args:
+            tx_list: List of (tx_type, tx_info) tuples
+            price_protection: Whether to enable price protection
+
+        Returns:
+            Response payload from the server
+        """
+        if not tx_list:
+            raise SimpleSignerError("Empty transaction list")
+
+        url = f"{self.base_url}/api/v1/sendTxBatch"
+
+        tx_types = []
+        tx_infos = []
+
+        for tx_type, tx_info in tx_list:
+            if not tx_info:
+                raise SimpleSignerError("Empty tx_info in batch")
+            tx_types.append(int(tx_type))
+            tx_infos.append(tx_info)
+
+        # 使用 multipart/form-data 格式，參數為 JSON 字符串
+        files = {
+            "tx_types": (None, json.dumps(tx_types)),
+            "tx_infos": (None, json.dumps(tx_infos)),
+            "price_protection": (None, "true" if price_protection else "false"),
+        }
+
+        logger.debug("Batch request: %d transactions, tx_types: %s", len(tx_list), tx_types)
+
+        try:
+            response = self.session.post(url, files=files, timeout=self.timeout * 2, verify=self.verify_ssl)
+        except requests.RequestException as exc:
+            raise SimpleSignerError(f"Failed to submit batch transaction: {exc}") from exc
+
+        try:
+            payload = response.json() if response.text else {}
+        except json.JSONDecodeError as exc:
+            raise SimpleSignerError(f"Failed to decode sendTxBatch response: {exc}") from exc
+
+        if response.status_code != 200:
+            message = payload.get("message") or response.text
+            raise SimpleSignerError(f"Batch transaction rejected ({response.status_code}): {message}")
+        return payload
     # ---- public API -------------------------------------------------------------
     def check_client(self) -> Optional[str]:
         result = self.signer.CheckClient(ctypes.c_int(self.api_key_index), ctypes.c_longlong(self.account_index))
@@ -349,16 +396,105 @@ class SimpleSignerClient:
                 return last_payload, None, message
         return last_payload, None, "Unable to cancel order after nonce retries"
 
+    def create_order_batch(
+        self,
+        orders: List[Dict[str, Any]],
+    ) -> Tuple[List[Optional[Dict[str, Any]]], Optional[Dict[str, Any]], Optional[str]]:
+        """批量創建訂單
+
+        Args:
+            orders: List of order dictionaries, each containing:
+                - market_index: int
+                - client_order_index: int
+                - base_amount: int
+                - price: int
+                - is_ask: bool
+                - order_type: int
+                - time_in_force: int
+                - reduce_only: bool (optional, default False)
+                - trigger_price: int (optional, default NIL_TRIGGER_PRICE)
+                - order_expiry: int (optional, default DEFAULT_28_DAY_ORDER_EXPIRY)
+
+        Returns:
+            Tuple of (list of payloads, response, error message)
+        """
+        if not orders:
+            return [], None, "Empty order list"
+
+        tx_list: List[Tuple[int, str]] = []
+        payloads: List[Optional[Dict[str, Any]]] = []
+
+        for attempt in range(2):
+            tx_list.clear()
+            payloads.clear()
+            all_signed = True
+
+            for order in orders:
+                nonce = self._next_nonce()
+
+                # 提取訂單參數
+                market_index = order.get("market_index")
+                client_order_index = order.get("client_order_index")
+                base_amount = order.get("base_amount")
+                price = order.get("price")
+                is_ask = order.get("is_ask")
+                order_type = order.get("order_type")
+                time_in_force = order.get("time_in_force")
+                reduce_only = order.get("reduce_only", False)
+                trigger_price = order.get("trigger_price", self.NIL_TRIGGER_PRICE)
+                order_expiry = order.get("order_expiry", self.DEFAULT_28_DAY_ORDER_EXPIRY)
+
+                # 簽名訂單
+                payload, error = self._decode_str_or_err(
+                    self.signer.SignCreateOrder(
+                        ctypes.c_int(market_index),
+                        ctypes.c_longlong(client_order_index),
+                        ctypes.c_longlong(base_amount),
+                        ctypes.c_int(price),
+                        ctypes.c_int(int(is_ask)),
+                        ctypes.c_int(order_type),
+                        ctypes.c_int(time_in_force),
+                        ctypes.c_int(int(reduce_only)),
+                        ctypes.c_int(trigger_price),
+                        ctypes.c_longlong(order_expiry),
+                        ctypes.c_longlong(nonce),
+                    )
+                )
+
+                if error:
+                    return payloads, None, error
+
+                try:
+                    parsed_payload = json.loads(payload) if payload else None
+                except json.JSONDecodeError:
+                    parsed_payload = {"raw": payload}
+
+                payloads.append(parsed_payload)
+                tx_list.append((self.TX_TYPE_CREATE_ORDER, payload or ""))
+
+            # 發送批量交易
+            try:
+                response = self._send_tx_batch(tx_list)
+                return payloads, response, None
+            except SimpleSignerError as exc:
+                message = str(exc)
+                if "invalid nonce" in message.lower() and attempt == 0:
+                    self._fetch_nonce()
+                    time.sleep(0.25)
+                    continue
+                return payloads, None, message
+
+        return payloads, None, "Unable to submit batch orders after nonce retries"
 
 def _compact_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in data.items() if value is not None}
 
 def _get_lihgter_account_index(address):
-    # 通过钱包地址查找主账户
+    # 通過錢包地址查找主賬户
     from eth_utils import to_checksum_address
     import requests
 
-    # 转换为 EIP-55 校验格式
+    # 轉換為 EIP-55 校驗格式
     checksum_address = to_checksum_address(address.lower())
     url = 'https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value='
     full_url = url + checksum_address
@@ -1015,14 +1151,19 @@ class LighterClient(BaseExchangeClient):
         locked = max(collateral - available, 0.0)
         total = available + locked
 
+        # Lighter使用USDC作為統一抵押品，同時提供USD/USDT別名以兼容不同策略
+        balance_info = {
+            "asset": "USDC",
+            "available": available,
+            "locked": locked,
+            "total": total,
+            "collateral": collateral,
+        }
+
         return {
-            "USDC": {
-                "asset": "USDC",
-                "available": available,
-                "locked": locked,
-                "total": total,
-                "collateral": collateral,
-            }
+            "USDC": balance_info,
+            "USD": balance_info,   # 別名，指向同一數據
+            "USDT": balance_info,  # 別名，指向同一數據
         }
 
     def get_collateral(self, subaccount_id: Optional[str] = None) -> Dict[str, Any]:
@@ -1051,6 +1192,199 @@ class LighterClient(BaseExchangeClient):
         if cross_asset_value is not None:
             response["crossAssetValue"] = cross_asset_value
         return response
+
+    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+        """批量執行訂單
+
+        Args:
+            orders_details: List of order detail dictionaries
+
+        Returns:
+            List of order results or error dict
+        """
+        signer = self._ensure_signer_client()
+        if not signer:
+            return {"error": "Signer client is not configured"}
+
+        if not orders_details:
+            return {"error": "Empty order list"}
+
+        # 預處理所有訂單
+        processed_orders = []
+
+        for order_details in orders_details:
+            symbol = order_details.get("symbol")
+            if not symbol:
+                logger.warning("跳過無效訂單: 缺少 symbol")
+                continue
+
+            market = self._lookup_market(symbol)
+            if not market:
+                logger.warning("跳過無效訂單: 未知交易對 %s", symbol)
+                continue
+
+            market_id = market.get("market_id")
+            if market_id is None:
+                logger.warning("跳過無效訂單: %s 缺少 market_id", symbol)
+                continue
+
+            base_precision = int(market.get("base_precision", 3))
+            quote_precision = int(market.get("quote_precision", 3))
+
+            # 處理訂單類型
+            order_type_raw = (order_details.get("orderType") or order_details.get("type") or "limit").upper()
+            order_type_map = {
+                "LIMIT": SimpleSignerClient.ORDER_TYPE_LIMIT,
+                "MARKET": SimpleSignerClient.ORDER_TYPE_MARKET,
+                "STOP": SimpleSignerClient.ORDER_TYPE_STOP_LOSS,
+                "STOP_LIMIT": SimpleSignerClient.ORDER_TYPE_STOP_LOSS_LIMIT,
+                "TAKE_PROFIT": SimpleSignerClient.ORDER_TYPE_TAKE_PROFIT,
+                "TAKE_PROFIT_LIMIT": SimpleSignerClient.ORDER_TYPE_TAKE_PROFIT_LIMIT,
+            }
+            order_type = order_type_map.get(order_type_raw, SimpleSignerClient.ORDER_TYPE_LIMIT)
+
+            # 處理買賣方向
+            side_raw = str(order_details.get("side", "")).upper()
+            is_ask = side_raw in ("ASK", "SELL", "SELL_SHORT")
+
+            # 處理價格和數量
+            price_value = order_details.get("price")
+            quantity_value = order_details.get("quantity") or order_details.get("size")
+            if quantity_value is None:
+                logger.warning("跳過無效訂單: 缺少 quantity")
+                continue
+
+            scaled_price = self._scale_to_int(price_value, quote_precision)
+            scaled_quantity = self._scale_to_int(quantity_value, base_precision)
+
+            # 處理市價單
+            if scaled_price is None:
+                if order_type == SimpleSignerClient.ORDER_TYPE_MARKET:
+                    book = self.get_order_book(symbol, limit=1)
+                    reference_price: Optional[float] = None
+                    if isinstance(book, dict) and "error" not in book:
+                        if is_ask:
+                            bids = book.get("bids") or []
+                            if bids:
+                                reference_price = float(bids[0][0]) * 0.999
+                        else:
+                            asks = book.get("asks") or []
+                            if asks:
+                                reference_price = float(asks[0][0]) * 1.001
+                    if reference_price is None:
+                        reference_price = market.get("last_price")
+                    if reference_price is None:
+                        logger.warning("跳過無效訂單: 無法獲取市價")
+                        continue
+                    price_value = reference_price
+                    scaled_price = self._scale_to_int(price_value, quote_precision)
+                else:
+                    logger.warning("跳過無效訂單: 無效價格格式")
+                    continue
+
+            if scaled_price is None or scaled_quantity is None:
+                logger.warning("跳過無效訂單: 無效價格或數量")
+                continue
+
+            # 處理 time_in_force
+            time_in_force_raw = (order_details.get("timeInForce") or order_details.get("time_in_force") or "GTC").upper()
+            post_only = bool(order_details.get("postOnly") or order_details.get("post_only"))
+            if post_only:
+                time_in_force = SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY
+            else:
+                tif_map = {
+                    "GTC": SimpleSignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+                    "IOC": SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+                    "FOK": SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+                    "PO": SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
+                    "POST_ONLY": SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
+                }
+                time_in_force = tif_map.get(time_in_force_raw, SimpleSignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME)
+            if order_type == SimpleSignerClient.ORDER_TYPE_MARKET:
+                time_in_force = SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL
+
+            # 處理 reduce_only
+            reduce_only = bool(order_details.get("reduceOnly") or order_details.get("reduce_only"))
+
+            # 處理觸發價格
+            trigger_price_raw = order_details.get("triggerPrice") or order_details.get("trigger_price")
+            if trigger_price_raw is None:
+                scaled_trigger_price = SimpleSignerClient.NIL_TRIGGER_PRICE
+            else:
+                scaled_trigger_price = self._scale_to_int(trigger_price_raw, quote_precision)
+                if scaled_trigger_price is None:
+                    logger.warning("跳過無效訂單: 無效觸發價格")
+                    continue
+
+            # 處理訂單過期時間
+            expiry_raw = order_details.get("orderExpiry") or order_details.get("order_expiry")
+            default_expiry = (
+                SimpleSignerClient.DEFAULT_IOC_EXPIRY
+                if order_type == SimpleSignerClient.ORDER_TYPE_MARKET
+                else SimpleSignerClient.DEFAULT_28_DAY_ORDER_EXPIRY
+            )
+            order_expiry = self._as_int(expiry_raw, default=default_expiry)
+
+            # 處理客户端訂單 ID
+            client_order_raw = (
+                order_details.get("clientOrderIndex")
+                or order_details.get("clientOrderId")
+                or order_details.get("client_order_id")
+            )
+            client_order_index = self._as_int(client_order_raw)
+            if client_order_index is None:
+                client_order_index = self._next_client_order_index()
+
+            # 添加到處理列表
+            processed_orders.append({
+                "market_index": int(market_id),
+                "client_order_index": int(client_order_index),
+                "base_amount": int(scaled_quantity),
+                "price": int(scaled_price),
+                "is_ask": is_ask,
+                "order_type": order_type,
+                "time_in_force": time_in_force,
+                "reduce_only": reduce_only,
+                "trigger_price": int(scaled_trigger_price),
+                "order_expiry": int(order_expiry),
+                # 保存原始信息用於返回
+                "symbol": symbol,
+                "original_price": self._safe_float(price_value),
+                "original_quantity": self._safe_float(quantity_value),
+            })
+
+        if not processed_orders:
+            return {"error": "No valid orders to submit"}
+
+        # 批量簽名並發送訂單
+        tx_payloads, tx_response, error = signer.create_order_batch(processed_orders)
+
+        if error:
+            return {"error": error}
+
+        if not tx_response or tx_response.get("code") != 200:
+            message = tx_response.get("message") if tx_response else "unknown error"
+            return {"error": f"Batch orders rejected: {message}", "response": tx_response}
+
+        # 構建返回結果
+        results = []
+        for i, order in enumerate(processed_orders):
+            result = {
+                "id": str(order["client_order_index"]),
+                "clientOrderIndex": order["client_order_index"],
+                "symbol": order["symbol"],
+                "side": "Ask" if order["is_ask"] else "Bid",
+                "price": order["original_price"],
+                "quantity": order["original_quantity"],
+                "status": "pending",
+            }
+            # 如果有 tx_hash，添加到結果中
+            if tx_response:
+                result["txHash"] = tx_response.get("tx_hash")
+            results.append(result)
+
+        logger.info("批量下單成功: %d 個訂單", len(results))
+        return results
 
     def execute_order(self, order_details: Dict[str, Any]) -> Dict[str, Any]:
         signer = self._ensure_signer_client()
@@ -1164,9 +1498,7 @@ class LighterClient(BaseExchangeClient):
             if scaled_trigger_price is None:
                 return {"error": "Invalid trigger price"}
 
-        expiry_raw = order_details.get("orderExpiry")
-        if expiry_raw is None:
-            expiry_raw = order_details.get("order_expiry")
+        expiry_raw = order_details.get("orderExpiry") or order_details.get("order_expiry")
         default_expiry = (
             SimpleSignerClient.DEFAULT_IOC_EXPIRY
             if order_type == SimpleSignerClient.ORDER_TYPE_MARKET
@@ -1219,7 +1551,7 @@ class LighterClient(BaseExchangeClient):
                 except (TypeError, ValueError):
                     continue
 
-        response = {
+        return {
             "id": str(client_order_index),
             "clientOrderIndex": client_order_index,
             "symbol": symbol,
@@ -1229,19 +1561,6 @@ class LighterClient(BaseExchangeClient):
             "status": "pending",
             "txHash": tx_response.get("tx_hash") if tx_response else None,
         }
-
-        book = self.get_open_orders(symbol)
-        if isinstance(book, dict) and "error" not in book:
-            found = False
-            for entry in book:
-                cid = entry.get("clientOrderIndex") or entry.get("id")
-                if cid is not None and int(cid) == client_order_index:
-                    found = True
-                    break
-            if not found:
-                response["status"] = "rejected"
-                response["error"] = "postOnly_cancelled"
-        return response
 
     def get_open_orders(self, symbol: Optional[str] = None) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         if not symbol:
@@ -1605,49 +1924,41 @@ class LighterClient(BaseExchangeClient):
         price = self._safe_float(trade.get("price"))
         usd_amount = self._safe_float(trade.get("usd_amount"))
 
-        maker_account = self._as_int(
-            trade.get("maker_account_index") or trade.get("makerAccountIndex")
-        )
-        taker_account = self._as_int(
-            trade.get("taker_account_index") or trade.get("takerAccountIndex")
-        )
+        # Lighter API 實際返回的是 ask_account_id 和 bid_account_id，而不是 maker/taker_account_index
         ask_account = self._as_int(
             trade.get("ask_account_id") or trade.get("askAccountId")
         )
         bid_account = self._as_int(
             trade.get("bid_account_id") or trade.get("bidAccountId")
         )
-        maker_is_ask = self._as_bool(
+
+        # 獲取 is_maker_ask 字段（這個字段是可靠的）
+        # 注意：不能使用 or 運算符，因為 False 會被當作假值跳過
+        maker_is_ask_raw = (
             trade.get("is_maker_ask")
-            or trade.get("maker_is_ask")
-            or trade.get("makerIsAsk")
-            or trade.get("maker_side_is_ask")
+            if trade.get("is_maker_ask") is not None
+            else trade.get("maker_is_ask")
+            if trade.get("maker_is_ask") is not None
+            else trade.get("makerIsAsk")
+            if trade.get("makerIsAsk") is not None
+            else trade.get("maker_side_is_ask")
         )
-        taker_is_ask = self._as_bool(
-            trade.get("is_taker_ask")
-            or trade.get("taker_is_ask")
-            or trade.get("takerIsAsk")
-            or trade.get("taker_side_is_ask")
-        )
-        maker_is_buy = self._as_bool(
-            trade.get("maker_is_buy") or trade.get("is_maker_buy") or trade.get("makerIsBuy")
-        )
-        taker_is_buy = self._as_bool(
-            trade.get("taker_is_buy") or trade.get("is_taker_buy") or trade.get("takerIsBuy")
-        )
+        maker_is_ask = self._as_bool(maker_is_ask_raw)
 
-        if maker_account is None or taker_account is None:
-            if maker_is_ask is True:
-                if maker_account is None:
-                    maker_account = ask_account
-                if taker_account is None:
-                    taker_account = bid_account
-            elif maker_is_ask is False:
-                if maker_account is None:
-                    maker_account = bid_account
-                if taker_account is None:
-                    taker_account = ask_account
+        # 根據 is_maker_ask 推斷 maker 和 taker 的賬户
+        maker_account: Optional[int] = None
+        taker_account: Optional[int] = None
 
+        if maker_is_ask is True:
+            # maker 在 ask 方（賣出），taker 在 bid 方（買入）
+            maker_account = ask_account
+            taker_account = bid_account
+        elif maker_is_ask is False:
+            # maker 在 bid 方（買入），taker 在 ask 方（賣出）
+            maker_account = bid_account
+            taker_account = ask_account
+
+        # 通過賬户索引匹配判斷當前用户的角色（maker 或 taker）
         is_maker: Optional[bool] = None
         if self.account_index is not None:
             if maker_account is not None and maker_account == int(self.account_index):
@@ -1655,105 +1966,46 @@ class LighterClient(BaseExchangeClient):
             elif taker_account is not None and taker_account == int(self.account_index):
                 is_maker = False
 
+        # 根據用户角色和 is_maker_ask 推斷交易方向
         side: Optional[str] = None
+
         if is_maker is True:
-            if maker_is_ask is None and maker_is_buy is not None:
-                maker_is_ask = not maker_is_buy
-            if maker_is_ask is not None:
-                side = "Ask" if maker_is_ask else "Bid"
+            # 當前用户是 maker
+            if maker_is_ask is True:
+                side = "Ask"  # maker 賣出
+            elif maker_is_ask is False:
+                side = "Bid"  # maker 買入
         elif is_maker is False:
-            if taker_is_ask is None and taker_is_buy is not None:
-                taker_is_ask = not taker_is_buy
-            if taker_is_ask is None and maker_is_ask is not None:
-                taker_is_ask = not maker_is_ask
-            if taker_is_ask is not None:
-                side = "Ask" if taker_is_ask else "Bid"
+            # 當前用户是 taker，方向與 maker 相反
+            if maker_is_ask is True:
+                side = "Bid"  # maker 賣出，則 taker 買入
+            elif maker_is_ask is False:
+                side = "Ask"  # maker 買入，則 taker 賣出
 
+        # 如果無法通過賬户匹配判斷角色，則根據賬户所在方直接判斷方向
         if side is None:
-            generic_side = trade.get("side") or trade.get("taker_side") or trade.get("maker_side")
-            if isinstance(generic_side, str):
-                side_upper = generic_side.upper()
-                if side_upper in ("BUY", "BID"):
-                    side = "Bid"
-                elif side_upper in ("SELL", "ASK"):
-                    side = "Ask"
+            if ask_account is not None and self.account_index is not None:
+                if ask_account == int(self.account_index):
+                    side = "Ask"  # 當前用户在 ask 方，即賣出
+            if bid_account is not None and self.account_index is not None:
+                if bid_account == int(self.account_index):
+                    side = "Bid"  # 當前用户在 bid 方，即買入
 
-        if side is None and maker_is_ask is not None:
-            side = "Ask" if maker_is_ask else "Bid"
-
+        # 如果還是無法判斷，記錄警告並使用默認值
         if side is None:
+            logger.warning(
+                f"Trade {trade_id}: 無法確定交易方向 "
+                f"(account_index={self.account_index}, ask_account={ask_account}, "
+                f"bid_account={bid_account}, is_maker_ask={maker_is_ask})"
+            )
+            # 兜底默認值
             side = "Bid"
 
-        maker_fee_raw = self._safe_float(trade.get("maker_fee"))
-        taker_fee_raw = self._safe_float(trade.get("taker_fee"))
-
-        if is_maker is None:
-            if maker_fee_raw is not None and (taker_fee_raw is None or abs(maker_fee_raw) >= abs(taker_fee_raw)):
-                is_maker = True
-            elif taker_fee_raw is not None:
-                is_maker = False
-
-        fee_amount: Optional[float] = None
-        fee_amount_explicit = False
-        for key in (
-            "fee",
-            "fee_amount",
-            "fee_paid",
-            "feeValue",
-            "fee_value",
-            "maker_fee_paid",
-            "taker_fee_paid",
-        ):
-            value = self._safe_float(trade.get(key))
-            if value is not None:
-                fee_amount = value
-                fee_amount_explicit = True
-                break
-
-        notional: Optional[float] = None
-        if usd_amount is not None:
-            notional = abs(usd_amount)
-        elif size is not None and price is not None:
-            notional = abs(size * price)
-
-        rate_candidate: Optional[float] = None
-        if is_maker is True and maker_fee_raw is not None:
-            rate_candidate = maker_fee_raw
-        elif is_maker is False and taker_fee_raw is not None:
-            rate_candidate = taker_fee_raw
-        elif maker_fee_raw is not None:
-            rate_candidate = maker_fee_raw
-        elif taker_fee_raw is not None:
-            rate_candidate = taker_fee_raw
-
-        if (
-            self._allow_fee_rate_inference
-            and rate_candidate is not None
-            and notional is not None
-            and not fee_amount_explicit
-        ):
-            rate = rate_candidate
-            if abs(rate) > 1:
-                rate = rate / 1_000_000.0
-            computed_fee = notional * rate
-            if (
-                fee_amount is None
-                or fee_amount == 0.0
-                or (notional > 0 and abs(fee_amount) > notional * 0.1)
-            ):
-                fee_amount = computed_fee
-
-        if fee_amount is None:
-            fee_amount = 0.0
-
-        fee_asset = (
-            trade.get("fee_asset")
-            or trade.get("feeAsset")
-            or trade.get("maker_fee_asset")
-            or trade.get("taker_fee_asset")
-            or trade.get("fee_currency")
-            or trade.get("feeCurrency")
-        )
+        # Lighter API 不返回手續費信息
+        # 根據測試結果，API 不返回任何 fee 相關字段
+        fee_amount = 0.0
+        fee_source = "api_not_provided"
+        fee_asset = None
 
         order_identifier = (
             trade.get("order_id")
@@ -1777,15 +2029,13 @@ class LighterClient(BaseExchangeClient):
             "usd_amount": usd_amount,
             "fee": fee_amount,
             "fee_asset": fee_asset,
-            "taker_fee": taker_fee_raw,
-            "maker_fee": maker_fee_raw,
-            # 如果没有 fee 项，就用 maker_fee 或 taker_fee 推断出来的，默认不推算
-            "fee_rate_inferred": bool(
-                self._allow_fee_rate_inference and not fee_amount_explicit and rate_candidate is not None
-            ),
+            "fee_source": fee_source,  # 記錄手續費來源，用於調試和數據質量監控
             "is_maker": is_maker,
             "maker_account_index": maker_account,
             "taker_account_index": taker_account,
+            "ask_account_id": ask_account,  # 保留原始 API 字段用於調試
+            "bid_account_id": bid_account,  # 保留原始 API 字段用於調試
+            "is_maker_ask": maker_is_ask,  # 保留原始 API 字段用於調試
             "timestamp": timestamp,
             "tx_hash": trade.get("tx_hash"),
         }

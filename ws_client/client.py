@@ -47,9 +47,9 @@ class BackpackWebSocket:
         # 重連相關參數
         self.auto_reconnect = auto_reconnect
         self.reconnect_delay = 1
-        self.max_reconnect_delay = 30
+        self.max_reconnect_delay = 1800
         self.reconnect_attempts = 0
-        self.max_reconnect_attempts = 10
+        self.max_reconnect_attempts = 2
         self.reconnect_cooldown_until = 0.0
         self.running = False
         self.ws_thread = None
@@ -403,6 +403,14 @@ class BackpackWebSocket:
         """定期檢查WebSocket連接狀態並在需要時重連"""
         while self.running:
             current_time = time.time()
+            
+            # 檢查是否在冷卻期，如果是則跳過心跳檢測
+            if self.reconnect_cooldown_until and current_time < self.reconnect_cooldown_until:
+                remaining_cooldown = int(self.reconnect_cooldown_until - current_time)
+                logger.debug(f"WebSocket 處於冷卻期，剩餘 {remaining_cooldown} 秒，使用 API 備援模式")
+                time.sleep(5)
+                continue
+            
             time_since_last_heartbeat = current_time - self.last_heartbeat
             
             if time_since_last_heartbeat > self.heartbeat_interval * 2:
@@ -518,7 +526,7 @@ class BackpackWebSocket:
         with self.ws_lock:
             if not self.running or self.reconnect_attempts >= self.max_reconnect_attempts:
                 logger.warning(f"重連次數超過上限 ({self.max_reconnect_attempts})，暫停自動重連")
-                cooldown_seconds = max(self.max_reconnect_delay * 2, 60)
+                cooldown_seconds = max(self.max_reconnect_delay, 60)
                 self.reconnect_cooldown_until = time.time() + cooldown_seconds
                 self.last_heartbeat = time.time()
                 logger.warning(f"已啟動 {cooldown_seconds} 秒冷卻，將繼續使用備援模式")
@@ -939,9 +947,23 @@ class BackpackWebSocket:
     
     def check_and_reconnect_if_needed(self):
         """檢查連接狀態並在需要時重連 - 供外部調用"""
-        if self.reconnect_cooldown_until and time.time() < self.reconnect_cooldown_until:
+        current_time = time.time()
+        
+        # 如果在冷卻期內，確保 API 備援模式激活，但不觸發重連
+        if self.reconnect_cooldown_until and current_time < self.reconnect_cooldown_until:
+            if not self.is_connected() and not self.api_fallback_active:
+                remaining_cooldown = int(self.reconnect_cooldown_until - current_time)
+                logger.debug(f"冷卻期內檢查到連接斷開（剩餘 {remaining_cooldown} 秒），啟動 API 備援模式")
+                self._start_api_fallback()
             return self.is_connected()
 
+        # 冷卻期已結束，重置重連計數器
+        if self.reconnect_cooldown_until and current_time >= self.reconnect_cooldown_until:
+            self.reconnect_attempts = 0
+            self.reconnect_cooldown_until = 0.0
+            logger.info("冷卻期結束，重置重連計數器")
+
+        # 非冷卻期，檢查連接並觸發重連
         if not self.is_connected() and not self.reconnecting:
             logger.info("外部檢查發現連接斷開，觸發重連...")
             threading.Thread(target=self._trigger_reconnect, daemon=True).start()

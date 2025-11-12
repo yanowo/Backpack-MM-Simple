@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from api.bp_client import BPClient
 from api.aster_client import AsterClient
 from api.lighter_client import LighterClient
+from api.lighter_client import LighterClient
 from ws_client.client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
@@ -70,6 +71,8 @@ class MarketMaker:
         elif exchange == 'lighter':
             self.client = LighterClient(self.exchange_config)
 
+        elif exchange == 'lighter':
+            self.client = LighterClient(self.exchange_config)
         else:
             raise ValueError(f"不支持的交易所: {exchange}")
             
@@ -1995,7 +1998,7 @@ class MarketMaker:
         )
 
         if self.active_buy_orders and self.active_sell_orders:
-            buy_price = float(self.active_buy_orders[0].get('price', 0))
+            buy_price = float(self.active_buy_orders[-1].get('price', 0))
             sell_price = float(self.active_sell_orders[0].get('price', 0))
             spread = sell_price - buy_price
             spread_pct = (spread / buy_price * 100) if buy_price > 0 else 0

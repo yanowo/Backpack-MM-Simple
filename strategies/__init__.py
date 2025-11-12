@@ -9,6 +9,8 @@ from .volume_hold_strategy import (
     VolumeHoldStrategyConfig,
     StrategyConfigError,
 )
+from .grid_strategy import GridStrategy
+from .perp_grid_strategy import PerpGridStrategy
 
 __all__ = [
     "MarketMaker",
@@ -17,4 +19,6 @@ __all__ = [
     "VolumeHoldStrategy",
     "VolumeHoldStrategyConfig",
     "StrategyConfigError",
+    "GridStrategy",
+    "PerpGridStrategy"
 ]
