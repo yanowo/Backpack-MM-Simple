@@ -41,7 +41,7 @@ def parse_arguments():
     parser.add_argument('--inventory-skew', type=float, default=0.0, help='永續倉位偏移調整係數 (0-1)')
     parser.add_argument('--stop-loss', type=float, help='永續倉位止損觸發值 (以報價資產計價)')
     parser.add_argument('--take-profit', type=float, help='永續倉位止盈觸發值 (以報價資產計價)')
-    parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'grid', 'perp_grid'], default='standard', help='策略選擇 (standard, maker_hedge, grid 或 perp_grid)')
+    parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'grid', 'perp_grid', 'volume_hold'], default='standard', help='策略選擇 (standard, maker_hedge, grid, perp_grid 或 volume_hold)')
 
     # 網格策略參數
     parser.add_argument('--grid-upper', type=float, help='網格上限價格')
