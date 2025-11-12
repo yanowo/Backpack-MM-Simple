@@ -1008,24 +1008,8 @@ class VolumeHoldStrategy:
 
     def _get_actual_position(self, account_idx: int, symbol: str) -> Optional[float]:
         client = self._clients[account_idx]
-        try:
-            positions = client.get_positions(symbol)
-        except Exception as exc:
-            logger.warning(
-                "Failed to fetch actual position for %s (%s): %s",
-                symbol,
-                self._account_labels[account_idx],
-                exc,
-            )
-            return None
-        if isinstance(positions, dict) and positions.get("error"):
-            logger.warning(
-                "Failed to fetch actual position for %s (%s): %s",
-                symbol,
-                self._account_labels[account_idx],
-                positions["error"],
-            )
-            return None
+        time.sleep(0.35)
+        positions = client.get_positions(symbol)
         if isinstance(positions, list):
             for entry in positions:
                 if not isinstance(entry, dict):
