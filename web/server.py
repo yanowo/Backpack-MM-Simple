@@ -726,20 +726,14 @@ def collect_strategy_stats():
             stats['runtime_formatted'] = '00:00:00'
 
         # 網格策略特有的統計數據
-        if hasattr(current_strategy, 'grid_profit'):
-            stats['grid_profit'] = round(float(current_strategy.grid_profit), 4)
-        if hasattr(current_strategy, 'grid_buy_filled_count'):
-            stats['grid_buy_filled'] = current_strategy.grid_buy_filled_count
-        if hasattr(current_strategy, 'grid_sell_filled_count'):
-            stats['grid_sell_filled'] = current_strategy.grid_sell_filled_count
-        if hasattr(current_strategy, 'grid_long_filled_count'):
-            stats['grid_long_filled'] = current_strategy.grid_long_filled_count
-        if hasattr(current_strategy, 'grid_short_filled_count'):
-            stats['grid_short_filled'] = current_strategy.grid_short_filled_count
         if hasattr(current_strategy, 'grid_levels'):
+            stats['grid_profit'] = stats.get('realized_pnl', 0)
+            stats['grid_buy_filled'] = len(current_strategy.session_buy_trades)
+            stats['grid_sell_filled'] = len(current_strategy.session_sell_trades)
             stats['grid_count'] = len(current_strategy.grid_levels)
-        if hasattr(current_strategy, 'grid_orders_by_id'):
-            stats['active_grid_orders'] = len(current_strategy.grid_orders_by_id)
+
+            if hasattr(current_strategy, 'grid_orders_by_id'):
+                stats['active_grid_orders'] = len(current_strategy.grid_orders_by_id)
 
         return stats
 
