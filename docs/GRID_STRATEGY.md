@@ -26,74 +26,39 @@
 
 #### 基本用法（自動價格範圍）
 ```bash
-python run.py --symbol SOL_USDC --strategy grid --auto-price --grid-num 10 --quantity 0.1
+python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --grid-num 10 --quantity 0.1 --duration 3600 --interval 60
 ```
 
 #### 指定價格範圍
 ```bash
-python run.py --symbol SOL_USDC --strategy grid \
-  --grid-lower 140 \
-  --grid-upper 160 \
-  --grid-num 20 \
-  --quantity 0.1 \
-  --duration 7200
+python run.py --exchange backpack --symbol SOL_USDC --strategy grid --grid-lower 140 --grid-upper 160 --grid-num 20 --quantity 0.1 --duration 3600 --interval 60
 ```
 
 #### 等比網格（適合波動大的市場）
 ```bash
-python run.py --symbol SOL_USDC --strategy grid \
-  --auto-price \
-  --price-range 10 \
-  --grid-num 15 \
-  --grid-mode geometric \
-  --quantity 0.1
+python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --price-range 10 --grid-num 15 --grid-mode geometric --quantity 0.1 --duration 3600 --interval 60
 ```
 
 ### 2. 永續合約網格策略
 
 #### 中性網格（雙向開倉）
 ```bash
-python run.py --symbol SOL_USDC --strategy perp_grid \
-  --grid-type neutral \
-  --auto-price \
-  --price-range 5 \
-  --grid-num 10 \
-  --quantity 0.1 \
-  --max-position 2.0
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.1 --max-position 2.0 --duration 3600 --interval 60
 ```
 
 #### 做多網格（單向做多）
 ```bash
-python run.py --symbol SOL_USDC --strategy perp_grid \
-  --grid-type long \
-  --grid-lower 140 \
-  --grid-upper 150 \
-  --grid-num 15 \
-  --quantity 0.1 \
-  --max-position 2.0
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --strategy perp_grid --grid-type long --grid-lower 140 --grid-upper 150 --grid-num 15 --quantity 0.1 --max-position 2.0 --duration 3600 --interval 60
 ```
 
 #### 做空網格（單向做空）
 ```bash
-python run.py --symbol SOL_USDC --strategy perp_grid \
-  --grid-type short \
-  --grid-lower 150 \
-  --grid-upper 160 \
-  --grid-num 15 \
-  --quantity 0.1 \
-  --max-position 2.0
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --strategy perp_grid --grid-type short --grid-lower 150 --grid-upper 160 --grid-num 15 --quantity 0.1 --max-position 2.0 --duration 3600 --interval 60
 ```
 
 #### 帶止損止盈的網格
 ```bash
-python run.py --symbol SOL_USDC --strategy perp_grid \
-  --grid-type neutral \
-  --auto-price \
-  --grid-num 10 \
-  --quantity 0.1 \
-  --max-position 2.0 \
-  --stop-loss 50 \
-  --take-profit 100
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --strategy perp_grid --grid-type neutral --auto-price --grid-num 10 --quantity 0.1 --max-position 2.0 --stop-loss 50 --take-profit 100 --duration 3600 --interval 60
 ```
 
 ## 參數説明
@@ -102,7 +67,10 @@ python run.py --symbol SOL_USDC --strategy perp_grid \
 
 | 參數 | 説明 | 默認值 | 示例 |
 |------|------|--------|------|
+| `--exchange` | 交易所選擇 | - | `backpack`, `aster`, `paradex`, `lighter` |
+| `--symbol` | 交易對 | - | `SOL_USDC` 或 `SOL_USDC_PERP` |
 | `--strategy` | 策略類型 | `standard` | `grid` 或 `perp_grid` |
+| `--market-type` | 市場類型（永續合約必填） | `spot` | `perp` |
 | `--grid-upper` | 網格上限價格 | - | `160` |
 | `--grid-lower` | 網格下限價格 | - | `140` |
 | `--grid-num` | 網格數量 | `10` | `20` |
@@ -110,6 +78,8 @@ python run.py --symbol SOL_USDC --strategy perp_grid \
 | `--price-range` | 自動模式下的價格範圍百分比 | `5.0` | `10.0` |
 | `--grid-mode` | 網格模式 | `arithmetic` | `geometric` |
 | `--quantity` | 每格訂單數量 | 自動計算 | `0.1` |
+| `--duration` | 運行時間（秒） | `3600` | `3600` |
+| `--interval` | 更新間隔（秒） | `60` | `60` |
 
 ### 永續合約專用參數
 
@@ -183,108 +153,47 @@ python run.py --symbol SOL_USDC --strategy perp_grid \
 
 ### 1. 保守型現貨網格（小波動）
 ```bash
-python run.py --symbol SOL_USDC --strategy grid \
-  --grid-lower 145 \
-  --grid-upper 155 \
-  --grid-num 20 \
-  --grid-mode arithmetic \
-  --quantity 0.05 \
-  --duration 14400 \
-  --interval 120
+python run.py --exchange backpack --symbol SOL_USDC --strategy grid --grid-lower 145 --grid-upper 155 --grid-num 20 --grid-mode arithmetic --quantity 0.05 --duration 14400 --interval 120
 ```
 
 ### 2. 激進型現貨網格（大波動）
 ```bash
-python run.py --symbol SOL_USDC --strategy grid \
-  --auto-price \
-  --price-range 15 \
-  --grid-num 30 \
-  --grid-mode geometric \
-  --quantity 0.1 \
-  --duration 7200
+python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --price-range 15 --grid-num 30 --grid-mode geometric --quantity 0.1 --duration 3600 --interval 60
 ```
 
 ### 3. 永續合約中性網格
 ```bash
-python run.py --symbol SOL_USDC --strategy perp_grid \
-  --grid-type neutral \
-  --auto-price \
-  --price-range 8 \
-  --grid-num 15 \
-  --quantity 0.08 \
-  --max-position 2.0 \
-  --stop-loss 80 \
-  --take-profit 150 \
-  --duration 10800
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --strategy perp_grid --grid-type neutral --auto-price --price-range 8 --grid-num 15 --quantity 0.08 --max-position 2.0 --stop-loss 80 --take-profit 150 --duration 3600 --interval 60
 ```
 
 ### 4. 永續合約做多網格（看漲）
 ```bash
-python run.py --symbol SOL_USDC --strategy perp_grid \
-  --grid-type long \
-  --grid-lower 140 \
-  --grid-upper 150 \
-  --grid-num 20 \
-  --grid-mode arithmetic \
-  --quantity 0.1 \
-  --max-position 3.0 \
-  --take-profit 200
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --strategy perp_grid --grid-type long --grid-lower 140 --grid-upper 150 --grid-num 20 --grid-mode arithmetic --quantity 0.1 --max-position 3.0 --take-profit 200 --duration 3600 --interval 60
 ```
 
 ## 常見問題
 
 ### Q1: 如何選擇網格數量？
-A: 根據預期波動和手續費率：
+根據預期波動和手續費率：
 - 手續費率高：選擇較少網格（5-10個）
 - 波動大：選擇較多網格（15-30個）
 - 波動小：選擇中等網格（10-15個）
 
 ### Q2: 等差網格和等比網格如何選擇？
-A:
 - 等差網格：適合價格相對穩定的幣種（如穩定幣對）
 - 等比網格：適合價格波動大的幣種（如主流幣、山寨幣）
 
 ### Q3: 永續合約網格類型如何選擇？
-A:
 - neutral: 適合震盪市場，雙向賺取價差
 - long: 看漲時使用，逢低做多
 - short: 看跌時使用，逢高做空
 
 ### Q4: 止損止盈如何設置？
-A: 建議設置：
 - 止損：網格總價值的 5-10%
 - 止盈：網格總價值的 10-20%
 - 根據市場波動調整
 
 ### Q5: 網格運行中價格突破網格怎麼辦？
-A:
 - 現貨網格：會停止在該方向掛單，等待價格迴歸
 - 永續網格：觸及最大持倉限制後停止開倉
 - 建議手動調整網格範圍或重啓策略
-
-## 技術架構
-
-網格策略完全基於現有的做市交易框架：
-
-- **GridStrategy**: 繼承自 `MarketMaker`
-- **PerpGridStrategy**: 繼承自 `PerpetualMarketMaker`
-- 複用了所有基礎設施：
-  - WebSocket 實時數據流
-  - 訂單管理系統
-  - 數據庫統計
-  - 風險控制
-
-## 更新日誌
-
-- 2025-11-07: 整合網格交易策略到做市套利項目
-  - 添加現貨網格策略
-  - 添加永續合約網格策略
-  - 支持等差和等比兩種網格模式
-  - 支持自動價格範圍設置
-  - 永續網格支持三種類型（neutral/long/short）
-
-## 相關文檔
-
-- [主項目 README](README.md)
-- [永續合約做市策略](docs/perp_market_maker.md)
-- [API 文檔](docs/api.md)

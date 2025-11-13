@@ -6,12 +6,12 @@
 
 ## 支援的交易所與功能
 
-| 交易所 | 現貨做市 | 永續做市 | 永續對沖 | 邀請連結 |
-|--------|---------|---------|---------|---------|
-| **Backpack** | ✅ | ✅ | ✅ | [註冊連結](https://backpack.exchange/refer/yan) |
-| **Aster** | ❌ | ✅ | ✅ | [註冊連結](https://www.asterdex.com/referral/1a7b6E) |
-| **Paradex** | ❌ | ✅ | ✅ | [註冊連結](https://app.paradex.trade/r/yanowo) |
-| **Ligher** | ❌ | ✅ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
+| 交易所 | 現貨做市 | 永續做市 | 永續對沖 | 現貨網格 | 合約網格 | 邀請連結 |
+|:------:|:-------:|:-------:|:-------:|:-------:|:-------:|:-------:|
+| **Backpack** | ✅ | ✅ | ✅ | ✅ | ✅ | [註冊連結](https://backpack.exchange/refer/yan) |
+| **Aster** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://www.asterdex.com/referral/1a7b6E) |
+| **Paradex** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.paradex.trade/r/yanowo) |
+| **Ligher** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
@@ -19,10 +19,11 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 - **Web 控制枱**：直觀的圖形化界面，實時監控交易狀態和策略表現
 - **多交易所架構**：支援 Backpack、Aster、Paradex、Lighter，可擴展至其他交易所
-- **三種策略模式**：
+- **四種策略模式**：
   - [現貨做市](docs/SPOT_MARKET_MAKING.md)：多層訂單 + 智能重平衡
   - [永續做市](docs/PERP_MARKET_MAKING.md)：倉位管理 + 風險中性
-  - [Maker-Taker 對沖](docs/MAKER_TAKER_HEDGE.md)：即時對沖 + 零持倉
+  - [永續對沖](docs/MAKER_TAKER_HEDGE.md)：Maker 掛單成交後 立即反向平倉
+  - [網格交易](docs/GRID_STRATEGY.md)：區間震盪 + 自動套利
 - **增強日誌系統**：詳細的市場狀態和策略追蹤
 - **WebSocket 實時連接**：即時市場數據和訂單更新
 - **可選資料庫紀錄**：根據需求啟用或停用資料庫寫入以兼顧效能
@@ -291,6 +292,21 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 
 # Lighter Maker-Taker 對沖
 python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
+
+# BackPack 現貨網格交易（自動價格範圍）
+python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --grid-num 10 --quantity 0.1 --duration 3600 --interval 60
+
+# BackPack 永續合約網格交易（自動價格範圍）
+python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.1 --max-position 2.0 --duration 3600 --interval 60
+
+# Aster 永續合約網格交易（自動價格範圍）
+python run.py --exchange aster --market-type perp --symbol SOLUSDT --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.1 --max-position 2.0 --duration 3600 --interval 60
+
+# Paradex 永續合約網格交易（自動價格範圍）
+python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
+
+# Lighter 永續合約網格交易（自動價格範圍）
+python run.py --exchange lighter --market-type perp --symbol BTC --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
 ```
 
 > **適合場景**：自動化部署、定時任務、批量運行  
@@ -304,6 +320,7 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 - [現貨做市策略](docs/SPOT_MARKET_MAKING.md) - 多層訂單、智能重平衡
 - [永續合約做市策略](docs/PERP_MARKET_MAKING.md) - 倉位管理、風險中性
 - [Maker-Taker 對沖策略](docs/MAKER_TAKER_HEDGE.md) - 即時對沖、零持倉
+- [網格交易策略](docs/GRID_STRATEGY.md) - 區間震盪、自動套利
 
 ---
 
@@ -367,6 +384,7 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 - [現貨做市策略](docs/SPOT_MARKET_MAKING.md)
 - [永續合約做市策略](docs/PERP_MARKET_MAKING.md)
 - [Maker-Taker 對沖策略](docs/MAKER_TAKER_HEDGE.md)
+- [網格交易策略](docs/GRID_STRATEGY.md)
 
 ---
 
