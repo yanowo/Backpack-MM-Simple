@@ -194,12 +194,48 @@ def start_bot():
         base_asset_target = float(data.get('base_asset_target', 30.0))
         rebalance_threshold = float(data.get('rebalance_threshold', 15.0))
 
+        # 網格策略參數
+        grid_upper_price = float(data['grid_upper_price']) if data.get('grid_upper_price') else None
+        grid_lower_price = float(data['grid_lower_price']) if data.get('grid_lower_price') else None
+        grid_num = int(data.get('grid_num', 10))
+        grid_mode = data.get('grid_mode', 'arithmetic')
+        auto_price_range = data.get('auto_price_range', False)
+        price_range_percent = float(data.get('price_range_percent', 5.0))
+        grid_type = data.get('grid_type', 'neutral')  # 永續合約網格類型
+
         # 創建策略實例
         if market_type == 'perp':
             from strategies.perp_market_maker import PerpetualMarketMaker
             from strategies.maker_taker_hedge import MakerTakerHedgeStrategy
+            from strategies.perp_grid_strategy import PerpGridStrategy
 
-            if strategy_name == 'maker_hedge':
+            if strategy_name == 'grid':
+                # 永續合約網格策略
+                current_strategy = PerpGridStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    grid_upper_price=grid_upper_price,
+                    grid_lower_price=grid_lower_price,
+                    grid_num=grid_num,
+                    order_quantity=quantity,
+                    auto_price_range=auto_price_range,
+                    price_range_percent=price_range_percent,
+                    grid_mode=grid_mode,
+                    grid_type=grid_type,
+                    target_position=target_position,
+                    max_position=max_position,
+                    position_threshold=position_threshold,
+                    inventory_skew=inventory_skew,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=enable_db
+                )
+            elif strategy_name == 'maker_hedge':
+                # 永續合約對沖策略
                 current_strategy = MakerTakerHedgeStrategy(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -219,6 +255,7 @@ def start_bot():
                     market_type='perp'
                 )
             else:
+                # 永續合約標準策略
                 current_strategy = PerpetualMarketMaker(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -240,8 +277,28 @@ def start_bot():
         else:
             from strategies.market_maker import MarketMaker
             from strategies.maker_taker_hedge import MakerTakerHedgeStrategy
+            from strategies.grid_strategy import GridStrategy
 
-            if strategy_name == 'maker_hedge':
+            if strategy_name == 'grid':
+                # 現貨網格策略
+                current_strategy = GridStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    grid_upper_price=grid_upper_price,
+                    grid_lower_price=grid_lower_price,
+                    grid_num=grid_num,
+                    order_quantity=quantity,
+                    auto_price_range=auto_price_range,
+                    price_range_percent=price_range_percent,
+                    grid_mode=grid_mode,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=enable_db
+                )
+            elif strategy_name == 'maker_hedge':
+                # 現貨對沖策略
                 current_strategy = MakerTakerHedgeStrategy(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -255,6 +312,7 @@ def start_bot():
                     market_type='spot'
                 )
             else:
+                # 現貨標準策略
                 current_strategy = MarketMaker(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -379,7 +437,7 @@ def get_config():
     return jsonify({
         'exchanges': ['backpack', 'aster', 'paradex'],
         'market_types': ['spot', 'perp'],
-        'strategies': ['standard', 'maker_hedge'],
+        'strategies': ['standard', 'maker_hedge', 'grid'],
         'env_configured': {
             'backpack': bool(os.getenv('BACKPACK_KEY') and os.getenv('BACKPACK_SECRET')),
             'aster': bool(os.getenv('ASTER_API_KEY') and os.getenv('ASTER_SECRET_KEY')),
@@ -666,6 +724,22 @@ def collect_strategy_stats():
         else:
             stats['runtime_seconds'] = 0
             stats['runtime_formatted'] = '00:00:00'
+
+        # 網格策略特有的統計數據
+        if hasattr(current_strategy, 'grid_profit'):
+            stats['grid_profit'] = round(float(current_strategy.grid_profit), 4)
+        if hasattr(current_strategy, 'grid_buy_filled_count'):
+            stats['grid_buy_filled'] = current_strategy.grid_buy_filled_count
+        if hasattr(current_strategy, 'grid_sell_filled_count'):
+            stats['grid_sell_filled'] = current_strategy.grid_sell_filled_count
+        if hasattr(current_strategy, 'grid_long_filled_count'):
+            stats['grid_long_filled'] = current_strategy.grid_long_filled_count
+        if hasattr(current_strategy, 'grid_short_filled_count'):
+            stats['grid_short_filled'] = current_strategy.grid_short_filled_count
+        if hasattr(current_strategy, 'grid_levels'):
+            stats['grid_count'] = len(current_strategy.grid_levels)
+        if hasattr(current_strategy, 'grid_orders_by_id'):
+            stats['active_grid_orders'] = len(current_strategy.grid_orders_by_id)
 
         return stats
 
