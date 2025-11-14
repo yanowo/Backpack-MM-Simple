@@ -24,12 +24,20 @@ const manualPriceFields = document.getElementById('manualPriceFields');
 const manualPriceLower = document.getElementById('manualPriceLower');
 const autoPriceField = document.getElementById('autoPriceField');
 const gridTypeField = document.getElementById('gridTypeField');
+const exchangeSelect = document.getElementById('exchange');
+const spreadField = document.getElementById('spreadField');
+const maxOrdersPerpField = document.getElementById('maxOrdersPerpField');
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
     initWebSocket();
     setupEventListeners();
     loadConfig();
+
+    // 初始化表單狀態
+    filterExchangeOptions();
+    toggleSpreadField();
+    toggleGridTypeField();
 });
 
 // 初始化WebSocket連接
@@ -125,11 +133,20 @@ function setupEventListeners() {
     marketTypeSelect.addEventListener('change', () => {
         toggleMarketTypeParams();
         toggleGridTypeField();
+        filterExchangeOptions();
+        toggleSpreadField();
     });
 
     // 策略切換
     strategySelect.addEventListener('change', () => {
         toggleStrategyParams();
+        toggleSpreadField();
+    });
+
+    // 交易所切換
+    exchangeSelect.addEventListener('change', () => {
+        // 如果選擇的交易所不支持當前市場類型，自動切換
+        adjustMarketTypeForExchange();
     });
 
     // 自動價格範圍切換
@@ -155,6 +172,8 @@ function toggleMarketTypeParams() {
         } else {
             spotParams.style.display = 'none';
             perpParams.style.display = 'block';
+            // 控制永續合約參數欄位
+            togglePerpFields();
         }
     }
 }
@@ -176,6 +195,11 @@ function toggleStrategyParams() {
 
     // 更新網格類型字段的顯示
     toggleGridTypeField();
+
+    // 更新永續合約參數欄位
+    if (marketTypeSelect.value === 'perp') {
+        togglePerpFields();
+    }
 }
 
 // 切換價格範圍模式
@@ -202,6 +226,92 @@ function toggleGridTypeField() {
         gridTypeField.style.display = 'block';
     } else {
         gridTypeField.style.display = 'none';
+    }
+}
+
+// 過濾交易所選項（現貨只顯示 Backpack）
+function filterExchangeOptions() {
+    const marketType = marketTypeSelect.value;
+    const currentExchange = exchangeSelect.value;
+
+    // 獲取所有選項
+    const options = exchangeSelect.querySelectorAll('option');
+
+    if (marketType === 'spot') {
+        // 現貨市場只顯示 Backpack
+        options.forEach(option => {
+            if (option.value === 'backpack') {
+                option.style.display = 'block';
+                option.disabled = false;
+            } else {
+                option.style.display = 'none';
+                option.disabled = true;
+            }
+        });
+
+        // 如果當前選擇的不是 Backpack，自動切換
+        if (currentExchange !== 'backpack') {
+            exchangeSelect.value = 'backpack';
+        }
+    } else {
+        // 永續合約顯示所有交易所
+        options.forEach(option => {
+            option.style.display = 'block';
+            option.disabled = false;
+        });
+    }
+}
+
+// 根據交易所調整市場類型
+function adjustMarketTypeForExchange() {
+    const exchange = exchangeSelect.value;
+    const marketType = marketTypeSelect.value;
+
+    // Backpack 支持現貨和永續
+    // 其他交易所只支持永續
+    if (exchange !== 'backpack' && marketType === 'spot') {
+        marketTypeSelect.value = 'perp';
+        toggleMarketTypeParams();
+        toggleGridTypeField();
+        toggleSpreadField();
+    }
+}
+
+// 切換價差欄位顯示
+function toggleSpreadField() {
+    const strategy = strategySelect.value;
+    const marketType = marketTypeSelect.value;
+
+    // 網格交易不需要設置價差
+    if (strategy === 'grid') {
+        spreadField.style.display = 'none';
+        document.getElementById('spread').required = false;
+    }
+    // 永續合約對沖不需要設置價差
+    else if (strategy === 'maker_hedge' && marketType === 'perp') {
+        spreadField.style.display = 'none';
+        document.getElementById('spread').required = false;
+    }
+    // 其他情況需要設置價差
+    else {
+        spreadField.style.display = 'block';
+        document.getElementById('spread').required = true;
+    }
+}
+
+// 切換永續合約參數欄位顯示
+function togglePerpFields() {
+    const strategy = strategySelect.value;
+
+    // 永續合約對沖不需要設置最大訂單數
+    if (strategy === 'maker_hedge') {
+        if (maxOrdersPerpField) {
+            maxOrdersPerpField.style.display = 'none';
+        }
+    } else {
+        if (maxOrdersPerpField) {
+            maxOrdersPerpField.style.display = 'block';
+        }
     }
 }
 
@@ -507,6 +617,14 @@ function updateStatsDisplay(stats) {
 
         // 更新網格數量
         updateStatValue('statGridCount', stats.grid_count || '--');
+
+        // 更新價格區間
+        if (stats.grid_upper_price !== undefined && stats.grid_lower_price !== undefined) {
+            const priceRange = `${stats.grid_lower_price.toFixed(4)} ~ ${stats.grid_upper_price.toFixed(4)}`;
+            updateStatValue('statGridPriceRange', priceRange);
+        } else {
+            updateStatValue('statGridPriceRange', '--');
+        }
 
         // 更新活躍訂單數
         updateStatValue('statActiveGridOrders', stats.active_grid_orders || '0');
