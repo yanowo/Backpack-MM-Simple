@@ -321,13 +321,15 @@
                             <div id="gridParams" class="config-block flex-1" style="display: none;">
                                 <h3 class="block-title">網格策略參數</h3>
                                 <div class="form-grid-compact">
-                                    <div class="form-field checkbox-field">
-                                        <label class="checkbox-label">
-                                            <input type="checkbox" id="auto_price_range" name="auto_price_range" class="field-checkbox">
-                                            <span class="checkbox-text">自動計算價格範圍</span>
-                                        </label>
+                                    <div class="form-field">
+                                        <label class="field-label">價格範圍設置</label>
+                                        <div class="form-field checkbox-field">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="auto_price_range" name="auto_price_range" class="field-checkbox">
+                                                <span class="checkbox-text">自動計算價格範圍</span>
+                                            </label>
+                                        </div>
                                     </div>
-
                                     <div class="form-field" id="manualPriceFields">
                                         <label class="field-label">上限價格</label>
                                         <input type="number" id="grid_upper_price" name="grid_upper_price" class="field-input" step="0.0001" placeholder="自動">
@@ -380,12 +382,14 @@
                                         <label class="field-label">更新間隔 (秒)</label>
                                         <input type="number" id="interval" name="interval" class="field-input" value="10" min="1">
                                     </div>
-
-                                    <div class="form-field checkbox-field">
-                                        <label class="checkbox-label">
-                                            <input type="checkbox" id="enable_db" name="enable_db" class="field-checkbox">
-                                            <span class="checkbox-text">啟用資料庫記錄</span>
-                                        </label>
+                                    <div class="form-field">
+                                        <label class="field-label">資料庫設定</label>
+                                        <div class="form-field checkbox-field">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="enable_db" name="enable_db" class="field-checkbox">
+                                                <span class="checkbox-text">啟用資料庫記錄</span>
+                                            </label>
+                                        </div>
                                     </div>
                                 </div>
                             </div>

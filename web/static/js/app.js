@@ -35,7 +35,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadConfig();
 
     // 初始化表單狀態
-    filterExchangeOptions();
+    adjustMarketTypeOptions();
     toggleSpreadField();
     toggleGridTypeField();
 });
@@ -133,7 +133,6 @@ function setupEventListeners() {
     marketTypeSelect.addEventListener('change', () => {
         toggleMarketTypeParams();
         toggleGridTypeField();
-        filterExchangeOptions();
         toggleSpreadField();
     });
 
@@ -145,8 +144,8 @@ function setupEventListeners() {
 
     // 交易所切換
     exchangeSelect.addEventListener('change', () => {
-        // 如果選擇的交易所不支持當前市場類型，自動切換
-        adjustMarketTypeForExchange();
+        // 根據交易所調整可用的市場類型選項
+        adjustMarketTypeOptions();
     });
 
     // 自動價格範圍切換
@@ -229,51 +228,44 @@ function toggleGridTypeField() {
     }
 }
 
-// 過濾交易所選項（現貨只顯示 Backpack）
-function filterExchangeOptions() {
-    const marketType = marketTypeSelect.value;
-    const currentExchange = exchangeSelect.value;
+// 根據交易所調整市場類型選項
+function adjustMarketTypeOptions() {
+    const exchange = exchangeSelect.value;
+    const currentMarketType = marketTypeSelect.value;
 
-    // 獲取所有選項
-    const options = exchangeSelect.querySelectorAll('option');
+    // 獲取市場類型的所有選項
+    const spotOption = marketTypeSelect.querySelector('option[value="spot"]');
+    const perpOption = marketTypeSelect.querySelector('option[value="perp"]');
 
-    if (marketType === 'spot') {
-        // 現貨市場只顯示 Backpack
-        options.forEach(option => {
-            if (option.value === 'backpack') {
-                option.style.display = 'block';
-                option.disabled = false;
-            } else {
-                option.style.display = 'none';
-                option.disabled = true;
-            }
-        });
-
-        // 如果當前選擇的不是 Backpack，自動切換
-        if (currentExchange !== 'backpack') {
-            exchangeSelect.value = 'backpack';
+    if (exchange === 'backpack') {
+        // Backpack 支持現貨和永續合約
+        if (spotOption) {
+            spotOption.disabled = false;
+            spotOption.style.display = 'block';
+        }
+        if (perpOption) {
+            perpOption.disabled = false;
+            perpOption.style.display = 'block';
         }
     } else {
-        // 永續合約顯示所有交易所
-        options.forEach(option => {
-            option.style.display = 'block';
-            option.disabled = false;
-        });
-    }
-}
+        // 其他交易所（Aster、Paradex、Lighter）只支持永續合約
+        if (spotOption) {
+            spotOption.disabled = true;
+            spotOption.style.display = 'none';
+        }
+        if (perpOption) {
+            perpOption.disabled = false;
+            perpOption.style.display = 'block';
+        }
 
-// 根據交易所調整市場類型
-function adjustMarketTypeForExchange() {
-    const exchange = exchangeSelect.value;
-    const marketType = marketTypeSelect.value;
-
-    // Backpack 支持現貨和永續
-    // 其他交易所只支持永續
-    if (exchange !== 'backpack' && marketType === 'spot') {
-        marketTypeSelect.value = 'perp';
-        toggleMarketTypeParams();
-        toggleGridTypeField();
-        toggleSpreadField();
+        // 如果當前選擇的是現貨，自動切換到永續合約
+        if (currentMarketType === 'spot') {
+            marketTypeSelect.value = 'perp';
+            // 觸發相關更新
+            toggleMarketTypeParams();
+            toggleGridTypeField();
+            toggleSpreadField();
+        }
     }
 }
 
