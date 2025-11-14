@@ -9,6 +9,7 @@ import os
 import sys
 import traceback
 import time
+import socket
 from typing import Optional, Dict, Any
 from datetime import datetime
 
@@ -828,11 +829,53 @@ def broadcast_status_update(data: Dict[str, Any]):
     socketio.emit('status_update', data)
 
 
+def is_port_available(host: str, port: int) -> bool:
+    """檢查端口是否可用"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, port))
+            return True
+    except (OSError, socket.error) as e:
+        logger.debug(f"端口 {port} 不可用: {e}")
+        return False
+
+
+def find_available_port(host: str, start_port: int = 5001, end_port: int = 6000) -> Optional[int]:
+    """在指定範圍內查找可用端口"""
+    for port in range(start_port, end_port + 1):
+        if is_port_available(host, port):
+            return port
+    return None
+
+
 def run_server(host='0.0.0.0', port=5000, debug=False):
     """運行Web服務器"""
+    # 從 .env 讀取配置
+    web_host = os.getenv('WEB_HOST', '127.0.0.1')
+    web_port = int(os.getenv('WEB_PORT', '5000'))
+    web_debug = os.getenv('WEB_DEBUG', 'false').lower() in ('true', '1', 'yes')
+
+    # 使用環境變量的配置（如果有的話）
+    host = web_host if web_host else host
+    port = web_port if web_port else port
+    debug = web_debug
+
+    # 檢查端口是否可用
+    if not is_port_available(host, port):
+        logger.warning(f"端口 {port} 已被占用，正在尋找可用端口...")
+        new_port = find_available_port(host, 5001, 6000)
+
+        if new_port:
+            logger.info(f"找到可用端口: {new_port}")
+            port = new_port
+        else:
+            logger.error("無法在 5001-6000 範圍內找到可用端口，服務器啟動失敗")
+            return
+
     logger.info(f"啟動Web服務器於 http://{host}:{port}")
+    logger.info(f"調試模式: {'開啟' if debug else '關閉'}")
     socketio.run(app, host=host, port=port, debug=debug, allow_unsafe_werkzeug=True)
 
 
 if __name__ == '__main__':
-    run_server(debug=True)
+    run_server()
