@@ -732,6 +732,11 @@ def collect_strategy_stats():
             stats['grid_sell_filled'] = len(current_strategy.session_sell_trades)
             stats['grid_count'] = len(current_strategy.grid_levels)
 
+            # 添加網格價格區間
+            if hasattr(current_strategy, 'grid_upper_price') and hasattr(current_strategy, 'grid_lower_price'):
+                stats['grid_upper_price'] = current_strategy.grid_upper_price
+                stats['grid_lower_price'] = current_strategy.grid_lower_price
+
             if hasattr(current_strategy, 'grid_orders_by_id'):
                 stats['active_grid_orders'] = len(current_strategy.grid_orders_by_id)
 

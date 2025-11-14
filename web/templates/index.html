@@ -154,11 +154,15 @@
                                 <span class="metric-value-sm" id="statGridCount">--</span>
                             </div>
                             <div class="metric-card secondary">
+                                <span class="metric-label">價格區間</span>
+                                <span class="metric-value-sm" id="statGridPriceRange">--</span>
+                            </div>
+                            <div class="metric-card secondary">
                                 <span class="metric-label">活躍網格訂單</span>
                                 <span class="metric-value-sm" id="statActiveGridOrders">--</span>
                             </div>
                             <div class="metric-card secondary">
-                                <span class="metric-label">買入/賣出成交</span>
+                                <span class="metric-label">網格成交次數</span>
                                 <span class="metric-value-sm" id="statGridFilled">--</span>
                             </div>
                         </div>
@@ -209,21 +213,6 @@
                                 </div>
 
                                 <div class="form-field">
-                                    <label class="field-label">交易對</label>
-                                    <input type="text" id="symbol" name="symbol" class="field-input" placeholder="SOL_USDC" required>
-                                </div>
-
-                                <div class="form-field">
-                                    <label class="field-label">價差 (%)</label>
-                                    <input type="number" id="spread" name="spread" class="field-input" step="0.001" placeholder="0.5" required>
-                                </div>
-
-                                <div class="form-field">
-                                    <label class="field-label">數量</label>
-                                    <input type="number" id="quantity" name="quantity" class="field-input" step="0.00001" placeholder="自動">
-                                </div>
-
-                                <div class="form-field">
                                     <label class="field-label">市場類型</label>
                                     <select id="market_type" name="market_type" class="field-input">
                                         <option value="spot">現貨</option>
@@ -238,6 +227,21 @@
                                         <option value="maker_hedge">對沖做市</option>
                                         <option value="grid">網格交易</option>
                                     </select>
+                                </div>
+
+                                <div class="form-field">
+                                    <label class="field-label">交易對</label>
+                                    <input type="text" id="symbol" name="symbol" class="field-input" placeholder="SOL_USDC" required>
+                                </div>
+
+                                <div class="form-field" id="spreadField">
+                                    <label class="field-label">價差 (%)</label>
+                                    <input type="number" id="spread" name="spread" class="field-input" step="0.001" placeholder="0.5">
+                                </div>
+
+                                <div class="form-field">
+                                    <label class="field-label">數量</label>
+                                    <input type="number" id="quantity" name="quantity" class="field-input" step="0.00001" placeholder="自動">
                                 </div>
                             </div>
                         </div>
@@ -276,7 +280,7 @@
                             <div id="perpParams" class="config-block flex-1" style="display: none;">
                                 <h3 class="block-title">永續合約參數</h3>
                                 <div class="form-grid-compact">
-                                    <div class="form-field">
+                                    <div class="form-field" id="maxOrdersPerpField">
                                         <label class="field-label">最大訂單數</label>
                                         <input type="number" id="max_orders_perp" name="max_orders" class="field-input" value="3" min="1">
                                     </div>
