@@ -415,6 +415,11 @@ async function startBot() {
             data.inventory_skew = parseFloat(formData.get('inventory_skew'));
             data.stop_loss = formData.get('stop_loss') ? parseFloat(formData.get('stop_loss')) : null;
             data.take_profit = formData.get('take_profit') ? parseFloat(formData.get('take_profit')) : null;
+
+            // 永續對沖策略設置默認價差為 0.01%
+            if (data.strategy === 'maker_hedge' && !data.spread) {
+                data.spread = 0.01;
+            }
         }
     }
 
