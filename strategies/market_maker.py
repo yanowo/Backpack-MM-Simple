@@ -346,31 +346,33 @@ class MarketMaker:
         if self.ws is None:
             logger.info("使用 REST API 模式（無 WebSocket）")
             return
-            
+
         wait_time = 0
-        max_wait_time = 10
+        max_wait_time = 2  # 減少等待時間從 10 秒到 2 秒
+        check_interval = 0.2  # 減少檢查間隔從 0.5 秒到 0.2 秒
+
         while not self.ws.connected and wait_time < max_wait_time:
-            time.sleep(0.5)
-            wait_time += 0.5
-        
+            time.sleep(check_interval)
+            wait_time += check_interval
+
         if self.ws.connected:
             logger.info("WebSocket連接已建立，初始化數據流...")
-            
+
             # 初始化訂單簿
             orderbook_initialized = self.ws.initialize_orderbook()
-            
+
             # 訂閲深度流和行情數據
             if orderbook_initialized:
                 depth_subscribed = self.ws.subscribe_depth()
                 ticker_subscribed = self.ws.subscribe_bookTicker()
-                
+
                 if depth_subscribed and ticker_subscribed:
                     logger.info("數據流訂閲成功!")
-            
+
             # 訂閲私有訂單更新流
             self.subscribe_order_updates()
         else:
-            logger.warning(f"WebSocket連接建立超時，將在運行過程中繼續嘗試連接")
+            logger.info("WebSocket 初始連接未建立，使用 REST API 模式（WebSocket 將在後台自動重連）")
     
     def _load_trading_stats(self):
         """從數據庫加載交易統計數據"""
