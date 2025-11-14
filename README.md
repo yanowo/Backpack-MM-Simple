@@ -156,6 +156,15 @@ LIGHTER_BASE_URL=https://mainnet.zklighter.elliot.ai
 
 # Optional Features
 # ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
+
+# Web 服務器配置
+# 主機地址（127.0.0.1 為僅本機訪問）
+WEB_HOST=127.0.0.1
+# Web 服務器端口號（如果端口被占用，會自動在 5001-6000 範圍內尋找可用端口）
+WEB_PORT=5000
+# 調試模式（true 開啟，false 關閉）
+WEB_DEBUG=false
+
 ```
 ## 使用方法
 
