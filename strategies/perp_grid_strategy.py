@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -837,31 +838,44 @@ class PerpGridStrategy(PerpetualMarketMaker):
             # 檢查並補充缺失的網格訂單
             self._refill_grid_orders()
 
-    def _reconcile_grid_orders(self) -> None:
-        """同步交易所與本地追蹤的網格訂單，防止殘留狀態。"""
+    def _reconcile_grid_orders(self) -> Dict[str, Dict[float, int]]:
+        """統計目前在交易所實際掛出的開倉單數量。"""
+        long_counts: Dict[float, int] = defaultdict(int)
+        short_counts: Dict[float, int] = defaultdict(int)
+
         try:
             open_orders = self.client.get_open_orders(self.symbol) or []
         except Exception as exc:
             logger.warning("無法同步永續網格訂單狀態: %s", exc)
-            return
+            return {'Bid': {}, 'Ask': {}}
 
         if isinstance(open_orders, dict) and open_orders.get('error'):
             logger.warning("同步永續網格訂單時收到錯誤: %s", open_orders['error'])
-            return
+            return {'Bid': {}, 'Ask': {}}
 
-        open_ids = {
-            str(order.get('id'))
-            for order in open_orders
-            if isinstance(order, dict) and order.get('id')
+        for order in open_orders:
+            if not isinstance(order, dict):
+                continue
+
+            side_raw = str(order.get('side', '')).upper()
+            price_raw = order.get('price')
+            if price_raw is None:
+                continue
+
+            try:
+                price = round_to_tick_size(float(price_raw), self.tick_size)
+            except (TypeError, ValueError):
+                continue
+
+            if side_raw in ('BUY', 'BID', 'LONG'):
+                long_counts[price] += 1
+            elif side_raw in ('SELL', 'ASK', 'SHORT'):
+                short_counts[price] += 1
+
+        return {
+            'Bid': dict(long_counts),
+            'Ask': dict(short_counts),
         }
-
-        for order_id, order_info in list(self.grid_orders_by_id.items()):
-            if order_id not in open_ids:
-                self._remove_grid_order(order_id, order_info['price'], order_info.get('grid_type', 'long'))
-
-        for order_id in list(self.close_order_mapping.keys()):
-            if order_id not in open_ids:
-                self._handle_close_order_cancel(order_id)
 
     def _refill_grid_orders(self) -> None:
         """補充缺失的網格訂單"""
@@ -870,7 +884,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
         if not current_price:
             return
 
-        self._reconcile_grid_orders()
+        active_counts = self._reconcile_grid_orders()
+        active_long_counts = active_counts.get('Bid', {})
+        active_short_counts = active_counts.get('Ask', {})
 
         refilled = 0
 
@@ -880,42 +896,50 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
             if self.grid_type == "neutral":
                 if price < current_price:
-                    if price not in self.grid_long_orders_by_price or not self.grid_long_orders_by_price[price]:
-                        # 檢查網格點位是否被鎖定（開倉成交等待平倉成交）
+                    if active_long_counts.get(price, 0) == 0:
                         if price in self.grid_level_locks:
-                            logger.debug("網格點位 %.4f 已鎖定，平倉訂單ID: %s，暫不補充開多單",
-                                       price, self.grid_level_locks[price])
+                            logger.debug(
+                                "網格點位 %.4f 已鎖定，平倉訂單ID: %s，暫不補充開多單",
+                                price,
+                                self.grid_level_locks[price],
+                            )
                             continue
                         if self._place_grid_long_order(price, self.order_quantity):
                             refilled += 1
                 elif price > current_price:
-                    if price not in self.grid_short_orders_by_price or not self.grid_short_orders_by_price[price]:
-                        # 檢查網格點位是否被鎖定（開倉成交等待平倉成交）
+                    if active_short_counts.get(price, 0) == 0:
                         if price in self.grid_level_locks:
-                            logger.debug("網格點位 %.4f 已鎖定，平倉訂單ID: %s，暫不補充開空單",
-                                       price, self.grid_level_locks[price])
+                            logger.debug(
+                                "網格點位 %.4f 已鎖定，平倉訂單ID: %s，暫不補充開空單",
+                                price,
+                                self.grid_level_locks[price],
+                            )
                             continue
                         if self._place_grid_short_order(price, self.order_quantity):
                             refilled += 1
 
             elif self.grid_type == "long":
                 if price <= current_price:
-                    if price not in self.grid_long_orders_by_price or not self.grid_long_orders_by_price[price]:
-                        # 檢查網格點位是否被鎖定（開倉成交等待平倉成交）
+                    if active_long_counts.get(price, 0) == 0:
                         if price in self.grid_level_locks:
-                            logger.debug("網格點位 %.4f 已鎖定，平倉訂單ID: %s，暫不補充開多單",
-                                       price, self.grid_level_locks[price])
+                            logger.debug(
+                                "網格點位 %.4f 已鎖定，平倉訂單ID: %s，暫不補充開多單",
+                                price,
+                                self.grid_level_locks[price],
+                            )
                             continue
                         if self._place_grid_long_order(price, self.order_quantity):
                             refilled += 1
 
             elif self.grid_type == "short":
                 if price >= current_price:
-                    if price not in self.grid_short_orders_by_price or not self.grid_short_orders_by_price[price]:
-                        # 檢查網格點位是否被鎖定（開倉成交等待平倉成交）
+                    if active_short_counts.get(price, 0) == 0:
                         if price in self.grid_level_locks:
-                            logger.debug("網格點位 %.4f 已鎖定，平倉訂單ID: %s，暫不補充開空單",
-                                       price, self.grid_level_locks[price])
+                            logger.debug(
+                                "網格點位 %.4f 已鎖定，平倉訂單ID: %s，暫不補充開空單",
+                                price,
+                                self.grid_level_locks[price],
+                            )
                             continue
                         if self._place_grid_short_order(price, self.order_quantity):
                             refilled += 1

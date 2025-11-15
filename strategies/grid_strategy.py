@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -676,27 +677,44 @@ class GridStrategy(MarketMaker):
             # 檢查並補充缺失的網格訂單
             self._refill_grid_orders()
 
-    def _reconcile_grid_orders(self) -> None:
-        """將本地記錄與實際掛單同步，移除被動消失的訂單。"""
+    def _reconcile_grid_orders(self) -> Dict[str, Dict[float, int]]:
+        """統計實際掛單數量（按價格/方向），用於檢查是否缺單。"""
+        buy_counts: Dict[float, int] = defaultdict(int)
+        sell_counts: Dict[float, int] = defaultdict(int)
+
         try:
             open_orders = self.client.get_open_orders(self.symbol) or []
         except Exception as exc:
             logger.warning("無法同步網格訂單狀態: %s", exc)
-            return
+            return {'Bid': {}, 'Ask': {}}
 
         if isinstance(open_orders, dict) and open_orders.get('error'):
             logger.warning("同步網格訂單時收到錯誤: %s", open_orders['error'])
-            return
+            return {'Bid': {}, 'Ask': {}}
 
-        open_ids = {
-            str(order.get('id'))
-            for order in open_orders
-            if isinstance(order, dict) and order.get('id')
+        for order in open_orders:
+            if not isinstance(order, dict):
+                continue
+
+            side_raw = str(order.get('side', '')).upper()
+            price_raw = order.get('price')
+            if price_raw is None:
+                continue
+
+            try:
+                price = round_to_tick_size(float(price_raw), self.tick_size)
+            except (TypeError, ValueError):
+                continue
+
+            if side_raw in ('BUY', 'BID'):
+                buy_counts[price] += 1
+            elif side_raw in ('SELL', 'ASK'):
+                sell_counts[price] += 1
+
+        return {
+            'Bid': dict(buy_counts),
+            'Ask': dict(sell_counts),
         }
-
-        for order_id, order_info in list(self.grid_orders_by_id.items()):
-            if order_id not in open_ids:
-                self._remove_grid_order(order_id, order_info['price'], order_info['side'])
 
     def _refill_grid_orders(self) -> None:
         """補充缺失的網格訂單"""
@@ -705,7 +723,9 @@ class GridStrategy(MarketMaker):
         if not current_price:
             return
 
-        self._reconcile_grid_orders()
+        active_counts = self._reconcile_grid_orders()
+        active_buy_counts = active_counts.get('Bid', {})
+        active_sell_counts = active_counts.get('Ask', {})
 
         # 獲取餘額
         balances = self.get_balance()
@@ -723,11 +743,14 @@ class GridStrategy(MarketMaker):
 
             if price < current_price:
                 # 檢查是否有買單
-                if price not in self.grid_buy_orders_by_price or not self.grid_buy_orders_by_price[price]:
+                if active_buy_counts.get(price, 0) == 0:
                     # 檢查網格點位是否被鎖定（買單成交等待賣單成交）
                     if price in self.grid_level_locks:
-                        logger.debug("網格點位 %.4f 已鎖定，等待賣單 %.4f 成交，暫不補充買單",
-                                   price, self.grid_level_locks[price])
+                        logger.debug(
+                            "網格點位 %.4f 已鎖定，等待賣單 %.4f 成交，暫不補充買單",
+                            price,
+                            self.grid_level_locks[price],
+                        )
                         continue
 
                     if quote_balance >= price * self.order_quantity:
@@ -737,7 +760,7 @@ class GridStrategy(MarketMaker):
 
             elif price > current_price:
                 # 檢查是否有賣單
-                if price not in self.grid_sell_orders_by_price or not self.grid_sell_orders_by_price[price]:
+                if active_sell_counts.get(price, 0) == 0:
                     if base_balance >= self.order_quantity:
                         if self._place_grid_sell_order(price, self.order_quantity):
                             base_balance -= self.order_quantity
