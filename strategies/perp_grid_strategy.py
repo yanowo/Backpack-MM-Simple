@@ -972,6 +972,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
         """添加網格特有的統計信息"""
         sections = list(super()._get_extra_summary_sections())
 
+        buy_fill_count = len(self.session_buy_trades)
+        sell_fill_count = len(self.session_sell_trades)
+
         sections.append((
             "永續合約網格統計",
             [
@@ -979,8 +982,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 ("價格範圍", f"{self.grid_lower_price:.4f} ~ {self.grid_upper_price:.4f}"),
                 ("網格模式", self.grid_mode),
                 ("網格類型", self.grid_type),
-                ("開多次數", f"{self.grid_long_filled_count}"),
-                ("開空次數", f"{self.grid_short_filled_count}"),
+                ("買入次數", f"{buy_fill_count}"),
+                ("賣出次數", f"{sell_fill_count}"),
                 ("網格利潤", f"{self.grid_profit:.4f} {self.quote_asset}"),
                 ("活躍開多單數", f"{sum(len(orders) for orders in self.grid_long_orders_by_price.values())}"),
                 ("活躍開空單數", f"{sum(len(orders) for orders in self.grid_short_orders_by_price.values())}"),
