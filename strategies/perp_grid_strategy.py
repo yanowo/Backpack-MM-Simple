@@ -123,8 +123,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # key: 開倉價格, value: 平倉訂單ID
         self.grid_level_locks: Dict[float, str] = {}  # {開倉價格: 平倉訂單ID}
 
-        # 平倉單 -> 開倉價格的映射（用於解鎖）
-        self.close_order_mapping: Dict[str, float] = {}  # {平倉訂單ID: 開倉價格}
+        # 平倉單 -> 開倉資訊的映射（用於解鎖與重試）
+        self.close_order_mapping: Dict[str, Dict[str, Any]] = {}
 
         # 統計
         self.grid_long_filled_count = 0
@@ -133,6 +133,15 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         logger.info("初始化永續合約網格交易策略: %s", symbol)
         logger.info("網格數量: %d | 模式: %s | 類型: %s", self.grid_num, self.grid_mode, self.grid_type)
+
+    def _reset_grid_state(self) -> None:
+        """清理網格訂單與鎖定狀態。"""
+        self.grid_orders_by_price.clear()
+        self.grid_orders_by_id.clear()
+        self.grid_long_orders_by_price.clear()
+        self.grid_short_orders_by_price.clear()
+        self.grid_level_locks.clear()
+        self.close_order_mapping.clear()
 
     def _initialize_grid_prices(self) -> bool:
         """初始化網格價格點位"""
@@ -212,6 +221,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 取消現有訂單
         logger.info("取消現有訂單...")
         self.cancel_existing_orders()
+        self._reset_grid_state()
 
         # 計算每格訂單數量
         if not self.order_quantity:
@@ -502,62 +512,134 @@ class PerpGridStrategy(PerpetualMarketMaker):
         super().on_ws_message(stream, data)
 
         # 處理訂單成交事件
-        if stream.startswith("account.orderUpdate."):
-            event_type = data.get('e')
+        if not stream.startswith("account.orderUpdate."):
+            return
 
-            if event_type == 'orderFill':
-                self._handle_order_fill(data)
+        event_type = data.get('e')
+        if event_type in {"orderCancel", "orderCanceled", "orderExpired", "orderReject", "orderRejected"}:
+            self._handle_order_cancel(data)
 
-    def _handle_order_fill(self, data: Dict[str, Any]) -> None:
-        """處理訂單成交"""
+    def _after_fill_processed(self, fill_info: Dict[str, Any]) -> None:
+        super()._after_fill_processed(fill_info)
+
+        order_id = fill_info.get('order_id')
+        side = fill_info.get('side')
+        quantity_raw = fill_info.get('quantity')
+        price_raw = fill_info.get('price')
+
         try:
-            order_id = data.get('i')
-            side = data.get('S')
-            quantity = float(data.get('l', '0'))
-            price = float(data.get('L', '0'))
+            quantity = float(quantity_raw or 0)
+            price = float(price_raw or 0)
+        except (TypeError, ValueError):
+            return
 
-            # 檢查是否是平倉單
-            if order_id in self.close_order_mapping:
-                open_price = self.close_order_mapping[order_id]
-                logger.info("平倉單成交: ID=%s, 方向=%s, 價格=%.4f, 數量=%.4f, 對應開倉價格=%.4f",
-                           order_id, side, price, quantity, open_price)
+        self._handle_grid_fill(order_id, side, quantity, price)
 
-                # 解鎖對應的開倉價格
-                if open_price in self.grid_level_locks:
-                    del self.grid_level_locks[open_price]
-                    logger.debug("解鎖網格點位 %.4f，完成開平倉循環", open_price)
+    def _handle_grid_fill(self, order_id: Optional[str], side: Optional[str], quantity: float, price: float) -> None:
+        if not order_id:
+            return
 
-                # 移除映射
-                del self.close_order_mapping[order_id]
-                return
+        normalized_side = side
+        if isinstance(side, str):
+            side_upper = side.upper()
+            if side_upper in ('BUY', 'BID', 'LONG'):
+                normalized_side = 'Bid'
+            elif side_upper in ('SELL', 'ASK', 'SHORT'):
+                normalized_side = 'Ask'
 
-            # 檢查是否是網格訂單
-            if order_id not in self.grid_orders_by_id:
-                return
+        # 先處理平倉單
+        if order_id in self.close_order_mapping:
+            self._handle_close_order_fill(order_id, normalized_side, quantity, price)
+            return
 
-            order_info = self.grid_orders_by_id[order_id]
-            grid_price = order_info['price']
-            grid_type = order_info.get('grid_type', 'unknown')
+        if order_id not in self.grid_orders_by_id:
+            return
 
-            logger.info("網格訂單成交: ID=%s, 類型=%s, 方向=%s, 價格=%.4f, 數量=%.4f",
-                       order_id, grid_type, side, price, quantity)
+        order_info = self.grid_orders_by_id[order_id]
+        grid_price = order_info['price']
+        grid_type = order_info.get('grid_type', 'unknown')
 
-            # 從訂單跟蹤中移除
-            self._remove_grid_order(order_id, grid_price, grid_type)
+        logger.info(
+            "網格訂單成交: ID=%s, 類型=%s, 方向=%s, 價格=%.4f, 數量=%.4f",
+            order_id,
+            grid_type,
+            normalized_side,
+            price,
+            quantity,
+        )
 
-            # 根據成交方向和網格類型，掛平倉單
-            if side == 'Bid':  # 開多成交
-                self.grid_long_filled_count += 1
-                # 在上一個網格點位掛平多單
-                self._place_close_long_after_open(grid_price, quantity)
+        self._remove_grid_order(order_id, grid_price, grid_type)
 
-            elif side == 'Ask':  # 開空成交
-                self.grid_short_filled_count += 1
-                # 在下一個網格點位掛平空單
-                self._place_close_short_after_open(grid_price, quantity)
+        if normalized_side == 'Bid':
+            self.grid_long_filled_count += 1
+            self._place_close_long_after_open(grid_price, quantity)
+        elif normalized_side == 'Ask':
+            self.grid_short_filled_count += 1
+            self._place_close_short_after_open(grid_price, quantity)
 
-        except Exception as e:
-            logger.error("處理網格訂單成交時出錯: %s", e, exc_info=True)
+    def _handle_close_order_fill(self, order_id: str, side: Optional[str], quantity: float, price: float) -> None:
+        close_info = self.close_order_mapping.pop(order_id, None)
+        if not close_info:
+            return
+
+        open_price = close_info['open_price']
+        position_side = close_info.get('position')
+
+        logger.info(
+            "平倉單成交: ID=%s, 類型=%s, 方向=%s, 價格=%.4f, 數量=%.4f, 對應開倉價格=%.4f",
+            order_id,
+            position_side,
+            side,
+            price,
+            quantity,
+            open_price,
+        )
+
+        if open_price in self.grid_level_locks:
+            del self.grid_level_locks[open_price]
+            logger.debug("解鎖網格點位 %.4f，完成開平倉循環", open_price)
+
+    def _handle_close_order_cancel(self, order_id: str) -> None:
+        close_info = self.close_order_mapping.pop(order_id, None)
+        if not close_info:
+            return
+
+        open_price = close_info['open_price']
+        quantity = close_info['quantity']
+        position_side = close_info.get('position')
+
+        logger.warning("平倉單被取消: ID=%s, 類型=%s, 重新掛單", order_id, position_side)
+        self.grid_level_locks.pop(open_price, None)
+
+        if position_side == 'long':
+            self._place_close_long_after_open(open_price, quantity)
+        else:
+            self._place_close_short_after_open(open_price, quantity)
+
+    def _handle_order_cancel(self, data: Dict[str, Any]) -> None:
+        order_id = data.get('i')
+        if not order_id:
+            return
+
+        if order_id in self.close_order_mapping:
+            self._handle_close_order_cancel(order_id)
+            return
+
+        order_info = self.grid_orders_by_id.get(order_id)
+        if not order_info:
+            return
+
+        price = order_info['price']
+        quantity = order_info['quantity']
+        grid_type = order_info.get('grid_type', 'long')
+
+        logger.warning("網格開倉單被取消: ID=%s, 類型=%s, 價格=%.4f", order_id, grid_type, price)
+        self._remove_grid_order(order_id, price, grid_type)
+
+        if grid_type == 'long':
+            self._place_grid_long_order(price, quantity)
+        else:
+            self._place_grid_short_order(price, quantity)
 
     def _remove_grid_order(self, order_id: str, grid_price: float, grid_type: str) -> None:
         """從訂單跟蹤中移除訂單"""
@@ -653,7 +735,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 記錄平倉單映射並鎖定開倉價格
         order_id = result.get('id')
         if order_id:
-            self.close_order_mapping[order_id] = open_price
+            self.close_order_mapping[order_id] = {
+                'open_price': open_price,
+                'quantity': quantity,
+                'position': 'long'
+            }
             self.grid_level_locks[open_price] = order_id
             logger.debug("鎖定網格點位 %.4f，平倉訂單ID: %s", open_price, order_id)
 
@@ -726,7 +812,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 記錄平倉單映射並鎖定開倉價格
         order_id = result.get('id')
         if order_id:
-            self.close_order_mapping[order_id] = open_price
+            self.close_order_mapping[order_id] = {
+                'open_price': open_price,
+                'quantity': quantity,
+                'position': 'short'
+            }
             self.grid_level_locks[open_price] = order_id
             logger.debug("鎖定網格點位 %.4f，平倉訂單ID: %s", open_price, order_id)
 
@@ -747,12 +837,40 @@ class PerpGridStrategy(PerpetualMarketMaker):
             # 檢查並補充缺失的網格訂單
             self._refill_grid_orders()
 
+    def _reconcile_grid_orders(self) -> None:
+        """同步交易所與本地追蹤的網格訂單，防止殘留狀態。"""
+        try:
+            open_orders = self.client.get_open_orders(self.symbol) or []
+        except Exception as exc:
+            logger.warning("無法同步永續網格訂單狀態: %s", exc)
+            return
+
+        if isinstance(open_orders, dict) and open_orders.get('error'):
+            logger.warning("同步永續網格訂單時收到錯誤: %s", open_orders['error'])
+            return
+
+        open_ids = {
+            str(order.get('id'))
+            for order in open_orders
+            if isinstance(order, dict) and order.get('id')
+        }
+
+        for order_id, order_info in list(self.grid_orders_by_id.items()):
+            if order_id not in open_ids:
+                self._remove_grid_order(order_id, order_info['price'], order_info.get('grid_type', 'long'))
+
+        for order_id in list(self.close_order_mapping.keys()):
+            if order_id not in open_ids:
+                self._handle_close_order_cancel(order_id)
+
     def _refill_grid_orders(self) -> None:
         """補充缺失的網格訂單"""
 
         current_price = self.get_current_price()
         if not current_price:
             return
+
+        self._reconcile_grid_orders()
 
         refilled = 0
 
