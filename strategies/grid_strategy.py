@@ -250,10 +250,6 @@ class GridStrategy(MarketMaker):
         orders_to_place = []
 
         for price in self.grid_levels:
-            if abs(price - current_price) / current_price < 0.001:  # 跳過太接近當前價格的點位
-                logger.debug("跳過太接近當前價格的網格點位: %.4f", price)
-                continue
-
             if price < current_price:
                 # 在當前價格下方掛買單
                 if quote_balance >= price * self.order_quantity:
@@ -738,9 +734,6 @@ class GridStrategy(MarketMaker):
         refilled = 0
 
         for price in self.grid_levels:
-            if abs(price - current_price) / current_price < 0.001:
-                continue
-
             if price < current_price:
                 # 檢查是否有買單
                 if active_buy_counts.get(price, 0) == 0:

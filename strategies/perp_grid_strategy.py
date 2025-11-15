@@ -234,10 +234,6 @@ class PerpGridStrategy(PerpetualMarketMaker):
         orders_to_place = []
 
         for price in self.grid_levels:
-            if abs(price - current_price) / current_price < 0.001:
-                logger.debug("跳過太接近當前價格的網格點位: %.4f", price)
-                continue
-
             if self.grid_type == "neutral":
                 # 中性網格：在當前價格下方掛開多單，上方掛開空單
                 if price < current_price:
@@ -891,9 +887,6 @@ class PerpGridStrategy(PerpetualMarketMaker):
         refilled = 0
 
         for price in self.grid_levels:
-            if abs(price - current_price) / current_price < 0.001:
-                continue
-
             if self.grid_type == "neutral":
                 if price < current_price:
                     if active_long_counts.get(price, 0) == 0:
