@@ -159,38 +159,34 @@ function toggleMarketTypeParams() {
     const marketType = marketTypeSelect.value;
     const strategy = strategySelect.value;
 
+    // 預設隱藏，視情況顯示所需欄位
+    spotParams.style.display = 'none';
+    perpParams.style.display = 'none';
+
     if (strategy === 'grid') {
-        // 網格策略不顯示 spot/perp 參數
-        spotParams.style.display = 'none';
-        perpParams.style.display = 'none';
-    } else {
-        // 標準策略和對沖策略顯示對應的參數
-        if (marketType === 'spot') {
-            spotParams.style.display = 'block';
-            perpParams.style.display = 'none';
-        } else {
-            spotParams.style.display = 'none';
+        // 現貨網格不需要額外倉位配置；永續網格要顯示倉位參數
+        if (marketType === 'perp') {
             perpParams.style.display = 'block';
-            // 控制永續合約參數欄位
             togglePerpFields();
         }
+        return;
+    }
+
+    if (marketType === 'spot') {
+        spotParams.style.display = 'block';
+    } else {
+        perpParams.style.display = 'block';
+        togglePerpFields();
     }
 }
 
 // 切換策略參數顯示
 function toggleStrategyParams() {
     const strategy = strategySelect.value;
+    gridParams.style.display = strategy === 'grid' ? 'block' : 'none';
 
-    if (strategy === 'grid') {
-        // 顯示網格參數，隱藏其他參數
-        gridParams.style.display = 'block';
-        spotParams.style.display = 'none';
-        perpParams.style.display = 'none';
-    } else {
-        // 隱藏網格參數，顯示對應的市場參數
-        gridParams.style.display = 'none';
-        toggleMarketTypeParams();
-    }
+    // 顯示正確的市場參數區塊
+    toggleMarketTypeParams();
 
     // 更新網格類型字段的顯示
     toggleGridTypeField();
@@ -295,13 +291,11 @@ function toggleSpreadField() {
 function togglePerpFields() {
     const strategy = strategySelect.value;
 
-    // 永續合約對沖不需要設置最大訂單數
-    if (strategy === 'maker_hedge') {
-        if (maxOrdersPerpField) {
+    // 永續對沖與永續網格都不需要最大訂單數
+    if (maxOrdersPerpField) {
+        if (strategy === 'maker_hedge' || strategy === 'grid') {
             maxOrdersPerpField.style.display = 'none';
-        }
-    } else {
-        if (maxOrdersPerpField) {
+        } else {
             maxOrdersPerpField.style.display = 'block';
         }
     }
@@ -388,11 +382,21 @@ async function startBot() {
 
         // 永續合約網格特有參數
         if (data.market_type === 'perp') {
-            data.grid_type = formData.get('grid_type');
-            data.max_position = 1.0; // 網格策略的默認值
-            data.target_position = 0.0;
-            data.position_threshold = 0.1;
-            data.inventory_skew = 0.0;
+            data.grid_type = formData.get('grid_type') || 'neutral';
+
+            const targetPositionRaw = formData.get('target_position');
+            const maxPositionRaw = formData.get('max_position');
+            const thresholdRaw = formData.get('position_threshold');
+            const skewRaw = formData.get('inventory_skew');
+            const stopLossRaw = formData.get('stop_loss');
+            const takeProfitRaw = formData.get('take_profit');
+
+            data.target_position = targetPositionRaw ? parseFloat(targetPositionRaw) : 0.0;
+            data.max_position = maxPositionRaw ? parseFloat(maxPositionRaw) : 1.0;
+            data.position_threshold = thresholdRaw ? parseFloat(thresholdRaw) : 0.1;
+            data.inventory_skew = skewRaw ? parseFloat(skewRaw) : 0.0;
+            data.stop_loss = stopLossRaw ? parseFloat(stopLossRaw) : null;
+            data.take_profit = takeProfitRaw ? parseFloat(takeProfitRaw) : null;
         }
 
         // 網格策略不需要 max_orders 和 spread（會使用默認值）
