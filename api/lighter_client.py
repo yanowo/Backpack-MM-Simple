@@ -1936,12 +1936,6 @@ class LighterClient(BaseExchangeClient):
         # 注意：不能使用 or 運算符，因為 False 會被當作假值跳過
         maker_is_ask_raw = (
             trade.get("is_maker_ask")
-            if trade.get("is_maker_ask") is not None
-            else trade.get("maker_is_ask")
-            if trade.get("maker_is_ask") is not None
-            else trade.get("makerIsAsk")
-            if trade.get("makerIsAsk") is not None
-            else trade.get("maker_side_is_ask")
         )
         maker_is_ask = self._as_bool(maker_is_ask_raw)
 
@@ -2007,20 +2001,11 @@ class LighterClient(BaseExchangeClient):
         fee_source = "api_not_provided"
         fee_asset = None
 
-        order_identifier = (
-            trade.get("order_id")
-            or trade.get("orderId")
-            or trade.get("order_index")
-            or trade.get("orderIndex")
-            or trade.get("ask_id")
-            or trade.get("bid_id")
-        )
 
         timestamp = trade.get("timestamp") or trade.get("time")
 
         return {
             "trade_id": str(trade_id) if trade_id is not None else None,
-            "order_id": str(order_identifier) if order_identifier is not None else None,
             "market_id": trade.get("market_id"),
             "side": side,
             "size": size,
