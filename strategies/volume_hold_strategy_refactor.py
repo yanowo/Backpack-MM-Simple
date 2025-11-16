@@ -1,204 +1,1307 @@
+"""Refactored multi-account volume/hold strategy (position-driven fills)."""
+from __future__ import annotations
 
-# 对冲策略
+import json
+import os
+import random
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from api.lighter_client import LighterClient
+from logger import setup_logger
+from utils.helpers import round_to_precision, round_to_tick_size
+
+logger = setup_logger("volume_hold_strategy_refactor")
 
 
-class SLICE:
-    qty = xx
-    side = 
-    symbol = xx
+MIN_QUOTE_THRESHOLD = 11.0
 
-class hedge_plan:
-    qty
-    ..
 
+class StrategyConfigError(ValueError):
+    """Raised when the strategy configuration is invalid."""
+
+
+@dataclass
 class AccountCredentials:
+    """Holds a single account configuration."""
+
+    label: str
+    api_private_key: str
+    account_index: int
+    api_key_index: int = 0
+    base_url: Optional[str] = None
+    chain_id: Optional[int] = None
+    signer_lib_dir: Optional[str] = None
+
+    def as_client_config(self, defaults: "VolumeHoldStrategyConfig") -> Dict[str, Any]:
+        base_url = self.base_url or defaults.base_url
+        if not base_url:
+            raise StrategyConfigError(f"Base URL missing for account {self.label}")
+        config: Dict[str, Any] = {
+            "base_url": base_url,
+            "api_private_key": self.api_private_key,
+            "account_index": self.account_index,
+            "api_key_index": self.api_key_index,
+        }
+        if self.chain_id or defaults.chain_id:
+            config["chain_id"] = self.chain_id or defaults.chain_id
+        signer_dir = self.signer_lib_dir or defaults.signer_lib_dir
+        if signer_dir:
+            config["signer_lib_dir"] = signer_dir
+        return config
 
 
-    slice_value = 50
+@dataclass
+class SymbolPlan:
+    """Per-symbol configuration."""
 
-    def excute_slice(slice):
-        Order_id = client.excute_order(
-            qty = slice.qty,
-            side = slice.side,
-            type = "Limit"
+    symbol: str
+    target_notional: float
+    slice_notional: float
+    entry_offset_bps: Optional[float] = None
+    exit_offset_bps: Optional[float] = None
+    hold_minutes: Optional[float] = None
+
+
+@dataclass
+class MarketConstraints:
+    """Normalized market metadata."""
+
+    base_precision: int
+    quote_precision: int
+    min_order_size: float
+    tick_size: float
+    min_quote_value: float = MIN_QUOTE_THRESHOLD
+
+
+@dataclass
+class VolumeHoldStrategyConfig:
+    """Runtime configuration for the volume hold strategy."""
+
+    accounts: List[AccountCredentials]
+    symbols: List[SymbolPlan]
+    base_url: Optional[str] = None
+    chain_id: Optional[int] = None
+    signer_lib_dir: Optional[str] = None
+    hold_minutes: float = 1.0
+    entry_price_offset_bps: float = 5.0
+    exit_price_offset_bps: float = 5.0
+    slice_delay_seconds: float = 6.0
+    slice_delay_jitter_seconds: float = 3.0
+    slice_fill_timeout: float = 8.0
+    order_poll_interval: float = 1.0
+    post_only: bool = True
+    pause_between_symbols: float = 30.0
+    random_split_range: Tuple[float, float] = (0.45, 0.55)
+    run_once: bool = False
+    enable_hedge: bool = True
+    primary_time_in_force: str = "GTC"
+
+    @classmethod
+    def from_file(cls, path: str) -> "VolumeHoldStrategyConfig":
+        if not os.path.isfile(path):
+            raise StrategyConfigError(f"Config file not found: {path}")
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return cls.from_dict(payload)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "VolumeHoldStrategyConfig":
+        base_url = payload.get("base_url") or os.getenv("LIGHTER_BASE_URL")
+        chain_id = payload.get("chain_id") or os.getenv("LIGHTER_CHAIN_ID")
+        signer_lib_dir = payload.get("signer_lib_dir")
+        default_target_notional = float(payload.get("default_target_notional", 5000))
+        default_slice_count = max(1, int(payload.get("default_slice_count", 50)))
+
+        accounts_payload = payload.get("accounts") or []
+        if len(accounts_payload) < 3:
+            raise StrategyConfigError("At least three Lighter accounts are required.")
+        accounts: List[AccountCredentials] = []
+        for index, entry in enumerate(accounts_payload):
+            label = entry.get("label") or f"Acct-{index + 1}"
+            api_private_key = entry.get("api_private_key") or entry.get("private_key")
+            if not api_private_key:
+                raise StrategyConfigError(f"Missing api_private_key for account {label}")
+            account_index = entry.get("account_index")
+            if account_index is None:
+                account_address = entry.get("account_address")
+                if not account_address:
+                    raise StrategyConfigError(f"account_index/account_address required for {label}")
+                from api.lighter_client import _get_lihgter_account_index  # lazy import
+
+                account_index = _get_lihgter_account_index(account_address)
+            cred = AccountCredentials(
+                label=label,
+                api_private_key=str(api_private_key),
+                account_index=int(account_index),
+                api_key_index=int(entry.get("api_key_index") or 0),
+                base_url=entry.get("base_url") or base_url,
+                chain_id=int(entry.get("chain_id") or chain_id)
+                if entry.get("chain_id") or chain_id
+                else None,
+                signer_lib_dir=entry.get("signer_lib_dir") or signer_lib_dir,
+            )
+            accounts.append(cred)
+
+        symbol_payload = payload.get("coinlist") or payload.get("symbols") or payload.get("coins")
+        if not symbol_payload:
+            raise StrategyConfigError("coinlist/symbols configuration is required.")
+
+        symbols: List[SymbolPlan] = []
+        for entry in symbol_payload:
+            symbol = entry.get("symbol")
+            if not symbol:
+                raise StrategyConfigError("Each coin entry must include symbol.")
+            target_notional = float(entry.get("target_notional") or entry.get("target") or default_target_notional)
+            slice_notional = entry.get("slice_notional")
+            if slice_notional is None:
+                slice_count = int(entry.get("slice_count") or default_slice_count)
+                slice_notional = target_notional / max(slice_count, 1)
+            symbols.append(
+                SymbolPlan(
+                    symbol=str(symbol),
+                    target_notional=float(target_notional),
+                    slice_notional=float(slice_notional),
+                    entry_offset_bps=entry.get("entry_offset_bps"),
+                    exit_offset_bps=entry.get("exit_offset_bps"),
+                    hold_minutes=entry.get("hold_minutes"),
+                )
+            )
+
+        random_split_range = payload.get("random_split_range") or payload.get("hedge_random_split") or [0.45, 0.55]
+        if not isinstance(random_split_range, (list, tuple)) or len(random_split_range) != 2:
+            raise StrategyConfigError("random_split_range must be a two-element list.")
+        low, high = float(random_split_range[0]), float(random_split_range[1])
+        if not 0 < low < high < 1:
+            raise StrategyConfigError("random_split_range values must be between 0 and 1.")
+
+        config = cls(
+            accounts=accounts,
+            symbols=symbols,
+            base_url=base_url,
+            chain_id=int(chain_id) if chain_id else None,
+            signer_lib_dir=signer_lib_dir,
+            hold_minutes=float(payload.get("hold_minutes", 17)),
+            entry_price_offset_bps=float(payload.get("entry_price_offset_bps", 5)),
+            exit_price_offset_bps=float(payload.get("exit_price_offset_bps", 5)),
+            slice_delay_seconds=float(payload.get("slice_delay_seconds", 6)),
+            slice_delay_jitter_seconds=float(payload.get("slice_delay_jitter_seconds", 3)),
+            slice_fill_timeout=float(payload.get("slice_fill_timeout", 120)),
+            order_poll_interval=float(payload.get("order_poll_interval", 2)),
+            post_only=bool(payload.get("post_only", True)),
+            pause_between_symbols=float(payload.get("pause_between_symbols", 30)),
+            random_split_range=(low, high),
+            run_once=bool(payload.get("run_once", False)),
+            enable_hedge=bool(payload.get("enable_hedge", True)),
+            primary_time_in_force=str(payload.get("primary_time_in_force", "GTC")),
         )
-
-        return Order_id
-
-    def place_lighter_market_order(self, lighter_side: str, quantity: Decimal, price: Decimal):
-        if not self.lighter_client:
-            await self.initialize_lighter_client()
-
-        best_bid, best_ask = self.get_lighter_best_levels()
-
-        # Determine order parameters
-        if lighter_side.lower() == 'buy':
-            order_type = "CLOSE"
-            is_ask = False
-            price = best_ask[0] * Decimal('1.002')
-        else:
-            order_type = "OPEN"
-            is_ask = True
-            price = best_bid[0] * Decimal('0.998')
+        if not config.base_url and any(acc.base_url is None for acc in accounts):
+            raise StrategyConfigError("base_url missing; configure global base_url or per-account base_url entries.")
+        return config
 
 
-        # Reset order state
-        self.lighter_order_filled = False
-        self.lighter_order_price = price
-        self.lighter_order_side = lighter_side
-        self.lighter_order_size = quantity
+class VolumeHoldStrategyRefactor:
+    """Implements the refactored multi-account volume/holding strategy."""
 
-        try:
-            client_order_index = int(time.time() * 1000)
-            # Sign the order transaction
-            tx_info, error = self.lighter_client.sign_create_order(
-                market_index=self.lighter_market_index,
-                client_order_index=client_order_index,
-                base_amount=int(quantity * self.base_amount_multiplier),
-                price=int(price * self.price_multiplier),
-                is_ask=is_ask,
-                order_type=self.lighter_client.ORDER_TYPE_LIMIT,
-                time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-                reduce_only=False,
-                trigger_price=0,
-            )
-            if error is not None:
-                raise Exception(f"Sign error: {error}")
+    def __init__(self, config: VolumeHoldStrategyConfig, *, random_seed: Optional[int] = None) -> None:
+        self.config = config
+        self._random = random.Random(random_seed)
+        self._clients = [LighterClient(acc.as_client_config(config)) for acc in config.accounts]
+        self._account_labels = [acc.label for acc in config.accounts]
+        self._market_cache: Dict[str, MarketConstraints] = {}
+        self._stop_event = threading.Event()
+        self._current_symbol_index = 0
+        self._current_primary_index = 0
+        self._maker_price_stats: Dict[str, Dict[str, float]] = {}
+        self._hedge_price_stats: Dict[str, Dict[int, Dict[str, float]]] = {}
+        self._wear_cumulative = {"wear_notional": 0.0, "maker_qty": 0.0}
+        self._hedge_enabled = bool(config.enable_hedge)
+        self._primary_time_in_force = str(config.primary_time_in_force or "GTC").upper()
+        self._position_cache: Dict[int, Dict[str, float]] = {idx: {} for idx in range(len(self._clients))}
+        self._small_fill_selector: Dict[Tuple[int, ...], int] = {}
 
-            # Prepare the form data
-            tx_hash = await self.lighter_client.send_tx(
-                tx_type=self.lighter_client.TX_TYPE_CREATE_ORDER,
-                tx_info=tx_info
-            )
-
-            self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [OPEN]: {quantity}")
-
-            await self.monitor_lighter_order(client_order_index)
-
-            return tx_hash
-        except Exception as e:
-            self.logger.error(f"❌ Error placing Lighter order: {e}")
-            return None
-    def excute_hedge(hedge_plan):
-        if hedge_plan.qty == 0:
-            return
-        # define markte method:
-        place_lighter_market_order(hedge_plan)
-
-        return res
-
-    def wether_excute(new_slce):
-
-        if new_slice.qty > min_order_size and new_slice.qty * ref_price > 11 USD:
-            return True
-        else:
-            return False
-
-    def _waitng_fill(
-            waiting_tolerance
-            symbol
-            slice
-    ):
-
-        while True:
-            sleep(0.5)
-            position = self.client.get_postion(symbol)
-
-            if slice.side == sell:
-                slice_qty = -slice_qty
-            if position - self.position = slice.slice_qty:
-                break
-
-            if time.time() - time_submit >= waiting_tolerance:
-                break
-        
-        fill_amt = position - self.position
-        self.position = position
-
-        return fill_amt
-
-    def split_amt(filled_amt):
-
-        hedge1_amt = random(0.45,0.55) * filled_amt
-
-        hedge1_amt = round_to_precision(hedge1_amt)
-
-        hedge2_amt = filled_amt - hedge1_amt
-
-        # 容忍 10% 的瞬间波动
-        if hedge1_amt * ref_price < 11u or hedge2_amt * ref_price < 11u
-            hedge1_amt = filled_amt
-            hedge2_amt = 0
-
-        return hedge1_amt,hedge2_amt
-    
-    def check_net_position(self)
-        primary_amt = self.client_primary(symbol)
-        hedge1_amt = self.client_hedge1(symbol)
-        hedge2_amt = self.client_hedge2(symbol)
-
-
-        net_postion = primary_amt - hedge1_amt - hedge2_amt
-
-        return primary_amt,hedge1_amt,hedge2_amt,net_postion
-
-
-    def accumulate_position(self):
-        market_price,ref_price = self.get_price()
-        remaining_amt = round_to_precision(remaining_value/market_price)
-            
-        while remaining_amt > 0:
-            market_price,ref_price = self.get_price()
-
-            _,_,_,net_position = self.check_net_position()
-
-            # 扔掉的部分会造成误差，误差累计到 11u 以上的金额时处理
-            if net_position * price > 11:
-                self.excute_hedge(hedge1_acount, net_position)
-            
-            slice_qty = slice_value / ref_price
-            new_slice = SLICE(
-                
-            )
-
-            if not self.wether_excute():
-                break
-
-            order_id = self.excute_slice(new_slice)
-
-            filled_amt = self._waitng_fill()
-
-            # 低于 10u 扔掉，不 hedge 了，懒得管
-            if filled_amt * price < 10:
-                remaining -= filled_amt
-                continue
-
-            hedge_amt1, hedge_amt2 = self.split_amt(filled_amt)
-
-
-            self.excute_hedge(hedge_account1,hedge_amt1)
-            self.excute_hedge(hedge_account2,hedge_amt2)
-
-        net_position = self.check_net_position()
-            
-            
-        return
-    
-
-    def flatten_position(self):
-        market_price,ref_price = self.get_price()
-        
-        primary_amt, hedge1_amt, hedge2_amt, _ = self.check_net_position()
-        
-        # 与 accumulate 相反，但是多一个条件。
-        # 最后一笔分配的时候，split 的 amt 应该参考 hedge_amt，不应该超过。比如 primary 最后有 50，hedge1_amt 20, hedge2_amt 30。那么就不能 spilit 成 25 25
+    # ------------------------------------------------------------------ lifecycle
+    def stop(self) -> None:
+        self._stop_event.set()
 
     def run(self) -> None:
+        logger.info("VolumeHold(refactor) booted with %d symbols", len(self.config.symbols))
+        cycles_completed = 0
+        try:
+            while not self._stop_event.is_set():
+                plan = self.config.symbols[self._current_symbol_index]
+                primary_idx = self._current_primary_index
+                hedger_indices = self._resolve_hedgers(primary_idx)
+                primary_client = self._clients[primary_idx]
+                limits = self._get_market_limits(primary_client, plan.symbol)
+                logger.info(
+                    "Starting cycle: symbol=%s primary=%s hedgers=%s target=%s slice=%s",
+                    plan.symbol,
+                    self._account_labels[primary_idx],
+                    [self._account_labels[i] for i in hedger_indices],
+                    plan.target_notional,
+                    plan.slice_notional,
+                )
 
-        entry_summary = self._accumulate_position(primary_idx, hedger_indices, symbol_plan)
-        if entry_summary <= 0:
-            logger.warning("No fills recorded for %s, skipping exit leg", symbol_plan.symbol)
+                try:
+                    maker_position = abs(self._refresh_position(primary_idx, plan.symbol))
+                    target_base, _, price_hint = self._resolve_base_targets(primary_client, plan, limits)
+                    epsilon = 1e-9
+                    entry_summary = 0.0
+                    performed_accumulation = False
+                    maker_value_quote = maker_position * price_hint
+                    if plan.target_notional > 0 and maker_value_quote + epsilon >= plan.target_notional:
+                        logger.info(
+                            "Existing %s position %.8f (≈ %.2f quote) >= target %.2f; skip accumulation and proceed to flatten.",
+                            plan.symbol,
+                            maker_position,
+                            maker_value_quote,
+                            plan.target_notional,
+                        )
+                        entry_summary = maker_position
+                    else:
+                        entry_summary = self._accumulate_position(primary_idx, hedger_indices, plan)
+                        performed_accumulation = entry_summary > 0
+
+                    if entry_summary <= 0:
+                        logger.warning("No fills recorded or available for %s, skipping exit leg", plan.symbol)
+                    else:
+                        if performed_accumulation:
+                            self._hold_position(plan)
+                        self._flatten_position(primary_idx, hedger_indices, plan, entry_summary)
+                        self._print_cycle_summary(plan.symbol)
+                except Exception:
+                    logger.exception("Cycle for %s failed", plan.symbol)
+
+                cycles_completed += 1
+                if self.config.run_once and cycles_completed >= len(self.config.symbols):
+                    logger.info("run_once enabled, stopping after one pass.")
+                    break
+
+                self._advance_pointers()
+            self._sleep_with_stop(self.config.pause_between_symbols)  # short pause between symbols; still interruptible
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user, shutting down VolumeHold strategy...")
+        finally:
+            self.stop()
+
+    # ------------------------------------------------------------------ core flow
+    def _accumulate_position(self, primary_idx: int, hedgers: Sequence[int], plan: SymbolPlan) -> float:
+        client = self._clients[primary_idx]
+        limits = self._get_market_limits(client, plan.symbol)
+        target_base_total, configured_slice_qty, conversion_price = self._resolve_base_targets(client, plan, limits)
+        total_base_filled = 0.0
+        self._prime_positions(plan.symbol, [primary_idx, *hedgers])
+        current_position = max(self._get_cached_position(primary_idx, plan.symbol), 0.0)
+        target_remaining = max(target_base_total - current_position, 0.0)
+        if target_remaining <= 0:
+            logger.info(
+                "Current %s position %.8f already meets/exceeds target %.8f, skipping accumulation.",
+                plan.symbol,
+                current_position,
+                target_base_total,
+            )
+            return 0.0
+        logger.info(
+            "Converted target %.2f quote to %.8f base using price %.8f (slice target %.8f)",
+            plan.target_notional,
+            target_base_total,
+            conversion_price,
+            configured_slice_qty,
+        )
+        logger.info(
+            "Need to accumulate %.8f %s to reach target %.8f (current %.8f).",
+            target_remaining,
+            plan.symbol,
+            target_base_total,
+            current_position,
+        )
+
+        while not self._stop_event.is_set() and target_remaining > 0:
+            self._rebalance_entry_exposure(plan.symbol, primary_idx, hedgers, limits)
+            reference_price = self._compute_reference_price(client, plan.symbol, "Bid", plan.entry_offset_bps)
+            if reference_price is None or reference_price <= 0:
+                logger.warning("Unable to compute entry price for %s, retrying...", plan.symbol)
+                self._sleep_with_stop(3)
+                continue
+
+            slice_quantity = min(configured_slice_qty, target_remaining)
+            continue_entry = self._ensure_slice_meets_minimums(
+                symbol=plan.symbol,
+                remaining_quantity=target_remaining,
+                reference_price=reference_price,
+                limits=limits,
+                slice_quantity=slice_quantity,
+            )
+            if continue_entry is None:
+                target_remaining = 0.0
+                break
+            slice_quantity = continue_entry
+
+            baseline_position = self._get_cached_position(primary_idx, plan.symbol)
+            order_index, response, rounded_price, rounded_qty = self._submit_limit_order(
+                client=client,
+                client_idx=primary_idx,
+                symbol=plan.symbol,
+                side="Bid",
+                quantity=slice_quantity,
+                price=reference_price,
+                post_only=self.config.post_only,
+                reduce_only=False,
+                limits=limits,
+                account_label=self._account_labels[primary_idx],
+            )
+            if order_index is None:
+                self._sleep_with_stop(self._slice_delay())
+                continue
+            fills = self._wait_for_position_fill(
+                client=client,
+                client_idx=primary_idx,
+                symbol=plan.symbol,
+                side="Bid",
+                order_index=order_index,
+                expected_quantity=rounded_qty,
+                limit_price=rounded_price,
+                limits=limits,
+                baseline_position=baseline_position,
+            )
+            filled_base = sum(fill["quantity"] for fill in fills)
+            if filled_base <= 0:
+                logger.info("Slice produced no fills, retrying another order...")
+                self._sleep_with_stop(self._slice_delay())
+                continue
+            self._record_maker_fill(plan.symbol, fills)
+
+            total_base_filled += filled_base
+            target_remaining = max(target_remaining - filled_base, 0.0)
+            logger.info(
+                "Primary %s filled %.8f %s (%.8f / %.8f base done)",
+                self._account_labels[primary_idx],
+                filled_base,
+                plan.symbol,
+                target_base_total - target_remaining,
+                target_base_total,
+            )
+
+            self._dispatch_hedges(primary_idx, plan.symbol, "Ask", filled_base, hedgers, limits, reduce_only=False)
+            self._rebalance_entry_exposure(plan.symbol, primary_idx, hedgers, limits)
+            self._sleep_with_stop(self._slice_delay())  # jittered delay between slices so we don't spam the venue
+
+        return total_base_filled
+
+    def _flatten_position(
+        self,
+        primary_idx: int,
+        hedgers: Sequence[int],
+        plan: SymbolPlan,
+        target_base_quantity: float,
+    ) -> None:
+        client = self._clients[primary_idx]
+        limits = self._get_market_limits(client, plan.symbol)
+        remaining_base = float(target_base_quantity)
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        if remaining_base <= 0:
+            logger.warning("No base quantity to unwind for %s", plan.symbol)
+            return
+        self._prime_positions(plan.symbol, [primary_idx, *hedgers])
+        self._trim_excess_hedge_shorts(plan.symbol, primary_idx, hedgers, limits)
+        reference_price = self._compute_reference_price(client, plan.symbol, "Ask", plan.exit_offset_bps)
+        if reference_price:
+            self._rebalance_flatten_gap(plan.symbol, primary_idx, hedgers, limits, reference_price)
+
+        while not self._stop_event.is_set() and remaining_base > limits.min_order_size / 2:
+            reference_price = self._compute_reference_price(client, plan.symbol, "Ask", plan.exit_offset_bps)
+            if reference_price is None or reference_price <= 0:
+                logger.warning("Unable to compute exit price for %s, retrying...", plan.symbol)
+                self._sleep_with_stop(3)
+                continue
+            if plan.slice_notional and plan.slice_notional > 0:
+                slice_base = plan.slice_notional / max(reference_price, 1e-12)
+            else:
+                slice_base = remaining_base
+            configured_slice_qty = max(
+                round_to_precision(slice_base, limits.base_precision),
+                limits.min_order_size,
+            )
+            slice_quantity = min(configured_slice_qty, remaining_base)
+            adjusted_exit = self._ensure_exit_slice_meets_minimums(
+                symbol=plan.symbol,
+                remaining_base=remaining_base,
+                reference_price=reference_price,
+                limits=limits,
+                slice_quantity=slice_quantity,
+            )
+            if adjusted_exit is None:
+                break
+            slice_quantity = adjusted_exit
+            min_exit_qty = self._effective_min_quantity(reference_price, limits)
+            if slice_quantity + epsilon < min_exit_qty:
+                logger.info(
+                    "Exit remainder %.8f %s below venue minimum %.8f; stopping flatten loop.",
+                    remaining_base,
+                    plan.symbol,
+                    min_exit_qty,
+                )
+                break
+
+            baseline_position = self._get_cached_position(primary_idx, plan.symbol)
+            order_index, response, rounded_price, rounded_qty = self._submit_limit_order(
+                client=client,
+                client_idx=primary_idx,
+                symbol=plan.symbol,
+                side="Ask",
+                quantity=slice_quantity,
+                price=reference_price,
+                post_only=self.config.post_only,
+                reduce_only=True,
+                limits=limits,
+                account_label=self._account_labels[primary_idx],
+            )
+            if order_index is None:
+                self._sleep_with_stop(self._slice_delay())
+                continue
+            fills = self._wait_for_position_fill(
+                client=client,
+                client_idx=primary_idx,
+                symbol=plan.symbol,
+                side="Ask",
+                order_index=order_index,
+                expected_quantity=rounded_qty,
+                limit_price=rounded_price,
+                limits=limits,
+                baseline_position=baseline_position,
+            )
+            filled_base = sum(fill["quantity"] for fill in fills)
+            if filled_base <= 0:
+                logger.info("Exit slice produced no fills, retrying...")
+                self._sleep_with_stop(self._slice_delay())
+                continue
+            self._record_maker_fill(plan.symbol, fills)
+
+            remaining_base = max(remaining_base - filled_base, 0.0)
+            logger.info(
+                "Primary %s closed %.8f %s (%.8f remaining)",
+                self._account_labels[primary_idx],
+                filled_base,
+                plan.symbol,
+                remaining_base,
+            )
+            self._dispatch_hedges(primary_idx, plan.symbol, "Bid", filled_base, hedgers, limits, reduce_only=True)
+            self._trim_excess_hedge_shorts(plan.symbol, primary_idx, hedgers, limits)
+            self._rebalance_flatten_gap(plan.symbol, primary_idx, hedgers, limits, reference_price)
+            self._sleep_with_stop(self._slice_delay())  # allow partial book updates / hedges to catch up
+
+        self._log_position_snapshot(plan.symbol, primary_idx, hedgers)
+        logger.info("Exit leg for %s finished; remaining base %.8f", plan.symbol, remaining_base)
+
+    def _hold_position(self, plan: SymbolPlan) -> None:
+        hold_minutes = plan.hold_minutes or self.config.hold_minutes
+        hold_seconds = max(hold_minutes * 60, 1)
+        logger.info("Holding %s exposure for %.1f minutes", plan.symbol, hold_minutes)
+        elapsed = 0.0
+        while not self._stop_event.is_set() and elapsed < hold_seconds:
+            sleep_window = min(30, hold_seconds - elapsed)
+            self._sleep_with_stop(sleep_window)
+            elapsed += sleep_window
+
+    # ------------------------------------------------------------------ helpers
+    def _submit_limit_order(
+        self,
+        client: LighterClient,
+        client_idx: int,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        post_only: bool,
+        reduce_only: bool,
+        limits: MarketConstraints,
+        account_label: str,
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, float]:
+        rounded_qty = max(round_to_precision(quantity, limits.base_precision), limits.min_order_size)
+        rounded_price = round_to_tick_size(price, limits.tick_size)
+        logger.info(
+            "Submitting %s order: account=%s side=%s qty=%.8f price=%.8f post_only=%s reduce_only=%s",
+            symbol,
+            account_label,
+            side,
+            rounded_qty,
+            rounded_price,
+            post_only,
+            reduce_only,
+        )
+        tif_upper = self._primary_time_in_force
+        post_only_flag = post_only
+        if tif_upper in ("FOK", "IOC") and post_only_flag:
+            logger.warning("PostOnly disabled because timeInForce=%s is incompatible.", tif_upper)
+            post_only_flag = False
+        order_expiry: Optional[int] = None
+        if tif_upper in ("FOK", "IOC"):
+            order_expiry = 0
+        order = {
+            "symbol": symbol,
+            "side": side,
+            "orderType": "Limit",
+            "quantity": str(rounded_qty),
+            "price": str(rounded_price),
+            "postOnly": post_only_flag,
+            "reduceOnly": reduce_only,
+            "timeInForce": tif_upper,
+        }
+        if order_expiry is not None:
+            order["orderExpiry"] = order_expiry
+        response = self._execute_with_nonce_retry(client, order, account_label)
+        if isinstance(response, dict) and response.get("error"):
+            logger.error("Limit order rejected for %s: %s", symbol, response["error"])
+            return None, response, rounded_price, rounded_qty
+        order_index = self._extract_order_index(response)
+        return order_index, response, rounded_price, rounded_qty
+
+    def _wait_for_position_fill(
+        self,
+        client: LighterClient,
+        client_idx: int,
+        symbol: str,
+        side: str,
+        order_index: Optional[str],
+        expected_quantity: float,
+        limit_price: float,
+        limits: MarketConstraints,
+        baseline_position: float,
+    ) -> List[Dict[str, float]]:
+        if not order_index:
+            return []
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        start = time.time()
+        deadline = start + self.config.slice_fill_timeout
+        filled = 0.0
+        last_position = baseline_position
+        while not self._stop_event.is_set() and time.time() < deadline and filled + epsilon < expected_quantity:
+            self._sleep_with_stop(self.config.order_poll_interval)
+            current_position = self._refresh_position(client_idx, symbol)
+            delta = current_position - last_position
+            last_position = current_position
+            signed_delta = delta if side == "Bid" else -delta
+            if signed_delta > epsilon:
+                filled += signed_delta
+        if order_index:
+            cancel_result = client.cancel_order(order_index, symbol)
+            if isinstance(cancel_result, dict) and cancel_result.get("error"):
+                logger.debug("Cancel %s for %s response: %s", order_index, symbol, cancel_result["error"])
+        final_position = last_position
+        quantity_delta = final_position - baseline_position if side == "Bid" else baseline_position - final_position
+        quantity_delta = round_to_precision(max(quantity_delta, 0.0), limits.base_precision)
+        if quantity_delta <= epsilon:
+            return []
+        return [{"quantity": quantity_delta, "price": limit_price}]
+
+    def _dispatch_hedges(
+        self,
+        primary_idx: Optional[int],
+        symbol: str,
+        side: str,
+        qty: float,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+        *,
+        reduce_only: bool,
+    ) -> None:
+        if qty <= 0 or not hedger_indices:
+            return
+        short_caps: Dict[int, float] = {}
+        if reduce_only:
+            for idx in hedger_indices:
+                short_caps[idx] = max(-self._get_cached_position(idx, symbol), 0.0)
+            logger.debug(
+                "Reduce-only hedge planning for %s: qty=%.8f exposures=%s",
+                symbol,
+                qty,
+                {self._account_labels[idx]: cap for idx, cap in short_caps.items()},
+            )
+        allocations = (
+            self._split_base_quantity(qty, hedger_indices, limits)
+            if not reduce_only
+            else self._allocate_reduce_only(short_caps, hedger_indices, qty, limits)
+        )
+        min_trade_qty = self._estimate_minimum_trade_qty(symbol, side, hedger_indices, limits)
+        if not reduce_only and len(hedger_indices) > 1:
+            threshold = max(min_trade_qty, limits.min_order_size)
+            if qty < threshold * len(hedger_indices):
+                target_pos = self._select_small_fill_target(hedger_indices)
+                allocations = [0.0 for _ in hedger_indices]
+                allocations[target_pos] = round_to_precision(qty, limits.base_precision)
+        if reduce_only:
+            logger.debug(
+                "Reduce-only hedge allocations after caps for %s: %s",
+                symbol,
+                allocations,
+            )
+
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        for list_index, hedger_idx in enumerate(hedger_indices):
+            alloc = allocations[list_index]
+            rounded = round_to_precision(alloc, limits.base_precision)
+            if rounded <= 0:
+                logger.debug(
+                    "Skipping hedge %s for %s because rounded allocation %.8f <= 0",
+                    self._account_labels[hedger_idx],
+                    symbol,
+                    rounded,
+                )
+                continue
+            price = self._compute_aggressive_price(self._clients[hedger_idx], symbol, side)
+            if price is None:
+                logger.error("Unable to compute hedge price for %s", symbol)
+                continue
+            price = round_to_tick_size(price, limits.tick_size)
+            min_required = self._effective_min_quantity(price, limits)
+            if reduce_only:
+                cap = short_caps.get(hedger_idx, 0.0)
+                if cap <= epsilon:
+                    logger.debug(
+                        "Reduce-only cap reached for %s on %s (exposure %.8f)",
+                        self._account_labels[hedger_idx],
+                        symbol,
+                        cap,
+                    )
+                    continue
+                rounded = min(rounded, cap)
+                short_caps[hedger_idx] = max(cap - rounded, 0.0)
+            if rounded + epsilon < min_required:
+                logger.debug(
+                    "Hedge qty %.8f below venue minimum %.8f at price %.8f for %s, left as net exposure",
+                    rounded,
+                    min_required,
+                    price,
+                    self._account_labels[hedger_idx],
+                )
+                continue
+            baseline_position = self._get_cached_position(hedger_idx, symbol)
+            order_index, response, rounded_price, rounded_qty = self._submit_limit_order(
+                client=self._clients[hedger_idx],
+                client_idx=hedger_idx,
+                symbol=symbol,
+                side=side,
+                quantity=rounded,
+                price=price,
+                post_only=False,
+                reduce_only=reduce_only,
+                limits=limits,
+                account_label=self._account_labels[hedger_idx],
+            )
+            if order_index is None:
+                continue
+            fills = self._wait_for_position_fill(
+                client=self._clients[hedger_idx],
+                client_idx=hedger_idx,
+                symbol=symbol,
+                side=side,
+                order_index=order_index,
+                expected_quantity=rounded_qty,
+                limit_price=rounded_price,
+                limits=limits,
+                baseline_position=baseline_position,
+            )
+            filled_base = sum(fill["quantity"] for fill in fills)
+            if filled_base <= 0:
+                continue
+            delta = filled_base if side == "Bid" else -filled_base
+            order_ids = self._extract_order_identifiers(response if isinstance(response, dict) else None)
+            self._record_hedge_fill(hedger_idx, symbol, fills)
+        if hedger_indices:
+            self._log_position_snapshot(symbol, primary_idx, hedger_indices)
+
+    def _split_base_quantity(
+        self,
+        qty: float,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+    ) -> List[float]:
+        if not hedger_indices:
+            return []
+        low, high = self.config.random_split_range
+        first_split = self._random.uniform(low, high)
+        allocations: List[float] = []
+        if len(hedger_indices) == 1:
+            allocations.append(round_to_precision(qty, limits.base_precision))
         else:
-            self._hold_position(symbol_plan)
-            self._flatten_position(primary_idx, hedger_indices, symbol_plan, entry_summary)
-            self._print_cycle_summary(symbol_plan.symbol)
+            first_qty = round_to_precision(qty * first_split, limits.base_precision)
+            allocations.append(first_qty)
+            allocations.append(round_to_precision(qty - first_qty, limits.base_precision))
+        while len(allocations) < len(hedger_indices):
+            allocations.append(0.0)
+        return allocations
+
+    def _allocate_reduce_only(
+        self,
+        exposure_caps: Dict[int, float],
+        hedger_indices: Sequence[int],
+        qty: float,
+        limits: MarketConstraints,
+    ) -> List[float]:
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        if qty <= epsilon or not hedger_indices:
+            return [0.0 for _ in hedger_indices]
+        ordered = sorted(
+            ((idx, max(exposure_caps.get(idx, 0.0), 0.0)) for idx in hedger_indices),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        allocations: Dict[int, float] = {idx: 0.0 for idx in hedger_indices}
+        qty_left = qty
+        for idx, exposure in ordered:
+            if qty_left <= epsilon:
+                break
+            if exposure <= epsilon:
+                continue
+            take = min(exposure, qty_left)
+            allocations[idx] = round_to_precision(take, limits.base_precision)
+            qty_left = max(round_to_precision(qty_left - take, limits.base_precision), 0.0)
+        return [allocations[idx] for idx in hedger_indices]
+
+    def _effective_min_quantity(self, price: float, limits: MarketConstraints) -> float:
+        min_quote = max(limits.min_quote_value, MIN_QUOTE_THRESHOLD)
+        quote_based = min_quote / max(price, 1e-12)
+        return max(limits.min_order_size, quote_based)
+
+    def _ensure_slice_meets_minimums(
+        self,
+        symbol: str,
+        remaining_quantity: float,
+        reference_price: float,
+        limits: MarketConstraints,
+        slice_quantity: float,
+    ) -> Optional[float]:
+        min_trade_qty = self._effective_min_quantity(reference_price, limits)
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        if slice_quantity + epsilon >= min_trade_qty:
+            return slice_quantity
+        if remaining_quantity <= min_trade_qty + epsilon:
+            logger.info(
+                "Remaining target %.8f %s below venue minimum %.8f, finishing accumulation.",
+                remaining_quantity,
+                symbol,
+                min_trade_qty,
+            )
+            return None
+        logger.info(
+            "Adjusting slice qty from %.8f to venue minimum %.8f for %s.",
+            slice_quantity,
+            min_trade_qty,
+            symbol,
+        )
+        return min_trade_qty
+
+    def _ensure_exit_slice_meets_minimums(
+        self,
+        symbol: str,
+        remaining_base: float,
+        reference_price: float,
+        limits: MarketConstraints,
+        slice_quantity: float,
+    ) -> Optional[float]:
+        min_trade_qty = self._effective_min_quantity(reference_price, limits)
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        if slice_quantity + epsilon >= min_trade_qty:
+            return slice_quantity
+        if remaining_base <= min_trade_qty + epsilon:
+            logger.info(
+                "Remaining exit size %.8f %s below venue minimum %.8f, finishing exit leg.",
+                remaining_base,
+                symbol,
+                min_trade_qty,
+            )
+            return None
+        logger.info(
+            "Adjusting exit slice qty from %.8f to venue minimum %.8f for %s.",
+            slice_quantity,
+            min_trade_qty,
+            symbol,
+        )
+        return min(min_trade_qty, remaining_base)
+
+    @staticmethod
+    def _extract_order_identifiers(payload: Optional[Dict[str, Any]]) -> List[str]:
+        if not isinstance(payload, dict):
+            return []
+        identifiers: List[str] = []
+        for key in ("orderIndex", "orderId", "id", "clientOrderIndex", "clientOrderId"):
+            value = payload.get(key)
+            if value is not None:
+                identifiers.append(str(value))
+        return identifiers
+
+    @staticmethod
+    def _extract_order_index(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("orderIndex", "order_index", "clientOrderIndex", "id", "orderId"):
+            value = payload.get(key)
+            if value is not None:
+                return str(value)
+        return None
+
+    def _estimate_minimum_trade_qty(
+        self,
+        symbol: str,
+        side: str,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+    ) -> float:
+        if not hedger_indices:
+            return limits.min_order_size
+        reference_idx = hedger_indices[0]
+        price = self._compute_aggressive_price(self._clients[reference_idx], symbol, side)
+        if price is None:
+            return limits.min_order_size
+        return self._effective_min_quantity(price, limits)
+
+    def _select_small_fill_target(self, hedger_indices: Sequence[int]) -> int:
+        if not hedger_indices:
+            raise StrategyConfigError("hedger_indices cannot be empty")
+        key = tuple(hedger_indices)
+        pointer = self._small_fill_selector.get(key, -1)
+        pointer = (pointer + 1) % len(hedger_indices)
+        self._small_fill_selector[key] = pointer
+        return pointer
+
+    def _prime_positions(self, symbol: str, indices: Sequence[int]) -> None:
+        # 同时更新三家的仓位
+        for idx in indices:
+            self._refresh_position(idx, symbol)
+
+    def _refresh_position(self, account_idx: int, symbol: str) -> float:
+        client = self._clients[account_idx]
+        time.sleep(0.1)
+        positions = client.get_positions(symbol)
+        value = 0.0
+        if isinstance(positions, list):
+            for entry in positions:
+                if not isinstance(entry, dict):
+                    continue
+                raw = entry.get("netQuantity") or entry.get("rawSize") or entry.get("size")
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                break
+        self._position_cache.setdefault(account_idx, {})[symbol] = value
+        return value
+
+    def _get_cached_position(self, account_idx: int, symbol: str) -> float:
+        account_store = self._position_cache.setdefault(account_idx, {})
+        if symbol not in account_store:
+            return self._refresh_position(account_idx, symbol)
+        return account_store[symbol]
+
+    def _compute_net_position(
+        self,
+        symbol: str,
+        primary_idx: int,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+    ) -> float:
+        maker_pos = self._get_cached_position(primary_idx, symbol)
+        hedger_total = 0.0
+        for idx in hedger_indices:
+            hedger_total += self._get_cached_position(idx, symbol)
+        return round_to_precision(maker_pos + hedger_total, limits.base_precision)
+
+    def _rebalance_entry_exposure(
+        self,
+        symbol: str,
+        primary_idx: int,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+    ) -> None:
+        if not hedger_indices or not self._hedge_enabled:
+            return
+        net_base = self._compute_net_position(symbol, primary_idx, hedger_indices, limits)
+        side = "Ask" if net_base > 0 else "Bid"
+        price_source_idx = hedger_indices[0] if hedger_indices else primary_idx
+        price = self._compute_aggressive_price(self._clients[price_source_idx], symbol, side)
+        if price is None:
+            return
+        net_notional = abs(net_base) * price
+        if net_notional < max(limits.min_quote_value, MIN_QUOTE_THRESHOLD):
+            logger.info(
+                f"{net_base} Net exposure {net_notional} detected, no need to rebalance"
+            )
+            return
+        logger.info(
+            "Net exposure %.8f %s detected (notional ≈ %.2f); dispatching catch-up hedge %s",
+            net_base,
+            symbol,
+            net_notional,
+            side,
+        )
+        self._dispatch_hedges(primary_idx, symbol, side, abs(net_base), hedger_indices, limits, reduce_only=False)
+
+    def _log_position_snapshot(
+        self,
+        symbol: str,
+        primary_idx: Optional[int],
+        hedger_indices: Sequence[int],
+    ) -> None:
+        participants: List[int] = []
+        if primary_idx is not None:
+            participants.append(primary_idx)
+        for hedger_idx in hedger_indices:
+            if hedger_idx not in participants:
+                participants.append(hedger_idx)
+        snapshot: List[str] = []
+        for idx in participants:
+            qty = self._get_cached_position(idx, symbol)
+            snapshot.append(self._format_position_entry(symbol, idx, qty))
+        if snapshot:
+            logger.info("Positions[%s]: %s", symbol, "; ".join(snapshot))
+
+    def _format_position_entry(self, symbol: str, account_idx: int, qty: float) -> str:
+        label = self._account_labels[account_idx]
+        descr = self._describe_side(qty)
+        return f"{label}={qty:.6f} {symbol} ({descr})"
+
+    @staticmethod
+    def _describe_side(value: Optional[float]) -> str:
+        if value is None or abs(value) <= 1e-12:
+            return "flat"
+        return "long" if value > 0 else "short"
+
+    def _record_maker_fill(self, symbol: str, fills: Iterable[Dict[str, float]]) -> None:
+        stats = self._maker_price_stats.setdefault(symbol, {"qty": 0.0, "notional": 0.0})
+        for fill in fills:
+            qty = float(fill["quantity"])
+            price = float(fill["price"])
+            stats["qty"] += qty
+            stats["notional"] += qty * price
+
+    def _record_hedge_fill(
+        self,
+        hedger_idx: int,
+        symbol: str,
+        fills: Iterable[Dict[str, float]],
+    ) -> None:
+        stats = self._hedge_price_stats.setdefault(symbol, {}).setdefault(
+            hedger_idx,
+            {"qty": 0.0, "notional": 0.0},
+        )
+        for fill in fills or []:
+            qty = float(fill.get("quantity") or 0.0)
+            price = float(fill.get("price") or 0.0)
+            if qty <= 0 or price <= 0:
+                continue
+            stats["qty"] += qty
+            stats["notional"] += qty * price
+
+    def _print_cycle_summary(self, symbol: str) -> None:
+        maker_stats = self._maker_price_stats.get(symbol)
+        hedger_stats = self._hedge_price_stats.get(symbol, {})
+        if not maker_stats or maker_stats.get("qty", 0) <= 0:
+            return
+        maker_avg = maker_stats["notional"] / maker_stats["qty"]
+        logger.info(
+            "[SUMMARY] %s Maker total %.8f @ %.5f",
+            symbol,
+            maker_stats["qty"],
+            maker_avg,
+        )
+        combined_qty = 0.0
+        combined_notional = 0.0
+        for hedger_idx, stats in hedger_stats.items():
+            qty = stats.get("qty", 0.0)
+            if qty <= 0:
+                continue
+            avg = stats["notional"] / qty
+            slippage = avg - maker_avg
+            logger.info(
+                "[SUMMARY] Hedge %s total %.8f @ %.5f (slippage %.8f)",
+                self._account_labels[hedger_idx],
+                qty,
+                avg,
+                slippage,
+            )
+            combined_qty += qty
+            combined_notional += stats["notional"]
+        if combined_qty > 0:
+            hedge_avg = combined_notional / combined_qty
+            wear_per_unit = hedge_avg - maker_avg
+            nominal_qty = min(maker_stats["qty"], combined_qty)
+            wear_notional = wear_per_unit * nominal_qty
+            wear_rate = wear_notional / max(2 * maker_stats["qty"], 1e-12)
+            logger.info(
+                "[SUMMARY] Cycle wear per-unit=%.8f notional=%.8f rate=%.6f%%",
+                wear_per_unit,
+                wear_notional,
+                wear_rate * 100,
+            )
+            self._wear_cumulative["wear_notional"] += wear_notional
+            self._wear_cumulative["maker_qty"] += maker_stats["qty"]
+            global_wear_rate = (
+                self._wear_cumulative["wear_notional"]
+                / max(2 * self._wear_cumulative["maker_qty"], 1e-12)
+            )
+            logger.info(
+                "[SUMMARY] Global wear notional=%.8f rate=%.6f%% over maker_qty %.8f",
+                self._wear_cumulative["wear_notional"],
+                global_wear_rate * 100,
+                self._wear_cumulative["maker_qty"],
+            )
+        self._maker_price_stats.pop(symbol, None)
+        if symbol in self._hedge_price_stats:
+            self._hedge_price_stats.pop(symbol, None)
+
+    @staticmethod
+    def _normalize_timestamp(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            ts = float(value)
+        except (TypeError, ValueError):
+            return None
+        if ts > 1_000_000_000_000:
+            ts /= 1000.0
+        return ts
+
+    def _weighted_average(self, fills: Iterable[Dict[str, float]]) -> float:
+        total_qty = 0.0
+        total_notional = 0.0
+        for fill in fills:
+            qty = float(fill["quantity"])
+            price = float(fill["price"])
+            total_qty += qty
+            total_notional += qty * price
+        return total_notional / total_qty if total_qty > 0 else 0.0
+
+    def _compute_reference_price(
+        self,
+        client: LighterClient,
+        symbol: str,
+        side: str,
+        override_offset_bps: Optional[float],
+    ) -> Optional[float]:
+        book = client.get_order_book(symbol, limit=5)
+        if isinstance(book, dict) and book.get("error"):
+            logger.error("Failed to fetch order book for %s: %s", symbol, book["error"])
+            return None
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+        offset = override_offset_bps
+        if offset is None:
+            offset = self.config.entry_price_offset_bps if side == "Bid" else self.config.exit_price_offset_bps
+        offset = float(offset or 0)
+        if side == "Bid":
+            base = best_bid or best_ask
+            if base is None:
+                return None
+            price = base * (1 + offset / 10_000.0)
+            if best_ask:
+                price = min(price, best_ask - 1e-9)
+            if best_bid:
+                price = max(price, best_bid)
+            return price
+        base = best_ask or best_bid
+        if base is None:
+            return None
+        price = base * (1 - offset / 10_000.0)
+        if best_bid:
+            price = max(price, best_bid + 1e-9)
+        if best_ask:
+            price = min(price, best_ask)
+        return price
+
+    def _resolve_base_targets(
+        self,
+        client: LighterClient,
+        plan: SymbolPlan,
+        limits: MarketConstraints,
+    ) -> Tuple[float, float, float]:
+        price = self._compute_reference_price(client, plan.symbol, "Bid", plan.entry_offset_bps)
+        if price is None or price <= 0:
+            price = self._compute_aggressive_price(client, plan.symbol, "Bid")
+        if price is None or price <= 0:
+            raise StrategyConfigError(f"Unable to derive reference price for {plan.symbol}")
+        raw_target_quote = max(float(plan.target_notional), 0.0)
+        raw_slice_quote = float(plan.slice_notional) if plan.slice_notional and plan.slice_notional > 0 else 0.0
+        target_base_total = (
+            round_to_precision(raw_target_quote / price, limits.base_precision) if raw_target_quote > 0 else 0.0
+        )
+        if raw_slice_quote > 0:
+            configured_slice_qty = round_to_precision(raw_slice_quote / price, limits.base_precision)
+        else:
+            configured_slice_qty = target_base_total
+        if configured_slice_qty <= 0 and target_base_total > 0:
+            configured_slice_qty = target_base_total
+        configured_slice_qty = max(configured_slice_qty, limits.min_order_size)
+        return target_base_total, configured_slice_qty, price
+
+    def _trim_excess_hedge_shorts(
+        self,
+        symbol: str,
+        primary_idx: int,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+    ) -> None:
+        if not hedger_indices:
+            return
+        maker_qty = max(self._get_cached_position(primary_idx, symbol), 0.0)
+        total_short = 0.0
+        snapshot: Dict[str, float] = {}
+        for hedger_idx in hedger_indices:
+            qty = self._get_cached_position(hedger_idx, symbol)
+            short_qty = max(-qty, 0.0)
+            snapshot[self._account_labels[hedger_idx]] = short_qty
+            total_short += short_qty
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+        if total_short <= maker_qty + epsilon:
+            return
+        deficit = total_short - maker_qty
+        logger.warning(
+            "Hedge shorts %.8f exceed maker %.8f for %s; reducing hedges by %.8f (snapshot=%s)",
+            total_short,
+            maker_qty,
+            symbol,
+            deficit,
+            snapshot,
+        )
+        self._dispatch_hedges(primary_idx, symbol, "Bid", deficit, hedger_indices, limits, reduce_only=True)
+        self._prime_positions(symbol, hedger_indices)
+
+    def _rebalance_flatten_gap(
+        self,
+        symbol: str,
+        primary_idx: int,
+        hedger_indices: Sequence[int],
+        limits: MarketConstraints,
+        reference_price: float,
+    ) -> None:
+        maker_qty = max(self._get_cached_position(primary_idx, symbol), 0.0)
+        hedge_total = 0.0
+        for hedger_idx in hedger_indices:
+            hedge_total += max(-self._get_cached_position(hedger_idx, symbol), 0.0)
+        gap = maker_qty - hedge_total
+        if gap <= 0 or reference_price <= 0:
+            return
+        gap_quote = gap * reference_price
+        threshold = max(limits.min_quote_value, MIN_QUOTE_THRESHOLD)
+        if gap_quote < threshold:
+            return
+        logger.info(
+            "Hedge lag detected for %s (maker %.8f vs hedge %.8f, gap %.8f ≈ %.2f quote); dispatching catch-up shorts.",
+            symbol,
+            maker_qty,
+            hedge_total,
+            gap,
+            gap_quote,
+        )
+        self._dispatch_hedges(primary_idx, symbol, "Ask", gap, hedger_indices, limits, reduce_only=False)
+
+    def _compute_aggressive_price(
+        self,
+        client: LighterClient,
+        symbol: str,
+        side: str,
+    ) -> Optional[float]:
+        book = client.get_order_book(symbol, limit=5)
+        if isinstance(book, dict) and book.get("error"):
+            logger.error("Failed to fetch order book for %s: %s", symbol, book["error"])
+            return None
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+        if side == "Bid":
+            base = best_ask or best_bid
+            if base is None:
+                return None
+            price = base * 1.002
+            if best_ask:
+                price = max(price, best_ask)
+            return price
+        base = best_bid or best_ask
+        if base is None:
+            return None
+        price = base * 0.998
+        if best_bid:
+            price = min(price, best_bid)
+        return price
+
+    def _get_market_limits(self, client: LighterClient, symbol: str) -> MarketConstraints:
+        cached = self._market_cache.get(symbol)
+        if cached:
+            return cached
+        metadata = client.get_market_limits(symbol)
+        if not metadata:
+            raise StrategyConfigError(f"Unable to load market metadata for {symbol}")
+        limits = MarketConstraints(
+            base_precision=int(metadata["base_precision"]),
+            quote_precision=int(metadata["quote_precision"]),
+            min_order_size=float(metadata["min_order_size"]),
+            tick_size=float(metadata["tick_size"]),
+            min_quote_value=float(metadata.get("min_quote_value") or MIN_QUOTE_THRESHOLD),
+        )
+        self._market_cache[symbol] = limits
+        return limits
+
+    def _sleep_with_stop(self, seconds: float) -> None:
+        """Sleep in small chunks so CTRL+C or stop() can break long waits."""
+        target_time = time.time() + max(seconds, 0)
+        while not self._stop_event.is_set() and time.time() < target_time:
+            time.sleep(min(1, target_time - time.time()))
+
+    def _slice_delay(self) -> float:
+        """Return the per-slice delay plus jitter (helps stagger orders)."""
+        jitter = self._random.uniform(0, max(self.config.slice_delay_jitter_seconds, 0))
+        return max(self.config.slice_delay_seconds + jitter, 0)
+
+    def _resolve_hedgers(self, primary_idx: int) -> List[int]:
+        """Pick up to two non-primary accounts that will act as hedgers."""
+        if not self._hedge_enabled:
+            return []
+        indices = list(range(len(self._clients)))
+        indices.remove(primary_idx)
+        return indices[:2]
+
+    def _advance_pointers(self) -> None:
+        """Rotate to the next symbol and next primary account."""
+        self._current_symbol_index = (self._current_symbol_index + 1) % len(self.config.symbols)
+        self._current_primary_index = (self._current_primary_index + 1) % len(self._clients)
+
+    @staticmethod
+    def _refresh_client_nonce(client: LighterClient) -> Optional[int]:
+        refresh = getattr(client, "refresh_nonce", None)
+        if callable(refresh):
+            try:
+                return refresh()
+            except Exception as exc:
+                logger.debug("Failed to refresh nonce: %s", exc)
+        return None
+
+    def _execute_with_nonce_retry(
+        self,
+        client: LighterClient,
+        order: Dict[str, Any],
+        account_label: str,
+        *,
+        max_retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        last_response: Dict[str, Any] = {}
+        retries = max_retries if isinstance(max_retries, int) and max_retries > 0 else 1
+        for attempt in range(1, retries + 1):
+            response = client.execute_order(order)
+            if isinstance(response, dict) and response.get("error"):
+                error_text = str(response["error"]).lower()
+                if "nonce" in error_text and attempt < retries:
+                    logger.warning("Nonce error for %s, refreshing and retrying (attempt %s/%s)", account_label, attempt, retries)
+                    refreshed = self._refresh_client_nonce(client)
+                    if refreshed is None:
+                        time.sleep(0.2 * attempt)
+                    continue
+                last_response = response
+                break
+            last_response = response
+            break
+        return last_response
