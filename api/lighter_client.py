@@ -7,6 +7,7 @@ import itertools
 import json
 import os
 import platform
+import threading
 import time
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -91,6 +92,7 @@ class SimpleSignerClient:
         self.timeout = timeout or DEFAULT_HTTP_TIMEOUT
         self.verify_ssl = verify_ssl
         self._nonce: Optional[int] = None
+        self._nonce_lock = threading.Lock()
         self.session = session or requests.Session()
         self.private_key = self._sanitize_private_key(private_key)
         self.chain_id = int(chain_id) if chain_id is not None else (304 if "mainnet" in self.base_url else 300)
@@ -220,11 +222,12 @@ class SimpleSignerClient:
         return self._nonce
 
     def _next_nonce(self) -> int:
-        if self._nonce is None:
-            self._fetch_nonce()
-        assert self._nonce is not None
-        self._nonce += 1
-        return self._nonce
+        with self._nonce_lock:
+            if self._nonce is None:
+                self._fetch_nonce()
+            assert self._nonce is not None
+            self._nonce += 1
+            return self._nonce
 
     def _send_tx(self, tx_type: int, tx_info: str, price_protection: bool = True) -> Dict[str, Any]:
         if not tx_info:
@@ -325,34 +328,45 @@ class SimpleSignerClient:
         trigger_price: int = NIL_TRIGGER_PRICE,
         order_expiry: int = DEFAULT_28_DAY_ORDER_EXPIRY,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        nonce = self._next_nonce()
-        payload, error = self._decode_str_or_err(
-            self.signer.SignCreateOrder(
-                ctypes.c_int(market_index),
-                ctypes.c_longlong(client_order_index),
-                ctypes.c_longlong(base_amount),
-                ctypes.c_int(price),
-                ctypes.c_int(int(is_ask)),
-                ctypes.c_int(order_type),
-                ctypes.c_int(time_in_force),
-                ctypes.c_int(int(reduce_only)),
-                ctypes.c_int(trigger_price),
-                ctypes.c_longlong(order_expiry),
-                ctypes.c_longlong(nonce),
+        # 支持 nonce 错误重试，最多重试 2 次
+        for attempt in range(2):
+            nonce = self._next_nonce()
+            payload, error = self._decode_str_or_err(
+                self.signer.SignCreateOrder(
+                    ctypes.c_int(market_index),
+                    ctypes.c_longlong(client_order_index),
+                    ctypes.c_longlong(base_amount),
+                    ctypes.c_int(price),
+                    ctypes.c_int(int(is_ask)),
+                    ctypes.c_int(order_type),
+                    ctypes.c_int(time_in_force),
+                    ctypes.c_int(int(reduce_only)),
+                    ctypes.c_int(trigger_price),
+                    ctypes.c_longlong(order_expiry),
+                    ctypes.c_longlong(nonce),
+                )
             )
-        )
-        if error:
-            return None, None, error
-        try:
-            parsed_payload = json.loads(payload) if payload else None
-        except json.JSONDecodeError:
-            parsed_payload = {"raw": payload}
+            if error:
+                return None, None, error
+            try:
+                parsed_payload = json.loads(payload) if payload else None
+            except json.JSONDecodeError:
+                parsed_payload = {"raw": payload}
 
-        try:
-            response = self._send_tx(self.TX_TYPE_CREATE_ORDER, payload or "")
-            return parsed_payload, response, None
-        except SimpleSignerError as exc:
-            return parsed_payload, None, str(exc)
+            try:
+                response = self._send_tx(self.TX_TYPE_CREATE_ORDER, payload or "")
+                return parsed_payload, response, None
+            except SimpleSignerError as exc:
+                error_msg = str(exc)
+                # 如果是 nonce 错误且还有重试机会，则重新获取 nonce 并重试
+                if "invalid nonce" in error_msg.lower() and attempt == 0:
+                    with self._nonce_lock:
+                        self._fetch_nonce()
+                    time.sleep(0.1)
+                    continue
+                return parsed_payload, None, error_msg
+
+        return parsed_payload, None, "Unable to submit order after nonce retries"
 
     def cancel_order(
         self,
@@ -360,26 +374,37 @@ class SimpleSignerClient:
         market_index: int,
         order_index: int,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        nonce = self._next_nonce()
-        payload, error = self._decode_str_or_err(
-            self.signer.SignCancelOrder(
-                ctypes.c_int(market_index),
-                ctypes.c_longlong(order_index),
-                ctypes.c_longlong(nonce),
+        # 支持 nonce 错误重试，最多重试 2 次
+        for attempt in range(2):
+            nonce = self._next_nonce()
+            payload, error = self._decode_str_or_err(
+                self.signer.SignCancelOrder(
+                    ctypes.c_int(market_index),
+                    ctypes.c_longlong(order_index),
+                    ctypes.c_longlong(nonce),
+                )
             )
-        )
-        if error:
-            return None, None, error
-        try:
-            parsed_payload = json.loads(payload) if payload else None
-        except json.JSONDecodeError:
-            parsed_payload = {"order_index": order_index, "raw": payload}
+            if error:
+                return None, None, error
+            try:
+                parsed_payload = json.loads(payload) if payload else None
+            except json.JSONDecodeError:
+                parsed_payload = {"order_index": order_index, "raw": payload}
 
-        try:
-            response = self._send_tx(self.TX_TYPE_CANCEL_ORDER, payload or "")
-            return parsed_payload, response, None
-        except SimpleSignerError as exc:
-            return parsed_payload, None, str(exc)
+            try:
+                response = self._send_tx(self.TX_TYPE_CANCEL_ORDER, payload or "")
+                return parsed_payload, response, None
+            except SimpleSignerError as exc:
+                error_msg = str(exc)
+                # 如果是 nonce 错误且还有重试机会，则重新获取 nonce 并重试
+                if "invalid nonce" in error_msg.lower() and attempt == 0:
+                    with self._nonce_lock:
+                        self._fetch_nonce()
+                    time.sleep(0.1)
+                    continue
+                return parsed_payload, None, error_msg
+
+        return parsed_payload, None, "Unable to cancel order after nonce retries"
 
     def create_order_batch(
         self,
@@ -464,8 +489,10 @@ class SimpleSignerClient:
             except SimpleSignerError as exc:
                 message = str(exc)
                 if "invalid nonce" in message.lower() and attempt == 0:
-                    self._fetch_nonce()
-                    time.sleep(0.25)
+                    # 使用锁保护重新获取 nonce
+                    with self._nonce_lock:
+                        self._fetch_nonce()
+                    time.sleep(0.1)
                     continue
                 return payloads, None, message
 
