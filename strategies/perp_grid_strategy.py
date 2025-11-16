@@ -213,7 +213,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         if not self._initialize_grid_prices():
             return False
 
-        # 獲取當前價格
+        # 一次性獲取當前價格（減少請求次數）
         current_price = self.get_current_price()
         if not current_price:
             logger.error("無法獲取當前價格")
@@ -831,22 +831,32 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 logger.error("網格初始化失敗")
                 return
         else:
-            # 檢查並補充缺失的網格訂單
-            self._refill_grid_orders()
+            # 一次性獲取所有必要數據，然後檢查並補充缺失的網格訂單
+            current_price = self.get_current_price()
+            try:
+                open_orders = self.client.get_open_orders(self.symbol) or []
+            except Exception as exc:
+                logger.warning("無法獲取現有訂單: %s", exc)
+                open_orders = []
+            
+            # 傳遞數據給 _refill_grid_orders，避免重複請求
+            self._refill_grid_orders(current_price=current_price, 
+                                    open_orders=open_orders)
 
-    def _reconcile_grid_orders(self) -> Dict[str, Dict[float, int]]:
-        """統計目前在交易所實際掛出的開倉單數量。"""
+    def _reconcile_grid_orders_from_list(self, open_orders: List) -> Dict[str, Dict[float, int]]:
+        """統計目前在交易所實際掛出的開倉單數量，從訂單列表中統計。
+        
+        Args:
+            open_orders: 現有訂單列表
+            
+        Returns:
+            {'Bid': {price: count}, 'Ask': {price: count}}
+        """
         long_counts: Dict[float, int] = defaultdict(int)
         short_counts: Dict[float, int] = defaultdict(int)
 
-        try:
-            open_orders = self.client.get_open_orders(self.symbol) or []
-        except Exception as exc:
-            logger.warning("無法同步永續網格訂單狀態: %s", exc)
-            return {'Bid': {}, 'Ask': {}}
-
         if isinstance(open_orders, dict) and open_orders.get('error'):
-            logger.warning("同步永續網格訂單時收到錯誤: %s", open_orders['error'])
+            logger.warning("訂單列表包含錯誤: %s", open_orders['error'])
             return {'Bid': {}, 'Ask': {}}
 
         for order in open_orders:
@@ -873,14 +883,28 @@ class PerpGridStrategy(PerpetualMarketMaker):
             'Ask': dict(short_counts),
         }
 
-    def _refill_grid_orders(self) -> None:
-        """補充缺失的網格訂單"""
+    def _refill_grid_orders(self, current_price: Optional[float] = None,
+                            open_orders: Optional[List] = None) -> None:
+        """補充缺失的網格訂單
+        
+        Args:
+            current_price: 當前價格（如果未提供則會請求一次）
+            open_orders: 現有訂單列表（如果未提供則會請求一次）
+        """
+        # 只在未提供數據時才請求
+        if current_price is None:
+            current_price = self.get_current_price()
+            if not current_price:
+                return
 
-        current_price = self.get_current_price()
-        if not current_price:
-            return
+        if open_orders is None:
+            try:
+                open_orders = self.client.get_open_orders(self.symbol) or []
+            except Exception as exc:
+                logger.warning("無法獲取現有訂單: %s", exc)
+                return
 
-        active_counts = self._reconcile_grid_orders()
+        active_counts = self._reconcile_grid_orders_from_list(open_orders)
         active_long_counts = active_counts.get('Bid', {})
         active_short_counts = active_counts.get('Ask', {})
 

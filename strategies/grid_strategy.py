@@ -194,7 +194,7 @@ class GridStrategy(MarketMaker):
         if not self._initialize_grid_prices():
             return False
 
-        # 獲取當前價格
+        # 一次性獲取所有必要數據（減少請求次數）
         current_price = self.get_current_price()
         if not current_price:
             logger.error("無法獲取當前價格")
@@ -205,7 +205,7 @@ class GridStrategy(MarketMaker):
         self.cancel_existing_orders()
         self._reset_grid_state()
 
-        # 獲取賬户餘額
+        # 獲取賬户餘額（只請求一次）
         balances = self.get_balance()
         if not balances:
             logger.error("無法獲取賬户餘額")
@@ -670,22 +670,34 @@ class GridStrategy(MarketMaker):
                 logger.error("網格初始化失敗")
                 return
         else:
-            # 檢查並補充缺失的網格訂單
-            self._refill_grid_orders()
+            # 一次性獲取所有必要數據，然後檢查並補充缺失的網格訂單
+            current_price = self.get_current_price()
+            balances = self.get_balance()
+            try:
+                open_orders = self.client.get_open_orders(self.symbol) or []
+            except Exception as exc:
+                logger.warning("無法獲取現有訂單: %s", exc)
+                open_orders = []
+            
+            # 傳遞數據給 _refill_grid_orders，避免重複請求
+            self._refill_grid_orders(current_price=current_price, 
+                                    balances=balances, 
+                                    open_orders=open_orders)
 
-    def _reconcile_grid_orders(self) -> Dict[str, Dict[float, int]]:
-        """統計實際掛單數量（按價格/方向），用於檢查是否缺單。"""
+    def _reconcile_grid_orders_from_list(self, open_orders: List) -> Dict[str, Dict[float, int]]:
+        """統計實際掛單數量（按價格/方向），從訂單列表中統計。
+        
+        Args:
+            open_orders: 現有訂單列表
+            
+        Returns:
+            {'Bid': {price: count}, 'Ask': {price: count}}
+        """
         buy_counts: Dict[float, int] = defaultdict(int)
         sell_counts: Dict[float, int] = defaultdict(int)
 
-        try:
-            open_orders = self.client.get_open_orders(self.symbol) or []
-        except Exception as exc:
-            logger.warning("無法同步網格訂單狀態: %s", exc)
-            return {'Bid': {}, 'Ask': {}}
-
         if isinstance(open_orders, dict) and open_orders.get('error'):
-            logger.warning("同步網格訂單時收到錯誤: %s", open_orders['error'])
+            logger.warning("訂單列表包含錯誤: %s", open_orders['error'])
             return {'Bid': {}, 'Ask': {}}
 
         for order in open_orders:
@@ -712,21 +724,38 @@ class GridStrategy(MarketMaker):
             'Ask': dict(sell_counts),
         }
 
-    def _refill_grid_orders(self) -> None:
-        """補充缺失的網格訂單"""
+    def _refill_grid_orders(self, current_price: Optional[float] = None, 
+                            balances: Optional[Dict] = None,
+                            open_orders: Optional[List] = None) -> None:
+        """補充缺失的網格訂單
+        
+        Args:
+            current_price: 當前價格（如果未提供則會請求一次）
+            balances: 賬戶餘額（如果未提供則會請求一次）
+            open_orders: 現有訂單列表（如果未提供則會請求一次）
+        """
+        # 只在未提供數據時才請求
+        if current_price is None:
+            current_price = self.get_current_price()
+            if not current_price:
+                return
 
-        current_price = self.get_current_price()
-        if not current_price:
-            return
+        if open_orders is None:
+            try:
+                open_orders = self.client.get_open_orders(self.symbol) or []
+            except Exception as exc:
+                logger.warning("無法獲取現有訂單: %s", exc)
+                return
 
-        active_counts = self._reconcile_grid_orders()
+        active_counts = self._reconcile_grid_orders_from_list(open_orders)
         active_buy_counts = active_counts.get('Bid', {})
         active_sell_counts = active_counts.get('Ask', {})
 
-        # 獲取餘額
-        balances = self.get_balance()
-        if not balances:
-            return
+        # 獲取餘額（只在未提供時請求）
+        if balances is None:
+            balances = self.get_balance()
+            if not balances:
+                return
 
         base_balance = balances.get('base_available', 0)
         quote_balance = balances.get('quote_available', 0)
