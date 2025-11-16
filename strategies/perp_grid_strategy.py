@@ -8,7 +8,7 @@ import math
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Set, Iterable
 
 from logger import setup_logger
 from strategies.perp_market_maker import PerpetualMarketMaker, format_balance
@@ -147,6 +147,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
         self.grid_short_filled_count = 0
         self.grid_profit = 0.0
 
+        # 訂單ID別名：clientOrderIndex 與交易所 order_id 對應
+        self.order_alias_map: Dict[str, str] = {}
+        self.order_aliases_by_primary: Dict[str, Set[str]] = {}
+
         logger.info("初始化永續合約網格交易策略: %s", symbol)
         logger.info("網格數量: %d | 模式: %s | 類型: %s", self.grid_num, self.grid_mode, self.grid_type)
 
@@ -156,6 +160,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
         self.open_short_orders.clear()
         self.close_orders.clear()
         self.grid_level_states.clear()
+        self.order_alias_map.clear()
+        self.order_aliases_by_primary.clear()
         
         # 清理舊的數據結構
         self.grid_orders_by_price.clear()
@@ -166,8 +172,151 @@ class PerpGridStrategy(PerpetualMarketMaker):
         self.close_order_mapping.clear()
 
     # ==================== 新的核心方法：訂單狀態管理 ====================
+
+    def _normalize_order_id(self, value: Any) -> Optional[str]:
+        """統一處理訂單ID格式 (str/int/float)。"""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            try:
+                return str(value).strip()
+            except Exception:  # pragma: no cover - 保底邏輯
+                return None
+
+    def _register_order_aliases(self, primary_id: str, alias_ids: Iterable[str]) -> None:
+        """記錄主ID及其所有別名，方便後續對應交換。"""
+        normalized_primary = self._normalize_order_id(primary_id)
+        if not normalized_primary:
+            return
+
+        alias_set = self.order_aliases_by_primary.setdefault(normalized_primary, set())
+        alias_set.add(normalized_primary)
+        self.order_alias_map[normalized_primary] = normalized_primary
+
+        for alias in alias_ids:
+            normalized_alias = self._normalize_order_id(alias)
+            if not normalized_alias:
+                continue
+            alias_set.add(normalized_alias)
+            self.order_alias_map[normalized_alias] = normalized_primary
+
+        self._propagate_aliases_to_order_info(normalized_primary, alias_set)
+
+    def _remove_order_aliases(self, primary_id: str) -> None:
+        normalized_primary = self._normalize_order_id(primary_id)
+        if not normalized_primary:
+            return
+
+        alias_set = self.order_aliases_by_primary.pop(normalized_primary, set())
+        if not alias_set:
+            alias_set = {normalized_primary}
+        for alias in alias_set:
+            normalized_alias = self._normalize_order_id(alias)
+            if normalized_alias:
+                self.order_alias_map.pop(normalized_alias, None)
+
+    def _resolve_order_id(self, order_id: Any) -> Optional[str]:
+        normalized = self._normalize_order_id(order_id)
+        if not normalized:
+            return None
+
+        if normalized in self.order_alias_map:
+            return self.order_alias_map[normalized]
+
+        for primary, info in self.grid_orders_by_id.items():
+            alias_ids = info.get('alias_ids') if isinstance(info, dict) else None
+            if alias_ids and normalized in alias_ids:
+                self._register_order_aliases(primary, alias_ids)
+                return primary
+
+        return normalized
+
+    def _propagate_aliases_to_order_info(self, primary_id: str, alias_set: Set[str]) -> None:
+        grid_entry = self.grid_orders_by_id.get(primary_id)
+        if isinstance(grid_entry, dict):
+            grid_aliases = grid_entry.setdefault('alias_ids', set())
+            grid_aliases.update(alias_set)
+
+        for orders in self.open_long_orders.values():
+            if primary_id in orders:
+                order_info = orders[primary_id]
+                alias_info = order_info.setdefault('alias_ids', set())
+                alias_info.update(alias_set)
+                break
+
+        for orders in self.open_short_orders.values():
+            if primary_id in orders:
+                order_info = orders[primary_id]
+                alias_info = order_info.setdefault('alias_ids', set())
+                alias_info.update(alias_set)
+                break
+
+    def _extract_order_identifiers(self, order_data: Any) -> Tuple[Optional[str], List[str]]:
+        if isinstance(order_data, dict):
+            alias_ids: List[str] = []
+            candidate_keys = [
+                'clientOrderIndex', 'client_order_index', 'orderIndex', 'order_index',
+                'id', 'orderId', 'order_id', 'clientOrderId', 'client_order_id',
+                'clientId', 'client_id'
+            ]
+            for key in candidate_keys:
+                normalized = self._normalize_order_id(order_data.get(key))
+                if normalized and normalized not in alias_ids:
+                    alias_ids.append(normalized)
+
+            primary = None
+            priority_keys = [
+                'clientOrderIndex', 'client_order_index', 'orderIndex', 'order_index',
+                'clientId', 'client_id'
+            ]
+            for key in priority_keys:
+                normalized = self._normalize_order_id(order_data.get(key))
+                if normalized:
+                    primary = normalized
+                    break
+
+            if primary is None and alias_ids:
+                primary = alias_ids[0]
+            if primary and primary not in alias_ids:
+                alias_ids.insert(0, primary)
+            return primary, alias_ids
+
+        normalized = self._normalize_order_id(order_data)
+        if not normalized:
+            return None, []
+        return normalized, [normalized]
+
+    def _update_aliases_from_open_orders(self, open_orders: Optional[List[Dict[str, Any]]]) -> Set[str]:
+        normalized_ids: Set[str] = set()
+        if not isinstance(open_orders, list):
+            return normalized_ids
+
+        for order in open_orders:
+            if not isinstance(order, dict):
+                continue
+            primary, aliases = self._extract_order_identifiers(order)
+            if primary and aliases:
+                self._register_order_aliases(primary, aliases)
+            for alias in aliases or []:
+                normalized = self._normalize_order_id(alias)
+                if normalized:
+                    normalized_ids.add(normalized)
+
+        return normalized_ids
     
-    def _record_open_order(self, order_id: str, price: float, side: str, quantity: float) -> None:
+    def _record_open_order(
+        self,
+        order_id: Any,
+        price: float,
+        side: str,
+        quantity: float,
+        aliases: Optional[List[str]] = None,
+    ) -> None:
         """記錄開倉單
         
         Args:
@@ -176,68 +325,83 @@ class PerpGridStrategy(PerpetualMarketMaker):
             side: 'Bid' 或 'Ask'
             quantity: 數量
         """
+        normalized_id = self._normalize_order_id(order_id)
+        if not normalized_id:
+            logger.warning("無法記錄開倉單，缺少有效ID: %s", order_id)
+            return
+
+        alias_list = aliases or []
+        self._register_order_aliases(normalized_id, alias_list)
+        alias_ids = set(self.order_aliases_by_primary.get(normalized_id, {normalized_id}))
+
         order_info = {
-            'order_id': order_id,
+            'order_id': normalized_id,
             'price': price,
             'side': side,
             'quantity': quantity,
             'created_time': datetime.now(),
-            'status': 'open'
+            'status': 'open',
+            'alias_ids': set(alias_ids),
         }
         
         if side == 'Bid':
-            self.open_long_orders[price][order_id] = order_info
-            logger.debug("記錄開多單: 價格=%.4f, ID=%s", price, order_id)
+            self.open_long_orders[price][normalized_id] = order_info
+            logger.debug("記錄開多單: 價格=%.4f, ID=%s", price, normalized_id)
         else:
-            self.open_short_orders[price][order_id] = order_info
-            logger.debug("記錄開空單: 價格=%.4f, ID=%s", price, order_id)
+            self.open_short_orders[price][normalized_id] = order_info
+            logger.debug("記錄開空單: 價格=%.4f, ID=%s", price, normalized_id)
         
         # 同時維護舊的數據結構
-        self.grid_orders_by_id[order_id] = {
-            'order_id': order_id,
+        self.grid_orders_by_id[normalized_id] = {
+            'order_id': normalized_id,
             'price': price,
             'side': side,
             'quantity': quantity,
-            'grid_type': 'long' if side == 'Bid' else 'short'
+            'grid_type': 'long' if side == 'Bid' else 'short',
+            'alias_ids': set(alias_ids),
         }
     
-    def _record_close_order(self, order_id: str, open_price: float, quantity: float, position_type: str) -> None:
-        """記錄平倉單
-        
-        Args:
-            order_id: 平倉單ID
-            open_price: 對應的開倉價格
-            quantity: 數量
-            position_type: 'long' 或 'short'
-        """
-        close_info = {
-            'order_id': order_id,
+    def _record_close_order(
+        self,
+        order_id: str,
+        open_price: float,
+        quantity: float,
+        position_type: str,
+        aliases: Optional[List[str]] = None,
+    ) -> None:
+        """記錄平倉單"""
+        normalized_id = self._normalize_order_id(order_id)
+        if not normalized_id:
+            logger.warning("無法記錄平倉單，缺少有效ID: %s", order_id)
+            return
+
+        alias_list = aliases or []
+        self._register_order_aliases(normalized_id, alias_list)
+        alias_ids = set(self.order_aliases_by_primary.get(normalized_id, {normalized_id}))
+
+        self.close_orders[normalized_id] = {
             'open_price': open_price,
             'quantity': quantity,
             'position_type': position_type,
+            'alias_ids': alias_ids,
             'created_time': datetime.now(),
             'status': 'open'
         }
-        
-        self.close_orders[order_id] = close_info
-        
-        # 更新網格點位狀態
+
         state = self.grid_level_states[open_price]
+        state['close_order_ids'].append(normalized_id)
         state['locked'] = True
-        if order_id not in state['close_order_ids']:
-            state['close_order_ids'].append(order_id)
-        
-        # 維護舊的數據結構
-        self.close_order_mapping[order_id] = {
+
+        self.close_order_mapping[normalized_id] = {
             'open_price': open_price,
             'quantity': quantity,
             'position': position_type
         }
-        self.grid_level_locks[open_price] = order_id
+        self.grid_level_locks[open_price] = normalized_id
         
-        logger.debug("記錄平倉單: 開倉價格=%.4f, ID=%s, 類型=%s", open_price, order_id, position_type)
+        logger.debug("記錄平倉單: 開倉價格=%.4f, ID=%s, 類型=%s", open_price, normalized_id, position_type)
     
-    def _remove_open_order(self, order_id: str, price: float, side: str) -> None:
+    def _remove_open_order(self, order_id: Any, price: float, side: str) -> None:
         """移除開倉單記錄
         
         Args:
@@ -245,22 +409,28 @@ class PerpGridStrategy(PerpetualMarketMaker):
             price: 網格價格
             side: 'Bid' 或 'Ask'
         """
+        normalized_id = self._resolve_order_id(order_id)
+        if not normalized_id:
+            return
+
         if side == 'Bid':
-            if price in self.open_long_orders and order_id in self.open_long_orders[price]:
-                del self.open_long_orders[price][order_id]
+            if price in self.open_long_orders and normalized_id in self.open_long_orders[price]:
+                del self.open_long_orders[price][normalized_id]
                 if not self.open_long_orders[price]:
                     del self.open_long_orders[price]
-                logger.debug("移除開多單記錄: 價格=%.4f, ID=%s", price, order_id)
+                logger.debug("移除開多單記錄: 價格=%.4f, ID=%s", price, normalized_id)
         else:
-            if price in self.open_short_orders and order_id in self.open_short_orders[price]:
-                del self.open_short_orders[price][order_id]
+            if price in self.open_short_orders and normalized_id in self.open_short_orders[price]:
+                del self.open_short_orders[price][normalized_id]
                 if not self.open_short_orders[price]:
                     del self.open_short_orders[price]
-                logger.debug("移除開空單記錄: 價格=%.4f, ID=%s", price, order_id)
+                logger.debug("移除開空單記錄: 價格=%.4f, ID=%s", price, normalized_id)
         
         # 同時維護舊的數據結構
-        if order_id in self.grid_orders_by_id:
-            del self.grid_orders_by_id[order_id]
+        if normalized_id in self.grid_orders_by_id:
+            del self.grid_orders_by_id[normalized_id]
+
+        self._remove_order_aliases(normalized_id)
     
     def _remove_close_order(self, order_id: str) -> Optional[Dict[str, Any]]:
         """移除平倉單記錄並返回相關信息
@@ -271,16 +441,17 @@ class PerpGridStrategy(PerpetualMarketMaker):
         Returns:
             平倉單信息，如果不存在則返回None
         """
-        if order_id not in self.close_orders:
+        normalized_id = self._resolve_order_id(order_id) or self._normalize_order_id(order_id)
+        if not normalized_id or normalized_id not in self.close_orders:
             return None
         
-        close_info = self.close_orders.pop(order_id)
+        close_info = self.close_orders.pop(normalized_id)
         open_price = close_info['open_price']
         
         # 更新網格點位狀態
         state = self.grid_level_states[open_price]
-        if order_id in state['close_order_ids']:
-            state['close_order_ids'].remove(order_id)
+        if normalized_id in state['close_order_ids']:
+            state['close_order_ids'].remove(normalized_id)
         
         # 如果沒有其他平倉單，解鎖該點位
         if not state['close_order_ids']:
@@ -289,16 +460,25 @@ class PerpGridStrategy(PerpetualMarketMaker):
             logger.debug("解鎖網格點位: %.4f", open_price)
         
         # 維護舊的數據結構
-        self.close_order_mapping.pop(order_id, None)
-        if open_price in self.grid_level_locks and self.grid_level_locks[open_price] == order_id:
+        self.close_order_mapping.pop(normalized_id, None)
+        if open_price in self.grid_level_locks and self.grid_level_locks[open_price] == normalized_id:
             del self.grid_level_locks[open_price]
+
+        self._remove_order_aliases(normalized_id)
         
-        logger.debug("移除平倉單記錄: 開倉價格=%.4f, ID=%s", open_price, order_id)
+        logger.debug("移除平倉單記錄: 開倉價格=%.4f, ID=%s", open_price, normalized_id)
         return close_info
     
     # ==================== 新的核心方法：基於訂單狀態的處理 ====================
     
-    def _handle_open_order_filled(self, order_id: str, price: float, side: str, quantity: float) -> None:
+    def _handle_open_order_filled(
+        self,
+        order_id: str,
+        price: float,
+        side: str,
+        quantity: float,
+        raw_order_id: Optional[str] = None,
+    ) -> None:
         """處理開倉單成交（基於訂單狀態）
         
         Args:
@@ -307,34 +487,49 @@ class PerpGridStrategy(PerpetualMarketMaker):
             side: 'Bid' 或 'Ask'
             quantity: 成交數量
         """
+        normalized_input_id = self._normalize_order_id(raw_order_id or order_id)
+        resolved_id = self._resolve_order_id(order_id)
+        tracking_id = resolved_id or normalized_input_id
+
+        if not tracking_id:
+            logger.warning("無法解析開倉單ID: %s", order_id)
+            return
+
         # 從開倉單記錄中查找訂單信息
         order_info = None
         grid_price = None
-        
+
         if side == 'Bid':
             for p, orders in self.open_long_orders.items():
-                if order_id in orders:
-                    order_info = orders[order_id]
+                if tracking_id in orders:
+                    order_info = orders[tracking_id]
                     grid_price = p
                     break
         else:
             for p, orders in self.open_short_orders.items():
-                if order_id in orders:
-                    order_info = orders[order_id]
+                if tracking_id in orders:
+                    order_info = orders[tracking_id]
                     grid_price = p
                     break
         
         if not order_info or grid_price is None:
-            logger.warning("開倉單 %s 不在追蹤列表中，可能已經處理過", order_id)
+            log_id = normalized_input_id or tracking_id
+            if normalized_input_id and normalized_input_id != tracking_id:
+                log_id = f"{normalized_input_id}->{tracking_id}"
+            logger.warning("開倉單 %s 不在追蹤列表中，可能已經處理過", log_id)
             return
         
+        display_id = tracking_id
+        if normalized_input_id and normalized_input_id != tracking_id:
+            display_id = f"{normalized_input_id}->{tracking_id}"
+
         logger.info(
             "開倉單成交[訂單狀態]: ID=%s, 方向=%s, 網格價格=%.4f, 成交價格=%.4f, 數量=%.4f",
-            order_id, side, grid_price, price, quantity
+            display_id, side, grid_price, price, quantity
         )
         
         # 移除開倉單記錄
-        self._remove_open_order(order_id, grid_price, side)
+        self._remove_open_order(tracking_id, grid_price, side)
         
         # 更新網格點位狀態的持倉
         state = self.grid_level_states[grid_price]
@@ -429,31 +624,46 @@ class PerpGridStrategy(PerpetualMarketMaker):
         if isinstance(open_orders, dict) and open_orders.get('error'):
             logger.error("同步訂單狀態返回錯誤: %s", open_orders['error'])
             return
-        
-        # 建立交易所訂單ID集合
-        exchange_order_ids = set()
-        for order in open_orders:
-            if isinstance(order, dict):
-                order_id = order.get('id') or order.get('orderId') or order.get('order_id')
-                if order_id:
-                    exchange_order_ids.add(str(order_id))
+
+        exchange_order_ids = self._update_aliases_from_open_orders(open_orders)
         
         # 檢查開倉單
         filled_open_orders = []
         for price, orders in list(self.open_long_orders.items()):
             for order_id, order_info in list(orders.items()):
-                if str(order_id) not in exchange_order_ids:
+                tracked_aliases = {self._normalize_order_id(order_id)}
+                alias_set = order_info.get('alias_ids', set()) if isinstance(order_info, dict) else set()
+                for alias in alias_set:
+                    normalized_alias = self._normalize_order_id(alias)
+                    if normalized_alias:
+                        tracked_aliases.add(normalized_alias)
+
+                if exchange_order_ids.isdisjoint(tracked_aliases):
                     filled_open_orders.append((order_id, price, 'Bid', order_info['quantity']))
         
         for price, orders in list(self.open_short_orders.items()):
             for order_id, order_info in list(orders.items()):
-                if str(order_id) not in exchange_order_ids:
+                tracked_aliases = {self._normalize_order_id(order_id)}
+                alias_set = order_info.get('alias_ids', set()) if isinstance(order_info, dict) else set()
+                for alias in alias_set:
+                    normalized_alias = self._normalize_order_id(alias)
+                    if normalized_alias:
+                        tracked_aliases.add(normalized_alias)
+
+                if exchange_order_ids.isdisjoint(tracked_aliases):
                     filled_open_orders.append((order_id, price, 'Ask', order_info['quantity']))
         
         # 檢查平倉單
         filled_close_orders = []
         for order_id, close_info in list(self.close_orders.items()):
-            if str(order_id) not in exchange_order_ids:
+            tracked_aliases = {self._normalize_order_id(order_id)}
+            alias_set = close_info.get('alias_ids', set()) if isinstance(close_info, dict) else set()
+            for alias in alias_set:
+                normalized_alias = self._normalize_order_id(alias)
+                if normalized_alias:
+                    tracked_aliases.add(normalized_alias)
+
+            if exchange_order_ids.isdisjoint(tracked_aliases):
                 filled_close_orders.append((order_id, close_info))
         
         # 處理發現的已成交訂單
@@ -635,8 +845,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                         result_single = self.client.execute_order(order)
 
                         if isinstance(result_single, dict) and "error" not in result_single:
-                            order_id = result_single.get('id')
-                            self._record_grid_order(order_id, price, side, self.order_quantity)
+                            self._record_grid_order(result_single, price, side, self.order_quantity)
                             placed_orders += 1
                             logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
                         else:
@@ -667,28 +876,14 @@ class PerpGridStrategy(PerpetualMarketMaker):
                         if not isinstance(order_result, dict):
                             continue
 
-                        # 獲取訂單ID（兼容不同字段名）
-                        order_id = (
-                            order_result.get('id') or
-                            order_result.get('order_id') or
-                            order_result.get('orderId')
-                        )
-
-                        if not order_id:
-                            logger.warning("訂單結果缺少ID，跳過: %s", order_result)
-                            continue
-
-                        # 獲取價格
                         price = float(order_result.get('price', 0))
-
-                        # 獲取方向（兼容不同格式）
                         side = order_result.get('side', '')
-                        if side.upper() in ['BUY', 'LONG']:
-                            side = 'Bid'
-                        elif side.upper() in ['SELL', 'SHORT', 'ASK']:
-                            side = 'Ask'
+                        if isinstance(side, str):
+                            if side.upper() in ['BUY', 'LONG']:
+                                side = 'Bid'
+                            elif side.upper() in ['SELL', 'SHORT', 'ASK']:
+                                side = 'Ask'
 
-                        # 獲取數量（兼容不同字段名）
                         quantity_raw = (
                             order_result.get('quantity') or
                             order_result.get('size') or
@@ -697,7 +892,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                         )
                         quantity = float(quantity_raw)
 
-                        self._record_grid_order(order_id, price, side, quantity)
+                        self._record_grid_order(order_result, price, side, quantity)
                         placed_orders += 1
 
                     logger.info("批量下單成功: %d 個訂單", placed_orders)
@@ -710,8 +905,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     result_single = self.client.execute_order(order)
 
                     if isinstance(result_single, dict) and "error" not in result_single:
-                        order_id = result_single.get('id')
-                        self._record_grid_order(order_id, price, side, self.order_quantity)
+                        self._record_grid_order(result_single, price, side, self.order_quantity)
                         placed_orders += 1
                         logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
                     else:
@@ -722,10 +916,14 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         return True
 
-    def _record_grid_order(self, order_id: str, price: float, side: str, quantity: float) -> None:
+    def _record_grid_order(self, order_data: Any, price: float, side: str, quantity: float) -> None:
         """記錄網格訂單信息（使用新的記錄系統）"""
-        # 使用新的記錄系統
-        self._record_open_order(order_id, price, side, quantity)
+        primary_id, alias_ids = self._extract_order_identifiers(order_data)
+        if not primary_id:
+            logger.warning("無法記錄網格訂單，缺少訂單ID: %s", order_data)
+            return
+
+        self._record_open_order(primary_id, price, side, quantity, aliases=alias_ids)
         self.orders_placed += 1
 
     def _place_grid_long_order(self, price: float, quantity: float) -> bool:
@@ -746,11 +944,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
             logger.error("掛開多單失敗 (價格 %.4f): %s", price, result.get('error'))
             return False
 
-        order_id = result.get('id')
-        logger.info("成功掛開多單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, order_id)
+        primary_id, alias_ids = self._extract_order_identifiers(result)
+        logger.info("成功掛開多單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, primary_id)
 
         # 使用新的記錄系統
-        self._record_open_order(order_id, price, 'Bid', quantity)
+        self._record_open_order(primary_id, price, 'Bid', quantity, aliases=alias_ids)
         
         self.orders_placed += 1
         return True
@@ -773,11 +971,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
             logger.error("掛開空單失敗 (價格 %.4f): %s", price, result.get('error'))
             return False
 
-        order_id = result.get('id')
-        logger.info("成功掛開空單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, order_id)
+        primary_id, alias_ids = self._extract_order_identifiers(result)
+        logger.info("成功掛開空單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, primary_id)
 
         # 使用新的記錄系統
-        self._record_open_order(order_id, price, 'Ask', quantity)
+        self._record_open_order(primary_id, price, 'Ask', quantity, aliases=alias_ids)
         
         self.orders_placed += 1
         return True
@@ -799,7 +997,16 @@ class PerpGridStrategy(PerpetualMarketMaker):
         """訂單成交後的處理（新的雙重確認機制）"""
         super()._after_fill_processed(fill_info)
 
-        order_id = fill_info.get('order_id')
+        primary_id, alias_ids = self._extract_order_identifiers(fill_info)
+        if primary_id and alias_ids:
+            self._register_order_aliases(primary_id, alias_ids)
+
+        order_id = (
+            fill_info.get('order_id')
+            or fill_info.get('id')
+            or fill_info.get('orderId')
+            or primary_id
+        )
         side = fill_info.get('side')
         quantity_raw = fill_info.get('quantity')
         price_raw = fill_info.get('price')
@@ -823,12 +1030,20 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 normalized_side = 'Ask'
         
         # 判斷是開倉單還是平倉單
-        if order_id in self.close_orders:
+        resolved_id = self._resolve_order_id(order_id)
+        tracking_id = resolved_id or self._normalize_order_id(order_id)
+        if tracking_id in self.close_orders:
             # 處理平倉單成交
-            self._handle_close_order_filled(order_id, price, normalized_side, quantity)
+            self._handle_close_order_filled(tracking_id, price, normalized_side, quantity)
         else:
             # 處理開倉單成交
-            self._handle_open_order_filled(order_id, price, normalized_side, quantity)
+            self._handle_open_order_filled(
+                tracking_id or order_id,
+                price,
+                normalized_side,
+                quantity,
+                raw_order_id=self._normalize_order_id(order_id),
+            )
 
 
 
@@ -856,11 +1071,15 @@ class PerpGridStrategy(PerpetualMarketMaker):
         if not order_id:
             return
 
-        if order_id in self.close_order_mapping:
-            self._handle_close_order_cancel(order_id)
+        normalized_id = self._resolve_order_id(order_id) or self._normalize_order_id(order_id)
+        if not normalized_id:
             return
 
-        order_info = self.grid_orders_by_id.get(order_id)
+        if normalized_id in self.close_order_mapping:
+            self._handle_close_order_cancel(normalized_id)
+            return
+
+        order_info = self.grid_orders_by_id.get(normalized_id)
         if not order_info:
             return
 
@@ -868,8 +1087,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
         quantity = order_info['quantity']
         grid_type = order_info.get('grid_type', 'long')
 
-        logger.warning("網格開倉單被取消: ID=%s, 類型=%s, 價格=%.4f", order_id, grid_type, price)
-        self._remove_grid_order(order_id, price, grid_type)
+        logger.warning("網格開倉單被取消: ID=%s, 類型=%s, 價格=%.4f", normalized_id, grid_type, price)
+        self._remove_grid_order(normalized_id, price, grid_type)
 
         if grid_type == 'long':
             self._place_grid_long_order(price, quantity)
@@ -906,6 +1125,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
             ]
             if not self.grid_short_orders_by_price[grid_price]:
                 del self.grid_short_orders_by_price[grid_price]
+
+        self._remove_order_aliases(order_id)
 
     def _place_close_long_order(self, open_price: float, quantity: float) -> None:
         """掛平多單
@@ -978,9 +1199,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 return
 
         # 使用新的記錄系統記錄平倉單
-        order_id = result.get('id')
+        primary_id, alias_ids = self._extract_order_identifiers(result)
+        order_id = primary_id or result.get('id')
         if order_id:
-            self._record_close_order(order_id, open_price, quantity, 'long')
+            self._record_close_order(order_id, open_price, quantity, 'long', aliases=alias_ids)
             
             # 計算潛在網格利潤
             grid_profit = (next_price - open_price) * quantity
@@ -1057,9 +1279,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 return
 
         # 使用新的記錄系統記錄平倉單
-        order_id = result.get('id')
+        primary_id, alias_ids = self._extract_order_identifiers(result)
+        order_id = primary_id or result.get('id')
         if order_id:
-            self._record_close_order(order_id, open_price, quantity, 'short')
+            self._record_close_order(order_id, open_price, quantity, 'short', aliases=alias_ids)
             
             # 計算潛在網格利潤
             grid_profit = (open_price - next_price) * quantity
