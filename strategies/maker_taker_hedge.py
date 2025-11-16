@@ -31,6 +31,16 @@ class _MakerTakerHedgeMixin:
         self._hedge_poll_interval = 0.5
         self._hedge_flat_tolerance = 1e-8
 
+        self._request_intervals: Dict[str, float] = {
+            "limit": 0.35,
+            "market": 0.45,
+            "position": 1.0,
+        }
+        self._last_request_ts: Dict[str, float] = {key: 0.0 for key in self._request_intervals}
+        self._rate_limit_retries = 4
+        self._rate_limit_backoff = 0.6
+        self._rate_limit_max_backoff = 5.0
+
         super().__init__(*args, **kwargs)
 
         self.max_orders = 1
@@ -77,7 +87,7 @@ class _MakerTakerHedgeMixin:
                 price=buy_price,
                 quantity=buy_qty,
             )
-            result = self.client.execute_order(buy_order)
+            result = self._submit_order(buy_order, slot="limit")
             if isinstance(result, dict) and "error" in result:
                 logger.error(f"買單掛單失敗: {result['error']}")
             else:
@@ -95,7 +105,7 @@ class _MakerTakerHedgeMixin:
                 price=sell_price,
                 quantity=sell_qty,
             )
-            result = self.client.execute_order(sell_order)
+            result = self._submit_order(sell_order, slot="limit")
             if isinstance(result, dict) and "error" in result:
                 logger.error(f"賣單掛單失敗: {result['error']}")
             else:
@@ -159,10 +169,29 @@ class _MakerTakerHedgeMixin:
 
         super()._after_fill_processed(fill_info)
 
+        def _to_bool(value: Any) -> Optional[bool]:
+            if isinstance(value, bool):
+                return value
+            if value in (None, "", "None"):
+                return None
+            try:
+                return str(value).lower() in {"true", "1", "yes"}
+            except Exception:
+                return None
+
         # 獲取成交詳情
         side = fill_info.get("side")
         quantity = float(fill_info.get("quantity", 0) or 0)
         price = float(fill_info.get("price", 0) or 0)
+        maker_flag = None
+        for key in ("is_maker", "maker", "isMaker", "m"):
+            if key in fill_info:
+                maker_flag = fill_info.get(key)
+                break
+        is_maker = _to_bool(maker_flag)
+        if is_maker is False:
+            logger.debug("忽略 Taker 成交事件，無需對沖")
+            return
         
         if not side or quantity <= 0:
             logger.warning("成交資訊不完整，跳過對沖")
@@ -170,41 +199,19 @@ class _MakerTakerHedgeMixin:
             
         logger.info(f"處理Maker成交：{side} {quantity}@{price}")
             
-        # 先更新當前倉位引用
         current_position = self._fetch_current_position_reference()
-        if current_position is not None:
-            self._hedge_position_reference = 0.0  # 將目標倉位設為0
-            logger.info(f"當前倉位：{current_position}")
-            
-            # 根據實際倉位計算對沖量
-            if abs(current_position) > self._hedge_flat_tolerance:
-                hedge_side = "Ask" if current_position > 0 else "Bid"
-                hedge_qty = round_to_precision(abs(current_position), self.base_precision)
-                
-                if hedge_qty >= self.min_order_size:
-                    logger.info(f"根據實際倉位執行對沖：{hedge_side} {hedge_qty}")
-                    
-                    # 提交對沖訂單
-                    order = {
-                        "orderType": "Market",
-                        "quantity": str(hedge_qty),
-                        "side": hedge_side,
-                        "symbol": self.symbol,
-                        "reduceOnly": True  # 確保是對沖訂單
-                    }
-                    
-                    # 執行對沖訂單
-                    result = self.client.execute_order(order)
-                    if isinstance(result, dict) and "error" in result:
-                        logger.error(f"對沖訂單執行失敗: {result['error']}")
-                    else:
-                        logger.info(f"對沖訂單已提交: {result.get('id', 'unknown')}")
-                else:
-                    logger.info(f"當前倉位 {current_position} 小於最小下單量，暫不對沖")
-            else:
-                logger.info("當前倉位接近0，無需對沖")
-        else:
+        if current_position is None:
             logger.error("無法獲取當前倉位，對沖失敗")
+            return
+
+        logger.info(f"當前倉位：{current_position}")
+
+        net_delta = current_position - self._hedge_position_reference
+        if abs(net_delta) <= self._hedge_flat_tolerance:
+            logger.info("倉位已在參考水位附近，跳過對沖")
+            self._hedge_residuals["Bid"] = 0.0
+            self._hedge_residuals["Ask"] = 0.0
+            return
 
         hedge_side = "Ask" if side == "Bid" else "Bid"
 
@@ -230,7 +237,7 @@ class _MakerTakerHedgeMixin:
             format_balance(hedge_qty),
             hedge_side,
         )
-        residual_delta = self._execute_taker_hedge(hedge_side, hedge_qty)
+        residual_delta = self._execute_taker_hedge(hedge_side, hedge_qty, current_position=current_position)
 
         if residual_delta is None:
             # 對沖提交失敗，保留完整目標量
@@ -253,17 +260,23 @@ class _MakerTakerHedgeMixin:
             residual_side,
         )
 
-    def _execute_taker_hedge(self, side: str, quantity: float) -> Optional[float]:
+    def _execute_taker_hedge(
+        self,
+        side: str,
+        quantity: float,
+        *,
+        current_position: Optional[float] = None,
+    ) -> Optional[float]:
         """提交市價單完成對沖，並回傳剩餘倉位差值。"""
 
         attempt_side = side
         remaining_quantity = round_to_precision(quantity, self.base_precision)
         last_delta: Optional[float] = None
 
-        current_delta = self._calculate_position_delta()
+        current_delta = self._calculate_position_delta(current_position=current_position)
         if current_delta is not None:
             if abs(current_delta) <= self._hedge_flat_tolerance:
-                latest_position = self._fetch_current_position_reference()
+                latest_position = current_position if current_position is not None else self._fetch_current_position_reference()
                 if latest_position is not None:
                     self._hedge_position_reference = latest_position
                 logger.info("目前倉位已接近參考水位，無需對沖")
@@ -303,7 +316,7 @@ class _MakerTakerHedgeMixin:
                 format_balance(remaining_quantity),
                 attempt,
             )
-            result = self.client.execute_order(order)
+            result = self._submit_order(order, slot="market")
             if isinstance(result, dict) and "error" in result:
                 logger.error(f"市價對沖失敗: {result['error']}")
                 return None
@@ -316,9 +329,9 @@ class _MakerTakerHedgeMixin:
                 return None
 
             if abs(last_delta) <= self._hedge_flat_tolerance:
-                current_position = self._fetch_current_position_reference()
-                if current_position is not None:
-                    self._hedge_position_reference = current_position
+                refreshed_position = self._fetch_current_position_reference()
+                if refreshed_position is not None:
+                    self._hedge_position_reference = refreshed_position
                 return 0.0
 
             attempt_side = "Ask" if last_delta > 0 else "Bid"
@@ -337,7 +350,10 @@ class _MakerTakerHedgeMixin:
         delta: Optional[float] = None
         for _ in range(self._hedge_poll_attempts):
             time.sleep(self._hedge_poll_interval)
-            delta = self._calculate_position_delta()
+            current_position = self._fetch_current_position_reference()
+            if current_position is None:
+                continue
+            delta = current_position - self._hedge_position_reference
             if delta is None:
                 continue
             if abs(delta) <= self._hedge_flat_tolerance:
@@ -353,10 +369,14 @@ class _MakerTakerHedgeMixin:
         self._hedge_position_reference = reference
         logger.info("對沖參考倉位初始化為 %.8f", reference)
 
-    def _calculate_position_delta(self) -> Optional[float]:
+    def _calculate_position_delta(
+        self,
+        *,
+        current_position: Optional[float] = None,
+    ) -> Optional[float]:
         """計算當前倉位相對參考水位的差值。"""
 
-        current = self._fetch_current_position_reference()
+        current = current_position if current_position is not None else self._fetch_current_position_reference()
         if current is None:
             return None
         return current - self._hedge_position_reference
@@ -368,7 +388,7 @@ class _MakerTakerHedgeMixin:
             if isinstance(self, PerpetualMarketMaker):
                 # 強制重新獲取倉位信息
                 for attempt in range(3):  # 最多重試3次
-                    positions = self.client.get_positions(self.symbol)
+                    positions = self._request_positions()
                     
                     if isinstance(positions, dict) and "error" in positions:
                         error_msg = positions.get("error", "")
@@ -414,6 +434,92 @@ class _MakerTakerHedgeMixin:
             import traceback
             logger.error(f"詳細錯誤: {traceback.format_exc()}")
             return None
+
+    # ------------------------------------------------------------------
+    # 節流與重試工具
+    # ------------------------------------------------------------------
+    def _respect_request_interval(self, slot: str) -> None:
+        interval = self._request_intervals.get(slot)
+        if not interval:
+            return
+        last_ts = self._last_request_ts.get(slot, 0.0)
+        now = time.monotonic()
+        wait_for = interval - (now - last_ts)
+        if wait_for > 0:
+            time.sleep(wait_for)
+        self._last_request_ts[slot] = time.monotonic()
+
+    def _detect_rate_limit(self, payload: Any) -> Optional[str]:
+        if payload is None:
+            return None
+        message = None
+        if isinstance(payload, dict):
+            for key in ("error", "message", "detail"):
+                value = payload.get(key)
+                if value:
+                    message = str(value)
+                    break
+        else:
+            message = str(payload)
+
+        if not message:
+            return None
+
+        lowered = message.lower()
+        keywords = ("too many", "rate limit", "429", "request limit")
+        if any(keyword in lowered for keyword in keywords):
+            return message
+        return None
+
+    def _request_with_backoff(self, slot: str, func: Any, *args: Any, **kwargs: Any) -> Any:
+        backoff = self._rate_limit_backoff
+        result: Any = None
+        for attempt in range(1, self._rate_limit_retries + 1):
+            self._respect_request_interval(slot)
+            try:
+                result = func(*args, **kwargs)
+            except Exception as exc:  # pragma: no cover - log for visibility
+                message = self._detect_rate_limit(exc)
+                if not message or attempt == self._rate_limit_retries:
+                    raise
+                logger.warning(
+                    "API %s 請求觸發限制 (%s)，將在 %.2fs 後重試 (%d/%d)",
+                    slot,
+                    message,
+                    backoff,
+                    attempt,
+                    self._rate_limit_retries,
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 1.6, self._rate_limit_max_backoff)
+                continue
+
+            message = self._detect_rate_limit(result)
+            if not message:
+                return result
+
+            if attempt == self._rate_limit_retries:
+                logger.error("API %s 持續遭遇請求限制: %s", slot, message)
+                return result
+
+            logger.warning(
+                "API %s 請求觸發限制 (%s)，將在 %.2fs 後重試 (%d/%d)",
+                slot,
+                message,
+                backoff,
+                attempt,
+                self._rate_limit_retries,
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 1.6, self._rate_limit_max_backoff)
+
+        return result
+
+    def _submit_order(self, order: Dict[str, Any], slot: str) -> Any:
+        return self._request_with_backoff(slot, self.client.execute_order, order)
+
+    def _request_positions(self) -> Any:
+        return self._request_with_backoff("position", self.client.get_positions, self.symbol)
 
     def _build_limit_order(self, side: str, price: float, quantity: float) -> Dict[str, str]:
         """依交易所特性構建單向限價訂單負載。"""
