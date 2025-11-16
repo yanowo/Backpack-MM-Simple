@@ -91,6 +91,7 @@ class VolumeHoldStrategyConfig:
     slice_delay_seconds: float = 6.0
     slice_delay_jitter_seconds: float = 3.0
     slice_fill_timeout: float = 8.0
+    # waiting fill 的时候查询仓位的间隔
     order_poll_interval: float = 1.0
     post_only: bool = True
     pause_between_symbols: float = 30.0
@@ -194,7 +195,6 @@ class VolumeHoldStrategyConfig:
             pause_between_symbols=float(payload.get("pause_between_symbols", 30)),
             random_split_range=(low, high),
             run_once=bool(payload.get("run_once", False)),
-            enable_hedge=bool(payload.get("enable_hedge", True)),
             primary_time_in_force=str(payload.get("primary_time_in_force", "GTC")),
         )
         if not config.base_url and any(acc.base_url is None for acc in accounts):
@@ -217,7 +217,6 @@ class VolumeHoldStrategyRefactor:
         self._maker_price_stats: Dict[str, Dict[str, float]] = {}
         self._hedge_price_stats: Dict[str, Dict[int, Dict[str, float]]] = {}
         self._wear_cumulative = {"wear_notional": 0.0, "maker_qty": 0.0}
-        self._hedge_enabled = bool(config.enable_hedge)
         self._primary_time_in_force = str(config.primary_time_in_force or "GTC").upper()
         self._position_cache: Dict[int, Dict[str, float]] = {idx: {} for idx in range(len(self._clients))}
         self._small_fill_selector: Dict[Tuple[int, ...], int] = {}
@@ -229,63 +228,58 @@ class VolumeHoldStrategyRefactor:
     def run(self) -> None:
         logger.info("VolumeHold(refactor) booted with %d symbols", len(self.config.symbols))
         cycles_completed = 0
-        try:
-            while not self._stop_event.is_set():
-                plan = self.config.symbols[self._current_symbol_index]
-                primary_idx = self._current_primary_index
-                hedger_indices = self._resolve_hedgers(primary_idx)
-                primary_client = self._clients[primary_idx]
-                limits = self._get_market_limits(primary_client, plan.symbol)
+        while not self._stop_event.is_set():
+            plan = self.config.symbols[self._current_symbol_index]
+            primary_idx = self._current_primary_index
+
+            hedger_indices = [i for i in range(len(self._clients)) if i != primary_idx][:2]
+            primary_client = self._clients[primary_idx]
+            limits = self._get_market_limits(primary_client, plan.symbol)
+            logger.info(
+                "Starting cycle: symbol=%s primary=%s hedgers=%s target=%s slice=%s",
+                plan.symbol,
+                self._account_labels[primary_idx],
+                [self._account_labels[i] for i in hedger_indices],
+                plan.target_notional,
+                plan.slice_notional,
+            )
+
+            maker_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
+            target_base, _, price_hint = self._resolve_base_targets(primary_client, plan, limits)
+            epsilon = 1e-9
+            entry_summary = 0.0
+            performed_accumulation = False
+            maker_value_quote = maker_position * price_hint
+            if plan.target_notional > 0 and maker_value_quote + epsilon >= plan.target_notional:
                 logger.info(
-                    "Starting cycle: symbol=%s primary=%s hedgers=%s target=%s slice=%s",
+                    "Existing %s position %.8f (≈ %.2f quote) >= target %.2f; skip accumulation and proceed to flatten.",
                     plan.symbol,
-                    self._account_labels[primary_idx],
-                    [self._account_labels[i] for i in hedger_indices],
+                    maker_position,
+                    maker_value_quote,
                     plan.target_notional,
-                    plan.slice_notional,
                 )
+                entry_summary = maker_position
+            else:
+                entry_summary = self._accumulate_position(primary_idx, hedger_indices, plan)
+                performed_accumulation = entry_summary > 0
 
-                try:
-                    maker_position = abs(self._refresh_position(primary_idx, plan.symbol))
-                    target_base, _, price_hint = self._resolve_base_targets(primary_client, plan, limits)
-                    epsilon = 1e-9
-                    entry_summary = 0.0
-                    performed_accumulation = False
-                    maker_value_quote = maker_position * price_hint
-                    if plan.target_notional > 0 and maker_value_quote + epsilon >= plan.target_notional:
-                        logger.info(
-                            "Existing %s position %.8f (≈ %.2f quote) >= target %.2f; skip accumulation and proceed to flatten.",
-                            plan.symbol,
-                            maker_position,
-                            maker_value_quote,
-                            plan.target_notional,
-                        )
-                        entry_summary = maker_position
-                    else:
-                        entry_summary = self._accumulate_position(primary_idx, hedger_indices, plan)
-                        performed_accumulation = entry_summary > 0
+            if entry_summary <= 0:
+                logger.warning("No fills recorded or available for %s, skipping exit leg", plan.symbol)
+            else:
+                if performed_accumulation:
+                    self._hold_position(plan)
+                fresh_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
+                self._flatten_position(primary_idx, hedger_indices, plan, fresh_position)
+                self._print_cycle_summary(plan.symbol)
 
-                    if entry_summary <= 0:
-                        logger.warning("No fills recorded or available for %s, skipping exit leg", plan.symbol)
-                    else:
-                        if performed_accumulation:
-                            self._hold_position(plan)
-                        self._flatten_position(primary_idx, hedger_indices, plan, entry_summary)
-                        self._print_cycle_summary(plan.symbol)
-                except Exception:
-                    logger.exception("Cycle for %s failed", plan.symbol)
+            cycles_completed += 1
+            if self.config.run_once and cycles_completed >= len(self.config.symbols):
+                logger.info("run_once enabled, stopping after one pass.")
+                break
 
-                cycles_completed += 1
-                if self.config.run_once and cycles_completed >= len(self.config.symbols):
-                    logger.info("run_once enabled, stopping after one pass.")
-                    break
-
-                self._advance_pointers()
-            self._sleep_with_stop(self.config.pause_between_symbols)  # short pause between symbols; still interruptible
-        except KeyboardInterrupt:
-            logger.info("Interrupted by user, shutting down VolumeHold strategy...")
-        finally:
-            self.stop()
+            self._current_symbol_index = (self._current_symbol_index + 1) % len(self.config.symbols)
+            self._current_primary_index = (self._current_primary_index + 1) % len(self._clients)
+            self._stop_event.wait(self.config.pause_between_symbols)  # short pause between symbols; still interruptible
 
     # ------------------------------------------------------------------ core flow
     def _accumulate_position(self, primary_idx: int, hedgers: Sequence[int], plan: SymbolPlan) -> float:
@@ -294,8 +288,9 @@ class VolumeHoldStrategyRefactor:
         target_base_total, configured_slice_qty, conversion_price = self._resolve_base_targets(client, plan, limits)
         total_base_filled = 0.0
         self._prime_positions(plan.symbol, [primary_idx, *hedgers])
-        current_position = max(self._get_cached_position(primary_idx, plan.symbol), 0.0)
-        target_remaining = max(target_base_total - current_position, 0.0)
+        # primary 当前仓位
+        current_position = self._get_cached_position(primary_idx, plan.symbol)
+        target_remaining = target_base_total - current_position
         if target_remaining <= 0:
             logger.info(
                 "Current %s position %.8f already meets/exceeds target %.8f, skipping accumulation.",
@@ -320,12 +315,20 @@ class VolumeHoldStrategyRefactor:
         )
 
         while not self._stop_event.is_set() and target_remaining > 0:
-            self._rebalance_entry_exposure(plan.symbol, primary_idx, hedgers, limits)
             reference_price = self._compute_reference_price(client, plan.symbol, "Bid", plan.entry_offset_bps)
             if reference_price is None or reference_price <= 0:
                 logger.warning("Unable to compute entry price for %s, retrying...", plan.symbol)
-                self._sleep_with_stop(3)
+                self._stop_event.wait(3)
                 continue
+            self._rebalance_exposure(
+                symbol=plan.symbol,
+                primary_idx=primary_idx,
+                hedger_indices=hedgers,
+                limits=limits,
+                reference_price=reference_price,
+                allow_additional_shorts=True,
+                allow_reduce_shorts=False,
+            )
 
             slice_quantity = min(configured_slice_qty, target_remaining)
             continue_entry = self._ensure_slice_meets_minimums(
@@ -335,12 +338,14 @@ class VolumeHoldStrategyRefactor:
                 limits=limits,
                 slice_quantity=slice_quantity,
             )
+            # 剩下 remaining 太小时，continue_entry 返回 None，target_remaining 置 0，结束 accumulate
             if continue_entry is None:
                 target_remaining = 0.0
                 break
             slice_quantity = continue_entry
 
             baseline_position = self._get_cached_position(primary_idx, plan.symbol)
+            # 默认主账号下买单。
             order_index, response, rounded_price, rounded_qty = self._submit_limit_order(
                 client=client,
                 client_idx=primary_idx,
@@ -354,7 +359,11 @@ class VolumeHoldStrategyRefactor:
                 account_label=self._account_labels[primary_idx],
             )
             if order_index is None:
-                self._sleep_with_stop(self._slice_delay())
+                delay = self.config.slice_delay_seconds + self._random.uniform(
+                    0, max(self.config.slice_delay_jitter_seconds, 0)
+                )
+                logger.info("No valid order generated for this slice; waiting %.2f seconds before retry.", delay)
+                self._stop_event.wait(max(delay, 0.0))
                 continue
             fills = self._wait_for_position_fill(
                 client=client,
@@ -370,7 +379,10 @@ class VolumeHoldStrategyRefactor:
             filled_base = sum(fill["quantity"] for fill in fills)
             if filled_base <= 0:
                 logger.info("Slice produced no fills, retrying another order...")
-                self._sleep_with_stop(self._slice_delay())
+                delay = self.config.slice_delay_seconds + self._random.uniform(
+                    0, max(self.config.slice_delay_jitter_seconds, 0)
+                )
+                self._stop_event.wait(max(delay, 0.0))
                 continue
             self._record_maker_fill(plan.symbol, fills)
 
@@ -386,8 +398,19 @@ class VolumeHoldStrategyRefactor:
             )
 
             self._dispatch_hedges(primary_idx, plan.symbol, "Ask", filled_base, hedgers, limits, reduce_only=False)
-            self._rebalance_entry_exposure(plan.symbol, primary_idx, hedgers, limits)
-            self._sleep_with_stop(self._slice_delay())  # jittered delay between slices so we don't spam the venue
+            self._rebalance_exposure(
+                symbol=plan.symbol,
+                primary_idx=primary_idx,
+                hedger_indices=hedgers,
+                limits=limits,
+                reference_price=reference_price,
+                allow_additional_shorts=True,
+                allow_reduce_shorts=False,
+            )
+            delay = self.config.slice_delay_seconds + self._random.uniform(
+                0, max(self.config.slice_delay_jitter_seconds, 0)
+            )
+            self._stop_event.wait(max(delay, 0.0))  # jittered delay between slices so we don't spam the venue
 
         return total_base_filled
 
@@ -406,16 +429,22 @@ class VolumeHoldStrategyRefactor:
             logger.warning("No base quantity to unwind for %s", plan.symbol)
             return
         self._prime_positions(plan.symbol, [primary_idx, *hedgers])
-        self._trim_excess_hedge_shorts(plan.symbol, primary_idx, hedgers, limits)
         reference_price = self._compute_reference_price(client, plan.symbol, "Ask", plan.exit_offset_bps)
-        if reference_price:
-            self._rebalance_flatten_gap(plan.symbol, primary_idx, hedgers, limits, reference_price)
+        self._rebalance_exposure(
+            symbol=plan.symbol,
+            primary_idx=primary_idx,
+            hedger_indices=hedgers,
+            limits=limits,
+            reference_price=reference_price,
+            allow_additional_shorts=False,
+            allow_reduce_shorts=True,
+        )
 
         while not self._stop_event.is_set() and remaining_base > limits.min_order_size / 2:
             reference_price = self._compute_reference_price(client, plan.symbol, "Ask", plan.exit_offset_bps)
             if reference_price is None or reference_price <= 0:
                 logger.warning("Unable to compute exit price for %s, retrying...", plan.symbol)
-                self._sleep_with_stop(3)
+                self._stop_event.wait(3)
                 continue
             if plan.slice_notional and plan.slice_notional > 0:
                 slice_base = plan.slice_notional / max(reference_price, 1e-12)
@@ -460,7 +489,10 @@ class VolumeHoldStrategyRefactor:
                 account_label=self._account_labels[primary_idx],
             )
             if order_index is None:
-                self._sleep_with_stop(self._slice_delay())
+                delay = self.config.slice_delay_seconds + self._random.uniform(
+                    0, max(self.config.slice_delay_jitter_seconds, 0)
+                )
+                self._stop_event.wait(max(delay, 0.0))
                 continue
             fills = self._wait_for_position_fill(
                 client=client,
@@ -476,7 +508,10 @@ class VolumeHoldStrategyRefactor:
             filled_base = sum(fill["quantity"] for fill in fills)
             if filled_base <= 0:
                 logger.info("Exit slice produced no fills, retrying...")
-                self._sleep_with_stop(self._slice_delay())
+                delay = self.config.slice_delay_seconds + self._random.uniform(
+                    0, max(self.config.slice_delay_jitter_seconds, 0)
+                )
+                self._stop_event.wait(max(delay, 0.0))
                 continue
             self._record_maker_fill(plan.symbol, fills)
 
@@ -489,9 +524,19 @@ class VolumeHoldStrategyRefactor:
                 remaining_base,
             )
             self._dispatch_hedges(primary_idx, plan.symbol, "Bid", filled_base, hedgers, limits, reduce_only=True)
-            self._trim_excess_hedge_shorts(plan.symbol, primary_idx, hedgers, limits)
-            self._rebalance_flatten_gap(plan.symbol, primary_idx, hedgers, limits, reference_price)
-            self._sleep_with_stop(self._slice_delay())  # allow partial book updates / hedges to catch up
+            self._rebalance_exposure(
+                symbol=plan.symbol,
+                primary_idx=primary_idx,
+                hedger_indices=hedgers,
+                limits=limits,
+                reference_price=reference_price,
+                allow_additional_shorts=False,
+                allow_reduce_shorts=True,
+            )
+            delay = self.config.slice_delay_seconds + self._random.uniform(
+                0, max(self.config.slice_delay_jitter_seconds, 0)
+            )
+            self._stop_event.wait(max(delay, 0.0))  # allow partial book updates / hedges to catch up
 
         self._log_position_snapshot(plan.symbol, primary_idx, hedgers)
         logger.info("Exit leg for %s finished; remaining base %.8f", plan.symbol, remaining_base)
@@ -503,7 +548,7 @@ class VolumeHoldStrategyRefactor:
         elapsed = 0.0
         while not self._stop_event.is_set() and elapsed < hold_seconds:
             sleep_window = min(30, hold_seconds - elapsed)
-            self._sleep_with_stop(sleep_window)
+            self._stop_event.wait(sleep_window)
             elapsed += sleep_window
 
     # ------------------------------------------------------------------ helpers
@@ -579,7 +624,7 @@ class VolumeHoldStrategyRefactor:
         filled = 0.0
         last_position = baseline_position
         while not self._stop_event.is_set() and time.time() < deadline and filled + epsilon < expected_quantity:
-            self._sleep_with_stop(self.config.order_poll_interval)
+            self._stop_event.wait(self.config.order_poll_interval)
             current_position = self._refresh_position(client_idx, symbol)
             delta = current_position - last_position
             last_position = current_position
@@ -595,6 +640,8 @@ class VolumeHoldStrategyRefactor:
         quantity_delta = round_to_precision(max(quantity_delta, 0.0), limits.base_precision)
         if quantity_delta <= epsilon:
             return []
+        
+        # 这里返回 limit_price 实际上是有误差的，有可能会用 aggressive price
         return [{"quantity": quantity_delta, "price": limit_price}]
 
     def _dispatch_hedges(
@@ -608,31 +655,36 @@ class VolumeHoldStrategyRefactor:
         *,
         reduce_only: bool,
     ) -> None:
-        if qty <= 0 or not hedger_indices:
-            return
-        short_caps: Dict[int, float] = {}
+        exposure_caps: Dict[int, float] = {}
         if reduce_only:
             for idx in hedger_indices:
-                short_caps[idx] = max(-self._get_cached_position(idx, symbol), 0.0)
+                exposure_caps[idx] = max(-self._get_cached_position(idx, symbol), 0.0)
             logger.debug(
                 "Reduce-only hedge planning for %s: qty=%.8f exposures=%s",
                 symbol,
                 qty,
-                {self._account_labels[idx]: cap for idx, cap in short_caps.items()},
+                {self._account_labels[idx]: cap for idx, cap in exposure_caps.items()},
             )
-        allocations = (
-            self._split_base_quantity(qty, hedger_indices, limits)
-            if not reduce_only
-            else self._allocate_reduce_only(short_caps, hedger_indices, qty, limits)
-        )
-        min_trade_qty = self._estimate_minimum_trade_qty(symbol, side, hedger_indices, limits)
+
+        # 随机分两份
+        low, high = self.config.random_split_range
+        first_split = self._random.uniform(low, high)
+        allocations: List[float] = []
+        first_qty = round_to_precision(qty * first_split, limits.base_precision)
+        allocations.append(first_qty)
+        allocations.append(qty - first_qty)
+    
+        aggressive_price, min_trade_qty = self._estimate_minimum_trade_qty(symbol, side, hedger_indices, limits)
         if not reduce_only and len(hedger_indices) > 1:
-            threshold = max(min_trade_qty, limits.min_order_size)
-            if qty < threshold * len(hedger_indices):
+            # 如果数量太小，无法平均分给所有 hedger，那就只分给其中一个 hedger（轮流选）
+            if qty < min_trade_qty * len(hedger_indices):
                 target_pos = self._select_small_fill_target(hedger_indices)
                 allocations = [0.0 for _ in hedger_indices]
                 allocations[target_pos] = round_to_precision(qty, limits.base_precision)
         if reduce_only:
+            allocations = self._apply_exposure_caps(
+                allocations, hedger_indices, exposure_caps, min_trade_qty, limits
+            )
             logger.debug(
                 "Reduce-only hedge allocations after caps for %s: %s",
                 symbol,
@@ -651,30 +703,15 @@ class VolumeHoldStrategyRefactor:
                     rounded,
                 )
                 continue
-            price = self._compute_aggressive_price(self._clients[hedger_idx], symbol, side)
-            if price is None:
-                logger.error("Unable to compute hedge price for %s", symbol)
-                continue
-            price = round_to_tick_size(price, limits.tick_size)
-            min_required = self._effective_min_quantity(price, limits)
-            if reduce_only:
-                cap = short_caps.get(hedger_idx, 0.0)
-                if cap <= epsilon:
-                    logger.debug(
-                        "Reduce-only cap reached for %s on %s (exposure %.8f)",
-                        self._account_labels[hedger_idx],
-                        symbol,
-                        cap,
-                    )
-                    continue
-                rounded = min(rounded, cap)
-                short_caps[hedger_idx] = max(cap - rounded, 0.0)
+            
+            min_required = self._effective_min_quantity(aggressive_price, limits)
+            # 这里的检查应该是多余的？
             if rounded + epsilon < min_required:
                 logger.debug(
                     "Hedge qty %.8f below venue minimum %.8f at price %.8f for %s, left as net exposure",
                     rounded,
                     min_required,
-                    price,
+                    aggressive_price,
                     self._account_labels[hedger_idx],
                 )
                 continue
@@ -685,13 +722,16 @@ class VolumeHoldStrategyRefactor:
                 symbol=symbol,
                 side=side,
                 quantity=rounded,
-                price=price,
+                price=aggressive_price,
                 post_only=False,
                 reduce_only=reduce_only,
                 limits=limits,
                 account_label=self._account_labels[hedger_idx],
             )
             if order_index is None:
+                logger.info(
+                    "Hedge order submmit failed"
+                )
                 continue
             fills = self._wait_for_position_fill(
                 client=self._clients[hedger_idx],
@@ -707,61 +747,66 @@ class VolumeHoldStrategyRefactor:
             filled_base = sum(fill["quantity"] for fill in fills)
             if filled_base <= 0:
                 continue
-            delta = filled_base if side == "Bid" else -filled_base
-            order_ids = self._extract_order_identifiers(response if isinstance(response, dict) else None)
             self._record_hedge_fill(hedger_idx, symbol, fills)
         if hedger_indices:
             self._log_position_snapshot(symbol, primary_idx, hedger_indices)
 
-    def _split_base_quantity(
-        self,
-        qty: float,
-        hedger_indices: Sequence[int],
-        limits: MarketConstraints,
-    ) -> List[float]:
-        if not hedger_indices:
-            return []
-        low, high = self.config.random_split_range
-        first_split = self._random.uniform(low, high)
-        allocations: List[float] = []
-        if len(hedger_indices) == 1:
-            allocations.append(round_to_precision(qty, limits.base_precision))
-        else:
-            first_qty = round_to_precision(qty * first_split, limits.base_precision)
-            allocations.append(first_qty)
-            allocations.append(round_to_precision(qty - first_qty, limits.base_precision))
-        while len(allocations) < len(hedger_indices):
-            allocations.append(0.0)
-        return allocations
 
-    def _allocate_reduce_only(
+    def _apply_exposure_caps(
         self,
-        exposure_caps: Dict[int, float],
+        allocations: List[float],
         hedger_indices: Sequence[int],
-        qty: float,
+        exposure_caps: Dict[int, float],
+        min_trade_qty: float,
         limits: MarketConstraints,
     ) -> List[float]:
         epsilon = max(1e-12, 10 ** (-limits.base_precision))
-        if qty <= epsilon or not hedger_indices:
-            return [0.0 for _ in hedger_indices]
-        ordered = sorted(
-            ((idx, max(exposure_caps.get(idx, 0.0), 0.0)) for idx in hedger_indices),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        allocations: Dict[int, float] = {idx: 0.0 for idx in hedger_indices}
-        qty_left = qty
-        for idx, exposure in ordered:
-            if qty_left <= epsilon:
-                break
-            if exposure <= epsilon:
+        adjusted = [0.0 for _ in allocations]
+        remaining_caps = [max(exposure_caps.get(idx, 0.0), 0.0) for idx in hedger_indices]
+        qty_left = round_to_precision(sum(allocations), limits.base_precision)
+
+        for idx, planned in enumerate(allocations):
+            allowance = min(planned, remaining_caps[idx])
+            allowance = round_to_precision(allowance, limits.base_precision)
+            adjusted[idx] = allowance
+            remaining_caps[idx] = max(round_to_precision(remaining_caps[idx] - allowance, limits.base_precision), 0.0)
+            qty_left = max(round_to_precision(qty_left - allowance, limits.base_precision), 0.0)
+
+        if qty_left > epsilon:
+            for idx in range(len(adjusted)):
+                if qty_left <= epsilon:
+                    break
+                allowance = min(remaining_caps[idx], qty_left)
+                allowance = round_to_precision(allowance, limits.base_precision)
+                adjusted[idx] += allowance
+                remaining_caps[idx] = max(round_to_precision(remaining_caps[idx] - allowance, limits.base_precision), 0.0)
+                qty_left = max(round_to_precision(qty_left - allowance, limits.base_precision), 0.0)
+
+        total_alloc = round_to_precision(sum(adjusted), limits.base_precision)
+        if total_alloc < min_trade_qty:
+            # Not enough to trade; zero everything so caller can decide.
+            return [0.0 for _ in adjusted]
+
+        # For sub-min allocations, merge the smaller ones into the largest allocation.
+        largest_idx = max(range(len(adjusted)), key=lambda i: adjusted[i])
+        for idx in range(len(adjusted)):
+            if idx == largest_idx:
                 continue
-            take = min(exposure, qty_left)
-            allocations[idx] = round_to_precision(take, limits.base_precision)
-            qty_left = max(round_to_precision(qty_left - take, limits.base_precision), 0.0)
-        return [allocations[idx] for idx in hedger_indices]
+            if 0 < adjusted[idx] < min_trade_qty:
+                transferable = adjusted[idx]
+                adjusted[idx] = 0.0
+                adjusted[largest_idx] = round_to_precision(adjusted[largest_idx] + transferable, limits.base_precision)
+
+        # If the largest allocation is still below the minimum, drop others and move everything there (within cap).
+        if adjusted[largest_idx] < min_trade_qty:
+            adjusted = [0.0 for _ in adjusted]
+            cap = exposure_caps.get(hedger_indices[largest_idx], total_alloc)
+            adjusted[largest_idx] = min(total_alloc, cap)
+
+        return adjusted
 
     def _effective_min_quantity(self, price: float, limits: MarketConstraints) -> float:
+        # 根据 limit 和 11u 返回最小下单数量，
         min_quote = max(limits.min_quote_value, MIN_QUOTE_THRESHOLD)
         quote_based = min_quote / max(price, 1e-12)
         return max(limits.min_order_size, quote_based)
@@ -786,6 +831,7 @@ class VolumeHoldStrategyRefactor:
                 min_trade_qty,
             )
             return None
+        # 当本次 slice 小于交易所最小下单量，但剩余目标量还不止这一口时，强制把 slice 调整到 min_trade_qty。
         logger.info(
             "Adjusting slice qty from %.8f to venue minimum %.8f for %s.",
             slice_quantity,
@@ -853,10 +899,10 @@ class VolumeHoldStrategyRefactor:
         if not hedger_indices:
             return limits.min_order_size
         reference_idx = hedger_indices[0]
-        price = self._compute_aggressive_price(self._clients[reference_idx], symbol, side)
+        price = self._compute_aggressive_price(self._clients[reference_idx], symbol, side, limits.tick_size)
         if price is None:
             return limits.min_order_size
-        return self._effective_min_quantity(price, limits)
+        return price, self._effective_min_quantity(price, limits)
 
     def _select_small_fill_target(self, hedger_indices: Sequence[int]) -> int:
         if not hedger_indices:
@@ -896,48 +942,47 @@ class VolumeHoldStrategyRefactor:
             return self._refresh_position(account_idx, symbol)
         return account_store[symbol]
 
-    def _compute_net_position(
+    def _rebalance_exposure(
         self,
         symbol: str,
         primary_idx: int,
         hedger_indices: Sequence[int],
         limits: MarketConstraints,
-    ) -> float:
-        maker_pos = self._get_cached_position(primary_idx, symbol)
-        hedger_total = 0.0
-        for idx in hedger_indices:
-            hedger_total += self._get_cached_position(idx, symbol)
-        return round_to_precision(maker_pos + hedger_total, limits.base_precision)
-
-    def _rebalance_entry_exposure(
-        self,
-        symbol: str,
-        primary_idx: int,
-        hedger_indices: Sequence[int],
-        limits: MarketConstraints,
+        reference_price: Optional[float],
+        *,
+        allow_additional_shorts: bool,
+        allow_reduce_shorts: bool,
     ) -> None:
-        if not hedger_indices or not self._hedge_enabled:
+        if not hedger_indices:
             return
-        net_base = self._compute_net_position(symbol, primary_idx, hedger_indices, limits)
-        side = "Ask" if net_base > 0 else "Bid"
-        price_source_idx = hedger_indices[0] if hedger_indices else primary_idx
-        price = self._compute_aggressive_price(self._clients[price_source_idx], symbol, side)
-        if price is None:
-            return
-        net_notional = abs(net_base) * price
-        if net_notional < max(limits.min_quote_value, MIN_QUOTE_THRESHOLD):
-            logger.info(
-                f"{net_base} Net exposure {net_notional} detected, no need to rebalance"
-            )
-            return
-        logger.info(
-            "Net exposure %.8f %s detected (notional ≈ %.2f); dispatching catch-up hedge %s",
-            net_base,
-            symbol,
-            net_notional,
-            side,
-        )
-        self._dispatch_hedges(primary_idx, symbol, side, abs(net_base), hedger_indices, limits, reduce_only=False)
+        maker_qty = max(self._get_cached_position(primary_idx, symbol), 0.0)
+        hedge_total = sum(max(-self._get_cached_position(idx, symbol), 0.0) for idx in hedger_indices)
+        net_base = maker_qty - hedge_total
+        epsilon = max(1e-12, 10 ** (-limits.base_precision))
+
+        if net_base >= epsilon and allow_additional_shorts:
+            price = self._compute_aggressive_price(self._clients[primary_idx], symbol, "Ask", limits.tick_size)
+            min_gap = self._effective_min_quantity(price, limits)
+            if net_base >= min_gap:
+                logger.info(
+                    "Entry hedge lag detected for %s (gap %.8f ≈ %.2f quote); sending catch-up short.",
+                    symbol,
+                    net_base,
+                    net_base * price,
+                )
+                self._dispatch_hedges(primary_idx, symbol, "Ask", net_base, hedger_indices, limits, reduce_only=False)
+
+        elif net_base <= -epsilon and allow_reduce_shorts:
+            price = self._compute_aggressive_price(self._clients[primary_idx], symbol, "Bid", limits.tick_size)
+            min_gap = self._effective_min_quantity(price, limits)
+            if abs(net_base) >= min_gap:
+                logger.info(
+                    "Flatten hedge lag detected for %s (gap %.8f ≈ %.2f quote); reducing hedge shorts.",
+                    symbol,
+                    abs(net_base),
+                    abs(net_base) * price,
+                )
+                self._dispatch_hedges(primary_idx, symbol, "Bid", abs(net_base), hedger_indices, limits, reduce_only=True)
 
     def _log_position_snapshot(
         self,
@@ -1119,91 +1164,29 @@ class VolumeHoldStrategyRefactor:
         plan: SymbolPlan,
         limits: MarketConstraints,
     ) -> Tuple[float, float, float]:
-        price = self._compute_reference_price(client, plan.symbol, "Bid", plan.entry_offset_bps)
-        if price is None or price <= 0:
-            price = self._compute_aggressive_price(client, plan.symbol, "Bid")
-        if price is None or price <= 0:
-            raise StrategyConfigError(f"Unable to derive reference price for {plan.symbol}")
-        raw_target_quote = max(float(plan.target_notional), 0.0)
-        raw_slice_quote = float(plan.slice_notional) if plan.slice_notional and plan.slice_notional > 0 else 0.0
-        target_base_total = (
-            round_to_precision(raw_target_quote / price, limits.base_precision) if raw_target_quote > 0 else 0.0
+        price = self._compute_reference_price(
+            client, plan.symbol, "Bid", plan.entry_offset_bps
         )
-        if raw_slice_quote > 0:
-            configured_slice_qty = round_to_precision(raw_slice_quote / price, limits.base_precision)
-        else:
-            configured_slice_qty = target_base_total
-        if configured_slice_qty <= 0 and target_base_total > 0:
-            configured_slice_qty = target_base_total
-        configured_slice_qty = max(configured_slice_qty, limits.min_order_size)
-        return target_base_total, configured_slice_qty, price
-
-    def _trim_excess_hedge_shorts(
-        self,
-        symbol: str,
-        primary_idx: int,
-        hedger_indices: Sequence[int],
-        limits: MarketConstraints,
-    ) -> None:
-        if not hedger_indices:
-            return
-        maker_qty = max(self._get_cached_position(primary_idx, symbol), 0.0)
-        total_short = 0.0
-        snapshot: Dict[str, float] = {}
-        for hedger_idx in hedger_indices:
-            qty = self._get_cached_position(hedger_idx, symbol)
-            short_qty = max(-qty, 0.0)
-            snapshot[self._account_labels[hedger_idx]] = short_qty
-            total_short += short_qty
-        epsilon = max(1e-12, 10 ** (-limits.base_precision))
-        if total_short <= maker_qty + epsilon:
-            return
-        deficit = total_short - maker_qty
-        logger.warning(
-            "Hedge shorts %.8f exceed maker %.8f for %s; reducing hedges by %.8f (snapshot=%s)",
-            total_short,
-            maker_qty,
-            symbol,
-            deficit,
-            snapshot,
+        # quote 就是金额
+        raw_target_quote = float(plan.target_notional)
+        raw_slice_quote = float(plan.slice_notional)
+        # 币的数量
+        configured_target_qty = (
+            round_to_precision(raw_target_quote / price, limits.base_precision)
+            if raw_target_quote > 0
+            else 0.0
         )
-        self._dispatch_hedges(primary_idx, symbol, "Bid", deficit, hedger_indices, limits, reduce_only=True)
-        self._prime_positions(symbol, hedger_indices)
-
-    def _rebalance_flatten_gap(
-        self,
-        symbol: str,
-        primary_idx: int,
-        hedger_indices: Sequence[int],
-        limits: MarketConstraints,
-        reference_price: float,
-    ) -> None:
-        maker_qty = max(self._get_cached_position(primary_idx, symbol), 0.0)
-        hedge_total = 0.0
-        for hedger_idx in hedger_indices:
-            hedge_total += max(-self._get_cached_position(hedger_idx, symbol), 0.0)
-        gap = maker_qty - hedge_total
-        if gap <= 0 or reference_price <= 0:
-            return
-        gap_quote = gap * reference_price
-        threshold = max(limits.min_quote_value, MIN_QUOTE_THRESHOLD)
-        if gap_quote < threshold:
-            return
-        logger.info(
-            "Hedge lag detected for %s (maker %.8f vs hedge %.8f, gap %.8f ≈ %.2f quote); dispatching catch-up shorts.",
-            symbol,
-            maker_qty,
-            hedge_total,
-            gap,
-            gap_quote,
+        configured_slice_qty = round_to_precision(
+            raw_slice_quote / price, limits.base_precision
         )
-        self._dispatch_hedges(primary_idx, symbol, "Ask", gap, hedger_indices, limits, reduce_only=False)
+        return configured_target_qty, configured_slice_qty, price
 
     def _compute_aggressive_price(
         self,
         client: LighterClient,
         symbol: str,
         side: str,
+        tick_size,
     ) -> Optional[float]:
         book = client.get_order_book(symbol, limit=5)
         if isinstance(book, dict) and book.get("error"):
@@ -1215,16 +1198,12 @@ class VolumeHoldStrategyRefactor:
         best_ask = asks[0][0] if asks else None
         if side == "Bid":
             base = best_ask or best_bid
-            if base is None:
-                return None
-            price = base * 1.002
+            price = round_to_tick_size(base * 1.002, tick_size)
             if best_ask:
                 price = max(price, best_ask)
             return price
         base = best_bid or best_ask
-        if base is None:
-            return None
-        price = base * 0.998
+        price = round_to_tick_size(base * 0.998, tick_size)
         if best_bid:
             price = min(price, best_bid)
         return price
@@ -1245,30 +1224,6 @@ class VolumeHoldStrategyRefactor:
         )
         self._market_cache[symbol] = limits
         return limits
-
-    def _sleep_with_stop(self, seconds: float) -> None:
-        """Sleep in small chunks so CTRL+C or stop() can break long waits."""
-        target_time = time.time() + max(seconds, 0)
-        while not self._stop_event.is_set() and time.time() < target_time:
-            time.sleep(min(1, target_time - time.time()))
-
-    def _slice_delay(self) -> float:
-        """Return the per-slice delay plus jitter (helps stagger orders)."""
-        jitter = self._random.uniform(0, max(self.config.slice_delay_jitter_seconds, 0))
-        return max(self.config.slice_delay_seconds + jitter, 0)
-
-    def _resolve_hedgers(self, primary_idx: int) -> List[int]:
-        """Pick up to two non-primary accounts that will act as hedgers."""
-        if not self._hedge_enabled:
-            return []
-        indices = list(range(len(self._clients)))
-        indices.remove(primary_idx)
-        return indices[:2]
-
-    def _advance_pointers(self) -> None:
-        """Rotate to the next symbol and next primary account."""
-        self._current_symbol_index = (self._current_symbol_index + 1) % len(self.config.symbols)
-        self._current_primary_index = (self._current_primary_index + 1) % len(self._clients)
 
     @staticmethod
     def _refresh_client_nonce(client: LighterClient) -> Optional[int]:
