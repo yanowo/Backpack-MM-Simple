@@ -400,6 +400,7 @@ class PerpetualMarketMaker(MarketMaker):
         order_type: str = "Limit",
         reduce_only: bool = False,
         time_in_force: str = "GTC",
+        post_only: bool = False,
         client_id: Optional[str] = None,
     ) -> Dict:
         """提交開倉或平倉訂單。"""
@@ -432,6 +433,9 @@ class PerpetualMarketMaker(MarketMaker):
                 raise ValueError("Limit 訂單需要提供價格")
             price_value = round_to_tick_size(price, self.tick_size)
             order_details["price"] = str(price_value)
+            # 添加 post_only 參數
+            if post_only:
+                order_details["postOnly"] = True
         else:
             # 使用當前深度推估價格方便記錄
             bid_price, ask_price = self.get_market_depth()
@@ -470,6 +474,7 @@ class PerpetualMarketMaker(MarketMaker):
         price: Optional[float] = None,
         order_type: str = "Limit",
         reduce_only: bool = False,
+        post_only: bool = False,
         **kwargs,
     ) -> Dict:
         """開啟或增加多頭倉位。"""
@@ -479,6 +484,7 @@ class PerpetualMarketMaker(MarketMaker):
             price=price,
             order_type=order_type,
             reduce_only=reduce_only,
+            post_only=post_only,
             **kwargs,
         )
 
@@ -488,6 +494,7 @@ class PerpetualMarketMaker(MarketMaker):
         price: Optional[float] = None,
         order_type: str = "Limit",
         reduce_only: bool = False,
+        post_only: bool = False,
         **kwargs,
     ) -> Dict:
         """開啟或增加空頭倉位。"""
@@ -497,6 +504,7 @@ class PerpetualMarketMaker(MarketMaker):
             price=price,
             order_type=order_type,
             reduce_only=reduce_only,
+            post_only=post_only,
             **kwargs,
         )
 
