@@ -326,9 +326,16 @@ class AsterClient(BaseExchangeClient):
 
         payload: Dict[str, Any] = {"symbol": resolved_symbol, "side": normalized_side, "type": normalized_type}
 
+        # 處理 postOnly（僅掛單模式）
+        post_only = order_details.get("postOnly", False)
         time_in_force = order_details.get("timeInForce")
+        
         if normalized_type == "LIMIT":
-            payload["timeInForce"] = (time_in_force or "GTC").upper()
+            # postOnly 模式使用 GTX（Good Till Crossing）- 無法成為掛單方就撤銷
+            if post_only:
+                payload["timeInForce"] = "GTX"
+            else:
+                payload["timeInForce"] = (time_in_force or "GTC").upper()
         elif time_in_force:
             payload["timeInForce"] = time_in_force.upper()
 
@@ -449,10 +456,16 @@ class AsterClient(BaseExchangeClient):
                     "type": normalized_type
                 }
 
-                # 添加時間有效性
+                # 處理 postOnly（僅掛單模式）
+                post_only = order_details.get("postOnly", False)
                 time_in_force = order_details.get("timeInForce")
+                
                 if normalized_type == "LIMIT":
-                    order_payload["timeInForce"] = (time_in_force or "GTC").upper()
+                    # postOnly 模式使用 GTX（Good Till Crossing）
+                    if post_only:
+                        order_payload["timeInForce"] = "GTX"
+                    else:
+                        order_payload["timeInForce"] = (time_in_force or "GTC").upper()
                 elif time_in_force:
                     order_payload["timeInForce"] = time_in_force.upper()
 
