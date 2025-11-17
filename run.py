@@ -94,17 +94,15 @@ def main():
     api_key = ''
     secret_key = ''
     account_address: Optional[str] = None
-    ws_proxy = None
     exchange_config = {}
 
-    # 讀取全局代理配置
+    # 讀取全局代理配置（HTTP/HTTPS 和 WebSocket 統一使用）
     http_proxy = os.getenv('HTTP_PROXY')
     https_proxy = os.getenv('HTTPS_PROXY')
 
     if exchange == 'backpack':
         api_key = os.getenv('BACKPACK_KEY', '')
         secret_key = os.getenv('BACKPACK_SECRET', '')
-        ws_proxy = os.getenv('BACKPACK_PROXY_WEBSOCKET')
         base_url = os.getenv('BASE_URL', 'https://api.backpack.work')
         exchange_config = {
             'api_key': api_key,
@@ -118,7 +116,6 @@ def main():
     elif exchange == 'aster':
         api_key = os.getenv('ASTER_API_KEY', '')
         secret_key = os.getenv('ASTER_SECRET_KEY', '')
-        ws_proxy = os.getenv('ASTER_PROXY_WEBSOCKET')
         exchange_config = {
             'api_key': api_key,
             'secret_key': secret_key,
@@ -128,7 +125,6 @@ def main():
     elif exchange == 'paradex':
         private_key = os.getenv('PARADEX_PRIVATE_KEY', '')  # StarkNet 私鑰
         account_address = os.getenv('PARADEX_ACCOUNT_ADDRESS')  # StarkNet 帳户地址
-        ws_proxy = os.getenv('PARADEX_PROXY_WEBSOCKET')
         base_url = os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1')
 
         secret_key = private_key
@@ -144,7 +140,6 @@ def main():
     elif exchange == 'lighter':
         api_key = os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
         secret_key = os.getenv('LIGHTER_SECRET_KEY') or api_key
-        ws_proxy = os.getenv('LIGHTER_PROXY_WEBSOCKET') or os.getenv('LIGHTER_WS_PROXY')
         base_url = os.getenv('LIGHTER_BASE_URL')
         account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
         account_address = os.getenv('LIGHTER_ADDRESS')
@@ -205,7 +200,7 @@ def main():
         # 啟動命令行界面
         try:
             from cli.commands import main_cli
-            main_cli(api_key, secret_key, ws_proxy=ws_proxy, enable_database=args.enable_db, exchange=exchange)
+            main_cli(api_key, secret_key, enable_database=args.enable_db, exchange=exchange)
         except ImportError as e:
             logger.error(f"啟動命令行界面時出錯: {str(e)}")
             sys.exit(1)
@@ -244,7 +239,6 @@ def main():
                     auto_price_range=args.auto_price,
                     price_range_percent=args.price_range,
                     grid_mode=args.grid_mode,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=args.enable_db
@@ -279,7 +273,6 @@ def main():
                     inventory_skew=args.inventory_skew,
                     stop_loss=args.stop_loss,
                     take_profit=args.take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=args.enable_db
@@ -310,8 +303,7 @@ def main():
                         inventory_skew=args.inventory_skew,
                         stop_loss=args.stop_loss,
                         take_profit=args.take_profit,
-                        ws_proxy=ws_proxy,
-                        exchange=exchange,
+                            exchange=exchange,
                         exchange_config=exchange_config,
                         enable_database=args.enable_db,
                         market_type='perp'
@@ -330,8 +322,7 @@ def main():
                         inventory_skew=args.inventory_skew,
                         stop_loss=args.stop_loss,
                         take_profit=args.take_profit,
-                        ws_proxy=ws_proxy,
-                        exchange=exchange,
+                            exchange=exchange,
                         exchange_config=exchange_config,
                         enable_database=args.enable_db
                     )
@@ -349,8 +340,7 @@ def main():
                         symbol=args.symbol,
                         base_spread_percentage=args.spread,
                         order_quantity=args.quantity,
-                        ws_proxy=ws_proxy,
-                        exchange=exchange,
+                            exchange=exchange,
                         exchange_config=exchange_config,
                         enable_database=args.enable_db,
                         market_type='spot'
@@ -389,8 +379,7 @@ def main():
                         enable_rebalance=enable_rebalance,
                         base_asset_target_percentage=base_asset_target_percentage,
                         rebalance_threshold=rebalance_threshold,
-                        ws_proxy=ws_proxy,
-                        exchange=exchange,
+                            exchange=exchange,
                         exchange_config=exchange_config,
                         enable_database=args.enable_db
                     )

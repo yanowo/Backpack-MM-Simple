@@ -10,12 +10,9 @@ load_dotenv()
 
 # ==================== 通用配置 ====================
 
-# HTTP/HTTPS 代理配置（支持所有交易所）
+# HTTP/HTTPS 代理配置（支持所有交易所，同時用於 REST API 和 WebSocket）
 HTTP_PROXY = os.getenv('HTTP_PROXY')
 HTTPS_PROXY = os.getenv('HTTPS_PROXY')
-
-# WebSocket 代理配置（通用）
-WS_PROXY = os.getenv('PROXY_WEBSOCKET')
 
 # 數據庫配置
 DB_PATH = os.getenv('DB_PATH', 'orders.db')

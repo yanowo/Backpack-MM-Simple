@@ -371,12 +371,12 @@ def get_markets_command():
         market_type = market.get('marketType')
         print(f"{i+1}. {symbol} ({base}/{quote}) - {market_type}")
 
-def get_orderbook_command(api_key, secret_key, ws_proxy=None):
+def get_orderbook_command(api_key, secret_key):
     """獲取市場深度命令"""
     symbol = input("請輸入交易對 (例如: SOL_USDC): ")
     try:
         print("連接WebSocket獲取實時訂單簿...")
-        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True, proxy=ws_proxy)
+        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True)
         ws.connect()
         
         # 等待連接建立
@@ -533,7 +533,7 @@ def configure_rebalance_settings():
     
     return enable_rebalance, base_asset_target_percentage, rebalance_threshold
 
-def run_market_maker_command(api_key, secret_key, ws_proxy=None):
+def run_market_maker_command(api_key, secret_key):
     """執行做市策略命令"""
     # [整合功能] 1. 增加交易所選擇
     exchange_input = input("請選擇交易所 (backpack/aster/paradex/lighter，默認 backpack): ").strip().lower()
@@ -824,7 +824,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     inventory_skew=inventory_skew,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE,
@@ -845,7 +844,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     inventory_skew=inventory_skew,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE,
@@ -867,7 +865,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     inventory_skew=inventory_skew,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE
@@ -886,7 +883,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     auto_price_range=auto_price_range,
                     price_range_percent=price_range_percent,
                     grid_mode=grid_mode,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE,
@@ -901,7 +897,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     db_instance=db if USE_DATABASE else None,
                     base_spread_percentage=spread_percentage,
                     order_quantity=quantity,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE,
@@ -920,7 +915,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     enable_rebalance=enable_rebalance,
                     base_asset_target_percentage=base_asset_target_percentage,
                     rebalance_threshold=rebalance_threshold,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE
@@ -1130,14 +1124,14 @@ def toggle_database_command():
         print("輸入無效，設定未變更。")
 
 
-def market_analysis_command(api_key, secret_key, ws_proxy=None):
+def market_analysis_command(api_key, secret_key):
     """市場分析命令"""
     symbol = input("請輸入要分析的交易對 (例如: SOL_USDC): ")
     try:
         print("\n執行市場分析...")
-        
+
         # 創建臨時WebSocket連接
-        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True, proxy=ws_proxy)
+        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True)
         ws.connect()
         
         # 等待連接建立
@@ -1305,7 +1299,7 @@ def market_analysis_command(api_key, secret_key, ws_proxy=None):
         import traceback
         traceback.print_exc()
 
-def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_database=ENABLE_DATABASE, exchange='backpack'):
+def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, enable_database=ENABLE_DATABASE, exchange='backpack'):
     """主CLI函數"""
     global USE_DATABASE
     USE_DATABASE = bool(enable_database)
@@ -1345,13 +1339,13 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_datab
         elif operation == '3':
             get_markets_command()
         elif operation == '4':
-            get_orderbook_command(api_key, secret_key, ws_proxy=ws_proxy)
+            get_orderbook_command(api_key, secret_key)
         elif operation == '5':
-            run_market_maker_command(api_key, secret_key, ws_proxy=ws_proxy)
+            run_market_maker_command(api_key, secret_key)
         elif operation == '6':
             trading_stats_command(api_key, secret_key)
         elif operation == '7':
-            market_analysis_command(api_key, secret_key, ws_proxy=ws_proxy)
+            market_analysis_command(api_key, secret_key)
         elif operation == '8':
             rebalance_settings_command()
         elif operation.lower() == 'd':

@@ -39,7 +39,6 @@ class GridStrategy(MarketMaker):
         auto_price_range: bool = False,            # 自動設置價格範圍
         price_range_percent: float = 5.0,          # 自動模式下的價格範圍百分比
         grid_mode: str = "arithmetic",             # 網格模式: arithmetic(等差) 或 geometric(等比)
-        ws_proxy: Optional[str] = None,
         exchange: str = 'backpack',
         exchange_config: Optional[Dict[str, Any]] = None,
         enable_database: bool = True,
@@ -59,7 +58,6 @@ class GridStrategy(MarketMaker):
             auto_price_range: 是否自動設置價格範圍
             price_range_percent: 自動模式下的價格範圍百分比
             grid_mode: 網格模式（arithmetic或geometric）
-            ws_proxy: WebSocket代理地址
             exchange: 交易所名稱
             exchange_config: 交易所配置
             enable_database: 是否啓用數據庫
@@ -74,7 +72,6 @@ class GridStrategy(MarketMaker):
             base_spread_percentage=0.1,  # 網格策略不使用spread，設置一個默認值
             order_quantity=order_quantity,
             max_orders=1,  # 網格策略不使用max_orders
-            ws_proxy=ws_proxy,
             exchange=exchange,
             exchange_config=exchange_config,
             enable_database=enable_database,

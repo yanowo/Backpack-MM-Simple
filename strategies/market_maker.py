@@ -46,7 +46,6 @@ class MarketMaker:
         rebalance_threshold=15.0,
         enable_rebalance=True,
         base_asset_target_percentage=30.0,
-        ws_proxy=None,
         exchange='backpack',
         exchange_config=None,
         enable_database=False
@@ -158,10 +157,9 @@ class MarketMaker:
         self._last_reconnect_attempt = 0
 
         # 添加代理參數
-        self.ws_proxy = ws_proxy
         # 建立WebSocket連接（僅對Backpack）
         if exchange == 'backpack':
-            self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True, proxy=self.ws_proxy)
+            self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
             self.ws.connect()
         elif exchange == 'xx':
             ...
