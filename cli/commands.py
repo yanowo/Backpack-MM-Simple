@@ -193,45 +193,51 @@ def get_address_command(api_key, secret_key):
 
 def get_balance_command(api_key, secret_key):
     """獲取餘額命令 - 檢查所有已配置的交易所"""
-    
+
+    # 讀取全局代理配置
+    http_proxy = os.getenv('HTTP_PROXY')
+    https_proxy = os.getenv('HTTPS_PROXY')
+
     # 定義要檢查的交易所列表
     exchanges_to_check = []
-    
+
     # 檢查 Backpack
     backpack_api, backpack_secret = _resolve_api_credentials('backpack', api_key, secret_key)
     if backpack_api and backpack_secret:
         exchanges_to_check.append(('backpack', backpack_api, backpack_secret))
-    
+
     # 檢查 Aster
     aster_api, aster_secret = _resolve_api_credentials('aster', None, None)
     if aster_api and aster_secret:
         exchanges_to_check.append(('aster', aster_api, aster_secret))
-    
+
     # 檢查 Paradex
     paradex_account, paradex_key = _resolve_api_credentials('paradex', None, None)
     if paradex_account and paradex_key:
         exchanges_to_check.append(('paradex', paradex_account, paradex_key))
-    
+
     # 檢查 Lighter
     lighter_private, lighter_account_index = _resolve_api_credentials('lighter', None, None)
     if lighter_private and lighter_account_index:
         exchanges_to_check.append(('lighter', lighter_private, lighter_account_index))
-    
+
     if not exchanges_to_check:
         print("未找到任何已配置的交易所 API 密鑰")
         return
-    
+
     # 遍歷所有交易所並獲取餘額
     for exchange, ex_api_key, ex_secret_key in exchanges_to_check:
         print(f"\n{'='*60}")
         print(f"交易所: {exchange.upper()}")
         print(f"{'='*60}")
-        
+
         try:
             exchange_config = {
                 'api_key': ex_api_key,
+                'http_proxy': http_proxy,
+                'https_proxy': https_proxy,
             }
-            
+
             if exchange == 'paradex':
                 exchange_config['private_key'] = ex_secret_key
                 exchange_config['account_address'] = ex_api_key
@@ -242,6 +248,8 @@ def get_balance_command(api_key, secret_key):
                     'account_index': ex_secret_key,
                     'api_key_index': os.getenv('LIGHTER_API_KEY_INDEX'),
                     'base_url': os.getenv('LIGHTER_BASE_URL'),
+                    'http_proxy': http_proxy,
+                    'https_proxy': https_proxy,
                 }
                 chain_id = os.getenv('LIGHTER_CHAIN_ID')
                 if chain_id:

@@ -10,6 +10,10 @@ load_dotenv()
 
 # ==================== 通用配置 ====================
 
+# HTTP/HTTPS 代理配置（支持所有交易所）
+HTTP_PROXY = os.getenv('HTTP_PROXY')
+HTTPS_PROXY = os.getenv('HTTPS_PROXY')
+
 # WebSocket 代理配置（通用）
 WS_PROXY = os.getenv('PROXY_WEBSOCKET')
 

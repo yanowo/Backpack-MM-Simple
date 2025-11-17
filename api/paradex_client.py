@@ -57,6 +57,18 @@ class ParadexClient(BaseExchangeClient):
         self.max_retries = int(config.get("max_retries", 3))
         self.session = requests.Session()
 
+        # 代理配置
+        http_proxy = config.get("http_proxy")
+        https_proxy = config.get("https_proxy")
+        if http_proxy or https_proxy:
+            proxies = {}
+            if http_proxy:
+                proxies['http'] = http_proxy
+            if https_proxy:
+                proxies['https'] = https_proxy
+            self.session.proxies.update(proxies)
+            logger.info(f"Paradex 客户端已配置代理: {proxies}")
+
         # JWT 相關
         self._jwt_token: Optional[str] = None
         self._jwt_expiry: Optional[datetime] = None

@@ -30,6 +30,19 @@ class AsterClient(BaseExchangeClient):
         self.timeout = float(config.get("timeout", 10))
         self.max_retries = int(config.get("max_retries", 3))
         self.session = requests.Session()
+
+        # 代理配置
+        http_proxy = config.get("http_proxy")
+        https_proxy = config.get("https_proxy")
+        if http_proxy or https_proxy:
+            proxies = {}
+            if http_proxy:
+                proxies['http'] = http_proxy
+            if https_proxy:
+                proxies['https'] = https_proxy
+            self.session.proxies.update(proxies)
+            logger.info(f"Aster 客户端已配置代理: {proxies}")
+
         self._symbol_cache: Dict[str, str] = {}
         self._market_info_cache: Dict[str, Dict[str, Any]] = {}
 
