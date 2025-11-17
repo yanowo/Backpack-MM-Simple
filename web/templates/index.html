@@ -139,6 +139,35 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Grid Strategy Statistics (Hidden by default) -->
+                <div id="gridStatsSection" class="stats-row" style="display: none;">
+                    <div class="stats-group">
+                        <h3 class="group-label">網格交易統計</h3>
+                        <div class="metrics-grid-secondary">
+                            <div class="metric-card secondary">
+                                <span class="metric-label">預計網格利潤</span>
+                                <span class="metric-value-sm" id="statGridProfit">--</span>
+                            </div>
+                            <div class="metric-card secondary">
+                                <span class="metric-label">網格數量</span>
+                                <span class="metric-value-sm" id="statGridCount">--</span>
+                            </div>
+                            <div class="metric-card secondary">
+                                <span class="metric-label">價格區間</span>
+                                <span class="metric-value-sm" id="statGridPriceRange">--</span>
+                            </div>
+                            <div class="metric-card secondary">
+                                <span class="metric-label">活躍網格訂單</span>
+                                <span class="metric-value-sm" id="statActiveGridOrders">--</span>
+                            </div>
+                            <div class="metric-card secondary">
+                                <span class="metric-label">網格成交次數</span>
+                                <span class="metric-value-sm" id="statGridFilled">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- Status Bar -->
@@ -184,21 +213,6 @@
                                 </div>
 
                                 <div class="form-field">
-                                    <label class="field-label">交易對</label>
-                                    <input type="text" id="symbol" name="symbol" class="field-input" placeholder="SOL_USDC" required>
-                                </div>
-
-                                <div class="form-field">
-                                    <label class="field-label">價差 (%)</label>
-                                    <input type="number" id="spread" name="spread" class="field-input" step="0.001" placeholder="0.5" required>
-                                </div>
-
-                                <div class="form-field">
-                                    <label class="field-label">數量</label>
-                                    <input type="number" id="quantity" name="quantity" class="field-input" step="0.00001" placeholder="自動">
-                                </div>
-
-                                <div class="form-field">
                                     <label class="field-label">市場類型</label>
                                     <select id="market_type" name="market_type" class="field-input">
                                         <option value="spot">現貨</option>
@@ -211,7 +225,23 @@
                                     <select id="strategy" name="strategy" class="field-input">
                                         <option value="standard">標準做市</option>
                                         <option value="maker_hedge">對沖做市</option>
+                                        <option value="grid">網格交易</option>
                                     </select>
+                                </div>
+
+                                <div class="form-field">
+                                    <label class="field-label">交易對</label>
+                                    <input type="text" id="symbol" name="symbol" class="field-input" placeholder="SOL_USDC" required>
+                                </div>
+
+                                <div class="form-field" id="spreadField">
+                                    <label class="field-label">價差 (%)</label>
+                                    <input type="number" id="spread" name="spread" class="field-input" step="0.001" placeholder="0.5">
+                                </div>
+
+                                <div class="form-field">
+                                    <label class="field-label">數量</label>
+                                    <input type="number" id="quantity" name="quantity" class="field-input" step="0.00001" placeholder="自動">
                                 </div>
                             </div>
                         </div>
@@ -250,7 +280,7 @@
                             <div id="perpParams" class="config-block flex-1" style="display: none;">
                                 <h3 class="block-title">永續合約參數</h3>
                                 <div class="form-grid-compact">
-                                    <div class="form-field">
+                                    <div class="form-field" id="maxOrdersPerpField">
                                         <label class="field-label">最大訂單數</label>
                                         <input type="number" id="max_orders_perp" name="max_orders" class="field-input" value="3" min="1">
                                     </div>
@@ -287,6 +317,58 @@
                                 </div>
                             </div>
 
+                            <!-- Grid Strategy Parameters -->
+                            <div id="gridParams" class="config-block flex-1" style="display: none;">
+                                <h3 class="block-title">網格策略參數</h3>
+                                <div class="form-grid-compact">
+                                    <div class="form-field">
+                                        <label class="field-label">價格範圍設置</label>
+                                        <div class="form-field checkbox-field">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="auto_price_range" name="auto_price_range" class="field-checkbox">
+                                                <span class="checkbox-text">自動計算價格範圍</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="form-field" id="manualPriceFields">
+                                        <label class="field-label">上限價格</label>
+                                        <input type="number" id="grid_upper_price" name="grid_upper_price" class="field-input" step="0.0001" placeholder="自動">
+                                    </div>
+
+                                    <div class="form-field" id="manualPriceLower">
+                                        <label class="field-label">下限價格</label>
+                                        <input type="number" id="grid_lower_price" name="grid_lower_price" class="field-input" step="0.0001" placeholder="自動">
+                                    </div>
+
+                                    <div class="form-field" id="autoPriceField" style="display: none;">
+                                        <label class="field-label">價格範圍 (%)</label>
+                                        <input type="number" id="price_range_percent" name="price_range_percent" class="field-input" value="5" step="0.1" min="0.1">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">網格數量</label>
+                                        <input type="number" id="grid_num" name="grid_num" class="field-input" value="10" min="2">
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="field-label">網格模式</label>
+                                        <select id="grid_mode" name="grid_mode" class="field-input">
+                                            <option value="arithmetic">等差網格</option>
+                                            <option value="geometric">等比網格</option>
+                                        </select>
+                                    </div>
+
+                                    <div class="form-field" id="gridTypeField" style="display: none;">
+                                        <label class="field-label">網格類型</label>
+                                        <select id="grid_type" name="grid_type" class="field-input">
+                                            <option value="neutral">中性網格</option>
+                                            <option value="long">做多網格</option>
+                                            <option value="short">做空網格</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
                             <!-- Runtime Parameters -->
                             <div class="config-block flex-1">
                                 <h3 class="block-title">運行參數</h3>
@@ -300,12 +382,14 @@
                                         <label class="field-label">更新間隔 (秒)</label>
                                         <input type="number" id="interval" name="interval" class="field-input" value="10" min="1">
                                     </div>
-
-                                    <div class="form-field checkbox-field">
-                                        <label class="checkbox-label">
-                                            <input type="checkbox" id="enable_db" name="enable_db" class="field-checkbox">
-                                            <span class="checkbox-text">啟用資料庫記錄</span>
-                                        </label>
+                                    <div class="form-field">
+                                        <label class="field-label">資料庫設定</label>
+                                        <div class="form-field checkbox-field">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="enable_db" name="enable_db" class="field-checkbox">
+                                                <span class="checkbox-text">啟用資料庫記錄</span>
+                                            </label>
+                                        </div>
                                     </div>
                                 </div>
                             </div>

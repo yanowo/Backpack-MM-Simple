@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -112,6 +113,14 @@ class GridStrategy(MarketMaker):
         logger.info("初始化網格交易策略: %s", symbol)
         logger.info("網格數量: %d | 模式: %s", self.grid_num, self.grid_mode)
 
+    def _reset_grid_state(self) -> None:
+        """清理當前追蹤的網格訂單狀態。"""
+        self.grid_orders_by_price.clear()
+        self.grid_orders_by_id.clear()
+        self.grid_buy_orders_by_price.clear()
+        self.grid_sell_orders_by_price.clear()
+        self.grid_level_locks.clear()
+
     def _initialize_grid_prices(self) -> bool:
         """初始化網格價格點位"""
         # 強制使用REST API獲取準確的初始價格
@@ -185,7 +194,7 @@ class GridStrategy(MarketMaker):
         if not self._initialize_grid_prices():
             return False
 
-        # 獲取當前價格
+        # 一次性獲取所有必要數據（減少請求次數）
         current_price = self.get_current_price()
         if not current_price:
             logger.error("無法獲取當前價格")
@@ -194,8 +203,9 @@ class GridStrategy(MarketMaker):
         # 取消現有訂單
         logger.info("取消現有訂單...")
         self.cancel_existing_orders()
+        self._reset_grid_state()
 
-        # 獲取賬户餘額
+        # 獲取賬户餘額（只請求一次）
         balances = self.get_balance()
         if not balances:
             logger.error("無法獲取賬户餘額")
@@ -240,10 +250,6 @@ class GridStrategy(MarketMaker):
         orders_to_place = []
 
         for price in self.grid_levels:
-            if abs(price - current_price) / current_price < 0.001:  # 跳過太接近當前價格的點位
-                logger.debug("跳過太接近當前價格的網格點位: %.4f", price)
-                continue
-
             if price < current_price:
                 # 在當前價格下方掛買單
                 if quote_balance >= price * self.order_quantity:
@@ -478,44 +484,61 @@ class GridStrategy(MarketMaker):
         # 先調用父類處理
         super().on_ws_message(stream, data)
 
-        # 處理訂單成交事件
-        if stream.startswith("account.orderUpdate."):
-            event_type = data.get('e')
+        if not stream.startswith("account.orderUpdate."):
+            return
 
-            if event_type == 'orderFill':
-                self._handle_order_fill(data)
+        event_type = data.get('e')
+        if event_type in {"orderCancel", "orderCanceled", "orderExpired", "orderReject", "orderRejected"}:
+            self._handle_order_cancel(data)
 
-    def _handle_order_fill(self, data: Dict[str, Any]) -> None:
-        """處理訂單成交"""
+    def _after_fill_processed(self, fill_info: Dict[str, Any]) -> None:
+        super()._after_fill_processed(fill_info)
+
+        order_id = fill_info.get('order_id')
+        side = fill_info.get('side')
+        quantity_raw = fill_info.get('quantity')
+        price_raw = fill_info.get('price')
+
         try:
-            order_id = data.get('i')
-            side = data.get('S')
-            quantity = float(data.get('l', '0'))
-            price = float(data.get('L', '0'))
+            quantity = float(quantity_raw or 0)
+            price = float(price_raw or 0)
+        except (TypeError, ValueError):
+            return
 
-            # 檢查是否是網格訂單
-            if order_id not in self.grid_orders_by_id:
-                return
+        self._handle_grid_fill(order_id, side, quantity, price)
 
-            order_info = self.grid_orders_by_id[order_id]
-            grid_price = order_info['price']
+    def _handle_grid_fill(self, order_id: Optional[str], side: Optional[str], quantity: float, price: float) -> None:
+        """統一處理網格訂單成交事件（WS 或 REST）。"""
+        if not order_id or order_id not in self.grid_orders_by_id:
+            return
 
-            logger.info("網格訂單成交: ID=%s, 方向=%s, 價格=%.4f, 數量=%.4f",
-                       order_id, side, price, quantity)
+        normalized_side = side
+        if isinstance(side, str):
+            side_upper = side.upper()
+            if side_upper in ('BUY', 'BID'):
+                normalized_side = 'Bid'
+            elif side_upper in ('SELL', 'ASK'):
+                normalized_side = 'Ask'
 
-            # 從訂單跟蹤中移除
-            self._remove_grid_order(order_id, grid_price, side)
+        order_info = self.grid_orders_by_id[order_id]
+        grid_price = order_info['price']
 
-            # 根據成交方向，在對應網格點位掛反向單
-            if side == 'Bid':  # 買單成交
-                self.grid_buy_filled_count += 1
-                self._place_sell_after_buy(grid_price, quantity)
-            elif side == 'Ask':  # 賣單成交
-                self.grid_sell_filled_count += 1
-                self._place_buy_after_sell(grid_price, quantity)
+        logger.info(
+            "網格訂單成交: ID=%s, 方向=%s, 價格=%.4f, 數量=%.4f",
+            order_id,
+            normalized_side,
+            price,
+            quantity,
+        )
 
-        except Exception as e:
-            logger.error("處理網格訂單成交時出錯: %s", e, exc_info=True)
+        self._remove_grid_order(order_id, grid_price, normalized_side)
+
+        if normalized_side == 'Bid':
+            self.grid_buy_filled_count += 1
+            self._place_sell_after_buy(grid_price, quantity)
+        elif normalized_side == 'Ask':
+            self.grid_sell_filled_count += 1
+            self._place_buy_after_sell(grid_price, quantity)
 
     def _remove_grid_order(self, order_id: str, grid_price: float, side: str) -> None:
         """從訂單跟蹤中移除訂單"""
@@ -547,6 +570,29 @@ class GridStrategy(MarketMaker):
             ]
             if not self.grid_sell_orders_by_price[grid_price]:
                 del self.grid_sell_orders_by_price[grid_price]
+
+    def _handle_order_cancel(self, data: Dict[str, Any]) -> None:
+        """當交易所取消訂單時，移除記錄並嘗試重新掛單。"""
+        order_id = data.get('i')
+        if not order_id:
+            return
+
+        order_info = self.grid_orders_by_id.get(order_id)
+        if not order_info:
+            return
+
+        side = order_info['side']
+        price = order_info['price']
+        quantity = order_info['quantity']
+
+        logger.warning("網格訂單被取消: ID=%s, 方向=%s, 價格=%.4f", order_id, side, price)
+        self._remove_grid_order(order_id, price, side)
+
+        # 嘗試立即重新掛單，確保網格完整
+        if side == 'Bid':
+            self._place_grid_buy_order(price, quantity)
+        else:
+            self._place_grid_sell_order(price, quantity)
 
     def _place_sell_after_buy(self, buy_price: float, quantity: float) -> None:
         """買單成交後，在上一個網格點位掛賣單"""
@@ -624,20 +670,92 @@ class GridStrategy(MarketMaker):
                 logger.error("網格初始化失敗")
                 return
         else:
-            # 檢查並補充缺失的網格訂單
-            self._refill_grid_orders()
+            # 一次性獲取所有必要數據，然後檢查並補充缺失的網格訂單
+            current_price = self.get_current_price()
+            balances = self.get_balance()
+            try:
+                open_orders = self.client.get_open_orders(self.symbol) or []
+            except Exception as exc:
+                logger.warning("無法獲取現有訂單: %s", exc)
+                open_orders = []
+            
+            # 傳遞數據給 _refill_grid_orders，避免重複請求
+            self._refill_grid_orders(current_price=current_price, 
+                                    balances=balances, 
+                                    open_orders=open_orders)
 
-    def _refill_grid_orders(self) -> None:
-        """補充缺失的網格訂單"""
+    def _reconcile_grid_orders_from_list(self, open_orders: List) -> Dict[str, Dict[float, int]]:
+        """統計實際掛單數量（按價格/方向），從訂單列表中統計。
+        
+        Args:
+            open_orders: 現有訂單列表
+            
+        Returns:
+            {'Bid': {price: count}, 'Ask': {price: count}}
+        """
+        buy_counts: Dict[float, int] = defaultdict(int)
+        sell_counts: Dict[float, int] = defaultdict(int)
 
-        current_price = self.get_current_price()
-        if not current_price:
-            return
+        if isinstance(open_orders, dict) and open_orders.get('error'):
+            logger.warning("訂單列表包含錯誤: %s", open_orders['error'])
+            return {'Bid': {}, 'Ask': {}}
 
-        # 獲取餘額
-        balances = self.get_balance()
-        if not balances:
-            return
+        for order in open_orders:
+            if not isinstance(order, dict):
+                continue
+
+            side_raw = str(order.get('side', '')).upper()
+            price_raw = order.get('price')
+            if price_raw is None:
+                continue
+
+            try:
+                price = round_to_tick_size(float(price_raw), self.tick_size)
+            except (TypeError, ValueError):
+                continue
+
+            if side_raw in ('BUY', 'BID'):
+                buy_counts[price] += 1
+            elif side_raw in ('SELL', 'ASK'):
+                sell_counts[price] += 1
+
+        return {
+            'Bid': dict(buy_counts),
+            'Ask': dict(sell_counts),
+        }
+
+    def _refill_grid_orders(self, current_price: Optional[float] = None, 
+                            balances: Optional[Dict] = None,
+                            open_orders: Optional[List] = None) -> None:
+        """補充缺失的網格訂單
+        
+        Args:
+            current_price: 當前價格（如果未提供則會請求一次）
+            balances: 賬戶餘額（如果未提供則會請求一次）
+            open_orders: 現有訂單列表（如果未提供則會請求一次）
+        """
+        # 只在未提供數據時才請求
+        if current_price is None:
+            current_price = self.get_current_price()
+            if not current_price:
+                return
+
+        if open_orders is None:
+            try:
+                open_orders = self.client.get_open_orders(self.symbol) or []
+            except Exception as exc:
+                logger.warning("無法獲取現有訂單: %s", exc)
+                return
+
+        active_counts = self._reconcile_grid_orders_from_list(open_orders)
+        active_buy_counts = active_counts.get('Bid', {})
+        active_sell_counts = active_counts.get('Ask', {})
+
+        # 獲取餘額（只在未提供時請求）
+        if balances is None:
+            balances = self.get_balance()
+            if not balances:
+                return
 
         base_balance = balances.get('base_available', 0)
         quote_balance = balances.get('quote_available', 0)
@@ -645,16 +763,16 @@ class GridStrategy(MarketMaker):
         refilled = 0
 
         for price in self.grid_levels:
-            if abs(price - current_price) / current_price < 0.001:
-                continue
-
             if price < current_price:
                 # 檢查是否有買單
-                if price not in self.grid_buy_orders_by_price or not self.grid_buy_orders_by_price[price]:
+                if active_buy_counts.get(price, 0) == 0:
                     # 檢查網格點位是否被鎖定（買單成交等待賣單成交）
                     if price in self.grid_level_locks:
-                        logger.debug("網格點位 %.4f 已鎖定，等待賣單 %.4f 成交，暫不補充買單",
-                                   price, self.grid_level_locks[price])
+                        logger.debug(
+                            "網格點位 %.4f 已鎖定，等待賣單 %.4f 成交，暫不補充買單",
+                            price,
+                            self.grid_level_locks[price],
+                        )
                         continue
 
                     if quote_balance >= price * self.order_quantity:
@@ -664,7 +782,7 @@ class GridStrategy(MarketMaker):
 
             elif price > current_price:
                 # 檢查是否有賣單
-                if price not in self.grid_sell_orders_by_price or not self.grid_sell_orders_by_price[price]:
+                if active_sell_counts.get(price, 0) == 0:
                     if base_balance >= self.order_quantity:
                         if self._place_grid_sell_order(price, self.order_quantity):
                             base_balance -= self.order_quantity

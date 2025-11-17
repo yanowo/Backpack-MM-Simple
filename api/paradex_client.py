@@ -182,10 +182,21 @@ class ParadexClient(BaseExchangeClient):
         return str(int.from_bytes(encoded, "big"))
 
     def _to_chain_amount(self, amount: float, decimals: int = 8) -> str:
-        """將金額轉換為鏈上格式（帶固定小數位）"""
+        """將金額轉換為鏈上格式（帶固定小數位）
+        
+        使用 Decimal 避免浮點數精度問題
+        """
         # Paradex 使用 8 位小數的整數表示
-        multiplier = 10 ** decimals
-        return str(int(float(amount) * multiplier))
+        try:
+            amount_decimal = Decimal(str(amount))
+            multiplier = Decimal(10 ** decimals)
+            chain_amount = int(amount_decimal * multiplier)
+            return str(chain_amount)
+        except (InvalidOperation, ValueError) as e:
+            logger.error(f"金額轉換失敗: {amount}, 錯誤: {e}")
+            # 回退到舊方法
+            multiplier = 10 ** decimals
+            return str(int(float(amount) * multiplier))
 
     def _build_order_message(self, order_data: Dict[str, Any], signature_timestamp: int) -> Dict[str, Any]:
         """構建訂單簽名消息（TypedData 格式）
@@ -666,21 +677,35 @@ class ParadexClient(BaseExchangeClient):
         # 生成簽名時間戳（毫秒）
         signature_timestamp = int(time.time() * 1000)
 
-        # 構建訂單數據用於簽名
-        order_data_for_signature = {
-            "market": symbol,
-            "side": side,
-            "type": order_type.upper(),
-            "size": float(size),
-        }
+        # 標準化數值（確保簽名和發送使用相同的值）
+        normalized_size = float(size)
+        normalized_price = None
 
         # 限價單需要價格
         if order_type.upper() == "LIMIT":
             price = order_details.get("price")
             if price:
-                order_data_for_signature["price"] = float(price)
+                # 使用 Decimal 確保精度一致，避免浮點數精度問題
+                try:
+                    price_decimal = Decimal(str(price))
+                    # 標準化為最多 8 位小數（Paradex 使用 8 位精度）
+                    normalized_price = float(price_decimal.quantize(Decimal('0.00000001')))
+                except (InvalidOperation, ValueError) as e:
+                    logger.error(f"無效的價格格式: {price}, 錯誤: {e}")
+                    return {"error": f"無效的價格: {price}"}
             else:
                 return {"error": "限價單缺少價格"}
+
+        # 構建訂單數據用於簽名
+        order_data_for_signature = {
+            "market": symbol,
+            "side": side,
+            "type": order_type.upper(),
+            "size": normalized_size,
+        }
+
+        if normalized_price is not None:
+            order_data_for_signature["price"] = normalized_price
 
         # 生成訂單簽名
         try:
@@ -691,32 +716,41 @@ class ParadexClient(BaseExchangeClient):
             logger.error(f"簽名異常詳情: {traceback.format_exc()}")
             return {"error": f"訂單簽名失敗: {e}"}
 
-        # 構建 API 請求 payload
+        # 構建 API 請求 payload（使用與簽名相同的標準化值）
         payload = {
             "market": symbol,
             "side": side,
             "type": order_type.upper(),
-            "size": str(size),
+            "size": str(normalized_size),
             "signature": signature,
             "signature_timestamp": signature_timestamp,
         }
 
-        # 限價單價格
-        if order_type.upper() == "LIMIT" and "price" in order_data_for_signature:
-            payload["price"] = str(order_data_for_signature["price"])
+        # 限價單價格 - 格式化為 8 位小數字符串，保留尾隨零
+        if normalized_price is not None:
+            payload["price"] = f"{normalized_price:.8f}"
+
+        # 處理 instruction（時間有效性）- 與批量下單邏輯一致
+        time_in_force = order_details.get("timeInForce", "GTC").upper()
+        post_only = order_details.get("postOnly", False)
+
+        if post_only:
+            payload["instruction"] = "POST_ONLY"
+        elif time_in_force == "IOC":
+            payload["instruction"] = "IOC"
+        else:
+            payload["instruction"] = "GTC"
 
         # 可選參數
         if "clientId" in order_details:
             payload["client_order_id"] = order_details["clientId"]
 
-        if "timeInForce" in order_details:
-            payload["time_in_force"] = order_details["timeInForce"]
-
-        if "postOnly" in order_details:
-            payload["post_only"] = order_details["postOnly"]
-
-        if "reduceOnly" in order_details:
-            payload["reduce_only"] = order_details["reduceOnly"]
+        # 處理 reduceOnly 標誌
+        flags = []
+        if order_details.get("reduceOnly"):
+            flags.append("REDUCE_ONLY")
+        if flags:
+            payload["flags"] = flags
 
         result = self.make_request(
             "POST",
@@ -755,6 +789,9 @@ class ParadexClient(BaseExchangeClient):
         for batch_start in range(0, len(orders_details), batch_size):
             batch = orders_details[batch_start:batch_start + batch_size]
 
+            # 生成簽名時間戳（毫秒）- 批量訂單中所有訂單使用相同的時間戳
+            signature_timestamp = int(time.time() * 1000)
+
             # 構建批量訂單請求
             batch_orders = []
 
@@ -785,26 +822,38 @@ class ParadexClient(BaseExchangeClient):
                     all_errors.append({"error": "缺少數量", "order": order_details})
                     continue
 
-                # 生成簽名時間戳（毫秒）
-                signature_timestamp = int(time.time() * 1000)
+                # 標準化數值（確保簽名和發送使用相同的值）
+                normalized_size = float(size)
+                normalized_price = None
+
+                # 限價單需要價格
+                if order_type.upper() == "LIMIT":
+                    price = order_details.get("price")
+                    if price:
+                        # 使用 Decimal 確保精度一致，避免浮點數精度問題
+                        try:
+                            price_decimal = Decimal(str(price))
+                            # 標準化為最多 8 位小數（Paradex 使用 8 位精度）
+                            normalized_price = float(price_decimal.quantize(Decimal('0.00000001')))
+                        except (InvalidOperation, ValueError) as e:
+                            logger.warning("跳過無效訂單: 無效的價格格式 %s, 錯誤: %s", price, e)
+                            all_errors.append({"error": f"無效的價格: {price}", "order": order_details})
+                            continue
+                    else:
+                        logger.warning("跳過無效訂單: 限價單缺少價格")
+                        all_errors.append({"error": "限價單缺少價格", "order": order_details})
+                        continue
 
                 # 構建訂單數據用於簽名
                 order_data_for_signature = {
                     "market": symbol,
                     "side": side,
                     "type": order_type.upper(),
-                    "size": float(size),
+                    "size": normalized_size,
                 }
 
-                # 限價單需要價格
-                if order_type.upper() == "LIMIT":
-                    price = order_details.get("price")
-                    if price:
-                        order_data_for_signature["price"] = float(price)
-                    else:
-                        logger.warning("跳過無效訂單: 限價單缺少價格")
-                        all_errors.append({"error": "限價單缺少價格", "order": order_details})
-                        continue
+                if normalized_price is not None:
+                    order_data_for_signature["price"] = normalized_price
 
                 # 生成訂單簽名
                 try:
@@ -814,19 +863,19 @@ class ParadexClient(BaseExchangeClient):
                     all_errors.append({"error": f"訂單簽名失敗: {e}", "order": order_details})
                     continue
 
-                # 構建單個訂單 payload
+                # 構建單個訂單 payload（使用與簽名相同的標準化值）
                 order_payload = {
                     "market": symbol,
                     "side": side,
                     "type": order_type.upper(),
-                    "size": str(size),
+                    "size": str(normalized_size),
                     "signature": signature,
                     "signature_timestamp": signature_timestamp,
                 }
 
-                # 添加價格（限價單）
-                if order_type.upper() == "LIMIT" and "price" in order_data_for_signature:
-                    order_payload["price"] = str(order_data_for_signature["price"])
+                # 添加價格（限價單）- 格式化為 8 位小數字符串，保留尾隨零
+                if normalized_price is not None:
+                    order_payload["price"] = f"{normalized_price:.8f}"
 
                 # 處理 instruction（時間有效性）
                 time_in_force = order_details.get("timeInForce", "GTC").upper()

@@ -158,6 +158,9 @@ class MarketMaker:
         self._stop_trading = False
         self.stop_reason: Optional[str] = None
 
+        # WebSocket 重連冷卻時間追蹤
+        self._last_reconnect_attempt = 0
+
         # 添加代理參數
         self.ws_proxy = ws_proxy
         # 建立WebSocket連接（僅對Backpack）
@@ -347,31 +350,33 @@ class MarketMaker:
         if self.ws is None:
             logger.info("使用 REST API 模式（無 WebSocket）")
             return
-            
+
         wait_time = 0
-        max_wait_time = 10
+        max_wait_time = 2  # 減少等待時間從 10 秒到 2 秒
+        check_interval = 0.2  # 減少檢查間隔從 0.5 秒到 0.2 秒
+
         while not self.ws.connected and wait_time < max_wait_time:
-            time.sleep(0.5)
-            wait_time += 0.5
-        
+            time.sleep(check_interval)
+            wait_time += check_interval
+
         if self.ws.connected:
             logger.info("WebSocket連接已建立，初始化數據流...")
-            
+
             # 初始化訂單簿
             orderbook_initialized = self.ws.initialize_orderbook()
-            
+
             # 訂閲深度流和行情數據
             if orderbook_initialized:
                 depth_subscribed = self.ws.subscribe_depth()
                 ticker_subscribed = self.ws.subscribe_bookTicker()
-                
+
                 if depth_subscribed and ticker_subscribed:
                     logger.info("數據流訂閲成功!")
-            
+
             # 訂閲私有訂單更新流
             self.subscribe_order_updates()
         else:
-            logger.warning(f"WebSocket連接建立超時，將在運行過程中繼續嘗試連接")
+            logger.info("WebSocket 初始連接未建立，使用 REST API 模式（WebSocket 將在後台自動重連）")
     
     def _load_trading_stats(self):
         """從數據庫加載交易統計數據"""
@@ -838,14 +843,24 @@ class MarketMaker:
                 return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
-            
+
         ws_connected = self.ws.is_connected()
-        
+
         if not ws_connected and not getattr(self.ws, 'reconnecting', False):
-            logger.warning("WebSocket連接已斷開，觸發重連...")
-            # 使用 WebSocket 自己的重連機制
-            self.ws.check_and_reconnect_if_needed()
-        
+            # 檢查上次重連嘗試的時間，避免頻繁重連
+            current_time = time.time()
+            last_reconnect_attempt = getattr(self, '_last_reconnect_attempt', 0)
+            reconnect_cooldown = 30  # 30秒冷卻時間
+
+            if current_time - last_reconnect_attempt >= reconnect_cooldown:
+                logger.warning("WebSocket連接已斷開，觸發重連...")
+                self._last_reconnect_attempt = current_time
+                # 使用 WebSocket 自己的重連機制
+                self.ws.check_and_reconnect_if_needed()
+            else:
+                remaining = int(reconnect_cooldown - (current_time - last_reconnect_attempt))
+                logger.debug(f"WebSocket 重連冷卻中，剩餘 {remaining} 秒")
+
         return self.ws.is_connected() if self.ws else False
     
     def _recreate_websocket(self):
@@ -1284,9 +1299,9 @@ class MarketMaker:
     
     def get_current_price(self):
         """獲取當前價格（優先使用WebSocket數據）"""
-        self.check_ws_connection()
+        # 只檢查連接狀態，不觸發重連（避免頻繁重連嘗試）
         price = None
-        if self.ws and self.ws.connected:
+        if self.ws and self.ws.is_connected():
             price = self.ws.get_current_price()
         
         if price is None:
@@ -1303,9 +1318,9 @@ class MarketMaker:
     
     def get_market_depth(self):
         """獲取市場深度（優先使用WebSocket數據）"""
-        self.check_ws_connection()
+        # 只檢查連接狀態，不觸發重連（避免頻繁重連嘗試）
         bid_price, ask_price = None, None
-        if self.ws and self.ws.connected:
+        if self.ws and self.ws.is_connected():
             bid_price, ask_price = self.ws.get_bid_ask()
         
         if bid_price is None or ask_price is None:

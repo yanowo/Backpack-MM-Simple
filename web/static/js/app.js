@@ -17,12 +17,27 @@ const logDisplay = document.getElementById('logDisplay');
 const marketTypeSelect = document.getElementById('market_type');
 const spotParams = document.getElementById('spotParams');
 const perpParams = document.getElementById('perpParams');
+const strategySelect = document.getElementById('strategy');
+const gridParams = document.getElementById('gridParams');
+const autoPriceRangeCheckbox = document.getElementById('auto_price_range');
+const manualPriceFields = document.getElementById('manualPriceFields');
+const manualPriceLower = document.getElementById('manualPriceLower');
+const autoPriceField = document.getElementById('autoPriceField');
+const gridTypeField = document.getElementById('gridTypeField');
+const exchangeSelect = document.getElementById('exchange');
+const spreadField = document.getElementById('spreadField');
+const maxOrdersPerpField = document.getElementById('maxOrdersPerpField');
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
     initWebSocket();
     setupEventListeners();
     loadConfig();
+
+    // 初始化表單狀態
+    adjustMarketTypeOptions();
+    toggleSpreadField();
+    toggleGridTypeField();
 });
 
 // 初始化WebSocket連接
@@ -117,18 +132,172 @@ function setupEventListeners() {
     // 市場類型切換
     marketTypeSelect.addEventListener('change', () => {
         toggleMarketTypeParams();
+        toggleGridTypeField();
+        toggleSpreadField();
+    });
+
+    // 策略切換
+    strategySelect.addEventListener('change', () => {
+        toggleStrategyParams();
+        toggleSpreadField();
+    });
+
+    // 交易所切換
+    exchangeSelect.addEventListener('change', () => {
+        // 根據交易所調整可用的市場類型選項
+        adjustMarketTypeOptions();
+    });
+
+    // 自動價格範圍切換
+    autoPriceRangeCheckbox.addEventListener('change', () => {
+        togglePriceRangeMode();
     });
 }
 
 // 切換市場類型參數顯示
 function toggleMarketTypeParams() {
     const marketType = marketTypeSelect.value;
+    const strategy = strategySelect.value;
+
+    // 預設隱藏，視情況顯示所需欄位
+    spotParams.style.display = 'none';
+    perpParams.style.display = 'none';
+
+    if (strategy === 'grid') {
+        // 現貨網格不需要額外倉位配置；永續網格要顯示倉位參數
+        if (marketType === 'perp') {
+            perpParams.style.display = 'block';
+            togglePerpFields();
+        }
+        return;
+    }
+
     if (marketType === 'spot') {
         spotParams.style.display = 'block';
-        perpParams.style.display = 'none';
     } else {
-        spotParams.style.display = 'none';
         perpParams.style.display = 'block';
+        togglePerpFields();
+    }
+}
+
+// 切換策略參數顯示
+function toggleStrategyParams() {
+    const strategy = strategySelect.value;
+    gridParams.style.display = strategy === 'grid' ? 'block' : 'none';
+
+    // 顯示正確的市場參數區塊
+    toggleMarketTypeParams();
+
+    // 更新網格類型字段的顯示
+    toggleGridTypeField();
+
+    // 更新永續合約參數欄位
+    if (marketTypeSelect.value === 'perp') {
+        togglePerpFields();
+    }
+}
+
+// 切換價格範圍模式
+function togglePriceRangeMode() {
+    const isAuto = autoPriceRangeCheckbox.checked;
+
+    if (isAuto) {
+        manualPriceFields.style.display = 'none';
+        manualPriceLower.style.display = 'none';
+        autoPriceField.style.display = 'block';
+    } else {
+        manualPriceFields.style.display = 'block';
+        manualPriceLower.style.display = 'block';
+        autoPriceField.style.display = 'none';
+    }
+}
+
+// 切換網格類型字段顯示（僅在永續合約網格時顯示）
+function toggleGridTypeField() {
+    const strategy = strategySelect.value;
+    const marketType = marketTypeSelect.value;
+
+    if (strategy === 'grid' && marketType === 'perp') {
+        gridTypeField.style.display = 'block';
+    } else {
+        gridTypeField.style.display = 'none';
+    }
+}
+
+// 根據交易所調整市場類型選項
+function adjustMarketTypeOptions() {
+    const exchange = exchangeSelect.value;
+    const currentMarketType = marketTypeSelect.value;
+
+    // 獲取市場類型的所有選項
+    const spotOption = marketTypeSelect.querySelector('option[value="spot"]');
+    const perpOption = marketTypeSelect.querySelector('option[value="perp"]');
+
+    if (exchange === 'backpack') {
+        // Backpack 支持現貨和永續合約
+        if (spotOption) {
+            spotOption.disabled = false;
+            spotOption.style.display = 'block';
+        }
+        if (perpOption) {
+            perpOption.disabled = false;
+            perpOption.style.display = 'block';
+        }
+    } else {
+        // 其他交易所（Aster、Paradex、Lighter）只支持永續合約
+        if (spotOption) {
+            spotOption.disabled = true;
+            spotOption.style.display = 'none';
+        }
+        if (perpOption) {
+            perpOption.disabled = false;
+            perpOption.style.display = 'block';
+        }
+
+        // 如果當前選擇的是現貨，自動切換到永續合約
+        if (currentMarketType === 'spot') {
+            marketTypeSelect.value = 'perp';
+            // 觸發相關更新
+            toggleMarketTypeParams();
+            toggleGridTypeField();
+            toggleSpreadField();
+        }
+    }
+}
+
+// 切換價差欄位顯示
+function toggleSpreadField() {
+    const strategy = strategySelect.value;
+    const marketType = marketTypeSelect.value;
+
+    // 網格交易不需要設置價差
+    if (strategy === 'grid') {
+        spreadField.style.display = 'none';
+        document.getElementById('spread').required = false;
+    }
+    // 永續合約對沖不需要設置價差
+    else if (strategy === 'maker_hedge' && marketType === 'perp') {
+        spreadField.style.display = 'none';
+        document.getElementById('spread').required = false;
+    }
+    // 其他情況需要設置價差
+    else {
+        spreadField.style.display = 'block';
+        document.getElementById('spread').required = true;
+    }
+}
+
+// 切換永續合約參數欄位顯示
+function togglePerpFields() {
+    const strategy = strategySelect.value;
+
+    // 永續對沖與永續網格都不需要最大訂單數
+    if (maxOrdersPerpField) {
+        if (strategy === 'maker_hedge' || strategy === 'grid') {
+            maxOrdersPerpField.style.display = 'none';
+        } else {
+            maxOrdersPerpField.style.display = 'block';
+        }
     }
 }
 
@@ -201,20 +370,61 @@ async function startBot() {
         enable_db: formData.get('enable_db') === 'on'
     };
 
-    // 根據市場類型添加額外參數
-    if (data.market_type === 'spot') {
-        data.max_orders = parseInt(document.getElementById('max_orders').value);
-        data.enable_rebalance = formData.get('enable_rebalance') === 'on';
-        data.base_asset_target = parseFloat(formData.get('base_asset_target'));
-        data.rebalance_threshold = parseFloat(formData.get('rebalance_threshold'));
+    // 根據策略類型添加額外參數
+    if (data.strategy === 'grid') {
+        // 網格策略參數
+        data.auto_price_range = formData.get('auto_price_range') === 'on';
+        data.grid_upper_price = formData.get('grid_upper_price') ? parseFloat(formData.get('grid_upper_price')) : null;
+        data.grid_lower_price = formData.get('grid_lower_price') ? parseFloat(formData.get('grid_lower_price')) : null;
+        data.grid_num = parseInt(formData.get('grid_num'));
+        data.grid_mode = formData.get('grid_mode');
+        data.price_range_percent = parseFloat(formData.get('price_range_percent'));
+
+        // 永續合約網格特有參數
+        if (data.market_type === 'perp') {
+            data.grid_type = formData.get('grid_type') || 'neutral';
+
+            const targetPositionRaw = formData.get('target_position');
+            const maxPositionRaw = formData.get('max_position');
+            const thresholdRaw = formData.get('position_threshold');
+            const skewRaw = formData.get('inventory_skew');
+            const stopLossRaw = formData.get('stop_loss');
+            const takeProfitRaw = formData.get('take_profit');
+
+            data.target_position = targetPositionRaw ? parseFloat(targetPositionRaw) : 0.0;
+            data.max_position = maxPositionRaw ? parseFloat(maxPositionRaw) : 1.0;
+            data.position_threshold = thresholdRaw ? parseFloat(thresholdRaw) : 0.1;
+            data.inventory_skew = skewRaw ? parseFloat(skewRaw) : 0.0;
+            data.stop_loss = stopLossRaw ? parseFloat(stopLossRaw) : null;
+            data.take_profit = takeProfitRaw ? parseFloat(takeProfitRaw) : null;
+        }
+
+        // 網格策略不需要 max_orders 和 spread（會使用默認值）
+        data.max_orders = 1;
+        if (!data.spread) {
+            data.spread = 0.1;
+        }
     } else {
-        data.max_orders = parseInt(document.getElementById('max_orders_perp').value);
-        data.target_position = parseFloat(formData.get('target_position'));
-        data.max_position = parseFloat(formData.get('max_position'));
-        data.position_threshold = parseFloat(formData.get('position_threshold'));
-        data.inventory_skew = parseFloat(formData.get('inventory_skew'));
-        data.stop_loss = formData.get('stop_loss') ? parseFloat(formData.get('stop_loss')) : null;
-        data.take_profit = formData.get('take_profit') ? parseFloat(formData.get('take_profit')) : null;
+        // 標準策略和對沖策略參數
+        if (data.market_type === 'spot') {
+            data.max_orders = parseInt(document.getElementById('max_orders').value);
+            data.enable_rebalance = formData.get('enable_rebalance') === 'on';
+            data.base_asset_target = parseFloat(formData.get('base_asset_target'));
+            data.rebalance_threshold = parseFloat(formData.get('rebalance_threshold'));
+        } else {
+            data.max_orders = parseInt(document.getElementById('max_orders_perp').value);
+            data.target_position = parseFloat(formData.get('target_position'));
+            data.max_position = parseFloat(formData.get('max_position'));
+            data.position_threshold = parseFloat(formData.get('position_threshold'));
+            data.inventory_skew = parseFloat(formData.get('inventory_skew'));
+            data.stop_loss = formData.get('stop_loss') ? parseFloat(formData.get('stop_loss')) : null;
+            data.take_profit = formData.get('take_profit') ? parseFloat(formData.get('take_profit')) : null;
+
+            // 永續對沖策略設置默認價差為 0.01%
+            if (data.strategy === 'maker_hedge' && !data.spread) {
+                data.spread = 0.01;
+            }
+        }
     }
 
     // 顯示加載狀態
@@ -392,6 +602,48 @@ function updateStatsDisplay(stats) {
     const takerTotal = (stats.taker_buy_volume || 0) + (stats.taker_sell_volume || 0);
     updateStatValue('statMakerVolume', makerTotal.toFixed(4));
     updateStatValue('statTakerVolume', takerTotal.toFixed(4));
+
+    // 更新網格策略統計（如果有）
+    const gridStatsSection = document.getElementById('gridStatsSection');
+    if (stats.grid_profit !== undefined || stats.grid_count !== undefined) {
+        // 顯示網格統計區域
+        gridStatsSection.style.display = 'block';
+
+        // 更新網格利潤
+        if (stats.grid_profit !== undefined && stats.grid_profit !== null) {
+            updateStatValue('statGridProfit', formatPnL(stats.grid_profit), stats.grid_profit);
+        } else {
+            updateStatValue('statGridProfit', '--');
+        }
+
+        // 更新網格數量
+        updateStatValue('statGridCount', stats.grid_count || '--');
+
+        // 更新價格區間
+        if (stats.grid_upper_price !== undefined && stats.grid_lower_price !== undefined) {
+            const priceRange = `${stats.grid_lower_price.toFixed(4)} ~ ${stats.grid_upper_price.toFixed(4)}`;
+            updateStatValue('statGridPriceRange', priceRange);
+        } else {
+            updateStatValue('statGridPriceRange', '--');
+        }
+
+        // 更新活躍訂單數
+        updateStatValue('statActiveGridOrders', stats.active_grid_orders || '0');
+
+        // 更新買入/賣出成交次數
+        let filledText = '--';
+        if (stats.grid_buy_filled !== undefined && stats.grid_sell_filled !== undefined) {
+            // 現貨網格
+            filledText = `${stats.grid_buy_filled || 0} / ${stats.grid_sell_filled || 0}`;
+        } else if (stats.grid_long_filled !== undefined && stats.grid_short_filled !== undefined) {
+            // 永續合約網格
+            filledText = `${stats.grid_long_filled || 0} / ${stats.grid_short_filled || 0}`;
+        }
+        updateStatValue('statGridFilled', filledText);
+    } else {
+        // 隱藏網格統計區域
+        gridStatsSection.style.display = 'none';
+    }
 }
 
 // 更新單個統計項

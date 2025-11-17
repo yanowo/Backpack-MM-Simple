@@ -15,6 +15,8 @@ from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
 from strategies.maker_taker_hedge import MakerTakerHedgeStrategy
+from strategies.grid_strategy import GridStrategy
+from strategies.perp_grid_strategy import PerpGridStrategy
 from utils.helpers import calculate_volatility
 from database.db import Database
 from config import API_KEY, SECRET_KEY, ENABLE_DATABASE
@@ -600,13 +602,13 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
         market_type = "spot"
 
     # 策略選擇（支援拼寫糾正）
-    strategy_input = input("請選擇策略 (standard/maker_hedge，默認 standard): ").strip().lower()
+    strategy_input = input("請選擇策略 (standard/maker_hedge/grid，默認 standard): ").strip().lower()
 
     # 處理常見拼寫錯誤
     if strategy_input in ("marker_hedge", "make_hedge", "makertaker", "maker-hedge"):
         print(f"提示: 已自動糾正 '{strategy_input}' -> 'maker_hedge'")
         strategy = "maker_hedge"
-    elif strategy_input in ("standard", "maker_hedge", ""):
+    elif strategy_input in ("standard", "maker_hedge", "grid", ""):
         strategy = strategy_input if strategy_input else "standard"
     else:
         print(f"警告: 不識別的策略 '{strategy_input}'，使用默認策略 'standard'")
@@ -630,24 +632,81 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
     else:
         print(f"已選擇永續合約市場 {market_desc}")
 
-    spread_percentage = float(input("請輸入價差百分比 (例如: 0.5 表示0.5%): "))
-    quantity_input = input("請輸入每個訂單的數量 (留空則自動根據餘額計算): ")
-    quantity = float(quantity_input) if quantity_input.strip() else None
-    max_orders = int(input("請輸入每側(買/賣)最大訂單數 (例如: 3): "))
+    # 根據策略類型獲取不同的參數
+    if strategy == "grid":
+        # 網格策略參數
+        print("\n=== 網格策略參數配置 ===")
+
+        # 自動價格範圍選項
+        auto_range_input = input("是否自動設置價格範圍? (y/n，默認 n): ").strip().lower()
+        auto_price_range = auto_range_input in ('y', 'yes', '是')
+
+        grid_upper_price = None
+        grid_lower_price = None
+        price_range_percent = 5.0
+
+        if not auto_price_range:
+            # 手動設置價格範圍
+            grid_upper_input = input("請輸入網格上限價格: ").strip()
+            grid_lower_input = input("請輸入網格下限價格: ").strip()
+
+            if grid_upper_input and grid_lower_input:
+                grid_upper_price = float(grid_upper_input)
+                grid_lower_price = float(grid_lower_input)
+            else:
+                print("警告: 價格範圍未設置，將自動計算")
+                auto_price_range = True
+
+        if auto_price_range:
+            # 自動模式：設置價格範圍百分比
+            range_input = input("請輸入價格範圍百分比 (默認 5，表示當前價格 ±5%): ").strip()
+            price_range_percent = float(range_input) if range_input else 5.0
+
+        # 網格數量
+        grid_num_input = input("請輸入網格數量 (默認 10): ").strip()
+        grid_num = int(grid_num_input) if grid_num_input else 10
+
+        # 網格模式
+        grid_mode_input = input("請選擇網格模式 (arithmetic/geometric，默認 arithmetic): ").strip().lower()
+        grid_mode = grid_mode_input if grid_mode_input in ('arithmetic', 'geometric') else 'arithmetic'
+
+        # 每格訂單數量
+        quantity_input = input("請輸入每格訂單數量 (留空則使用最小訂單量): ").strip()
+        quantity = float(quantity_input) if quantity_input else None
+
+        # 永續合約網格特有參數
+        if market_type == "perp":
+            grid_type_input = input("請選擇網格類型 (neutral/long/short，默認 neutral): ").strip().lower()
+            grid_type = grid_type_input if grid_type_input in ('neutral', 'long', 'short') else 'neutral'
+            print(f"已選擇網格類型: {grid_type}")
+        else:
+            grid_type = None
+
+        # 標準策略的參數（網格不使用）
+        spread_percentage = 0.1
+        max_orders = 1
+    else:
+        # 標準策略和對沖策略參數
+        spread_percentage = float(input("請輸入價差百分比 (例如: 0.5 表示0.5%): "))
+        quantity_input = input("請輸入每個訂單的數量 (留空則自動根據餘額計算): ")
+        quantity = float(quantity_input) if quantity_input.strip() else None
+        max_orders = int(input("請輸入每側(買/賣)最大訂單數 (例如: 3): "))
+
+        # 網格策略參數（標準策略不使用）
+        grid_upper_price = None
+        grid_lower_price = None
+        grid_num = 10
+        grid_mode = 'arithmetic'
+        auto_price_range = False
+        price_range_percent = 5.0
+        grid_type = None
 
     if market_type == "perp":
-        try:
-            target_position_input = input("請輸入目標持倉量 (絕對值, 例如 1.0, 默認 1): ").strip()
-            target_position = float(target_position_input) if target_position_input else 1.0
-
+        if strategy == "grid":
+            # 網格策略使用簡化的持倉參數
+            print("\n=== 永續合約網格持倉參數 ===")
             max_position_input = input("最大允許持倉量(絕對值) (默認 1.0): ").strip()
             max_position = float(max_position_input) if max_position_input else 1.0
-
-            threshold_input = input("倉位調整觸發值 (默認 0.1): ").strip()
-            position_threshold = float(threshold_input) if threshold_input else 0.1
-
-            skew_input = input("倉位偏移調整係數 (0-1，默認 0.0): ").strip()
-            inventory_skew = float(skew_input) if skew_input else 0.0
 
             stop_loss_input = input("未實現止損閾值 (報價資產金額，支援輸入負值，例如 -25，留空不啟用): ").strip()
             stop_loss = float(stop_loss_input) if stop_loss_input else None
@@ -655,26 +714,61 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
             take_profit_input = input("未實現止盈閾值 (報價資產金額，留空不啟用): ").strip()
             take_profit = float(take_profit_input) if take_profit_input else None
 
+            # 網格策略的默認值
+            target_position = 0.0
+            position_threshold = 0.1
+            inventory_skew = 0.0
+
             if max_position <= 0:
-                raise ValueError("最大持倉量必須大於0")
-            if position_threshold <= 0:
-                raise ValueError("倉位調整觸發值必須大於0")
-            if not 0 <= inventory_skew <= 1:
-                raise ValueError("倉位偏移調整係數需介於0-1之間")
-            if stop_loss is not None:
-                if stop_loss >= 0:
-                    raise ValueError("止損閾值必須輸入負值 (例如 -25)")
+                print("錯誤: 最大持倉量必須大於0")
+                return
+            if stop_loss is not None and stop_loss >= 0:
+                print("錯誤: 止損閾值必須輸入負值 (例如 -25)")
+                return
             if take_profit is not None and take_profit <= 0:
-                raise ValueError("止盈閾值必須大於0")
-        except ValueError as exc:
-            print(f"倉位參數輸入錯誤: {exc}")
-            return
+                print("錯誤: 止盈閾值必須大於0")
+                return
+        else:
+            # 標準策略和對沖策略的持倉參數
+            try:
+                target_position_input = input("請輸入目標持倉量 (絕對值, 例如 1.0, 默認 1): ").strip()
+                target_position = float(target_position_input) if target_position_input else 1.0
+
+                max_position_input = input("最大允許持倉量(絕對值) (默認 1.0): ").strip()
+                max_position = float(max_position_input) if max_position_input else 1.0
+
+                threshold_input = input("倉位調整觸發值 (默認 0.1): ").strip()
+                position_threshold = float(threshold_input) if threshold_input else 0.1
+
+                skew_input = input("倉位偏移調整係數 (0-1，默認 0.0): ").strip()
+                inventory_skew = float(skew_input) if skew_input else 0.0
+
+                stop_loss_input = input("未實現止損閾值 (報價資產金額，支援輸入負值，例如 -25，留空不啟用): ").strip()
+                stop_loss = float(stop_loss_input) if stop_loss_input else None
+
+                take_profit_input = input("未實現止盈閾值 (報價資產金額，留空不啟用): ").strip()
+                take_profit = float(take_profit_input) if take_profit_input else None
+
+                if max_position <= 0:
+                    raise ValueError("最大持倉量必須大於0")
+                if position_threshold <= 0:
+                    raise ValueError("倉位調整觸發值必須大於0")
+                if not 0 <= inventory_skew <= 1:
+                    raise ValueError("倉位偏移調整係數需介於0-1之間")
+                if stop_loss is not None:
+                    if stop_loss >= 0:
+                        raise ValueError("止損閾值必須輸入負值 (例如 -25)")
+                if take_profit is not None and take_profit <= 0:
+                    raise ValueError("止盈閾值必須大於0")
+            except ValueError as exc:
+                print(f"倉位參數輸入錯誤: {exc}")
+                return
 
         enable_rebalance = False
         base_asset_target_percentage = 0.0
         rebalance_threshold = 0.0
     else:
-        if strategy == "maker_hedge":
+        if strategy in ("maker_hedge", "grid"):
             enable_rebalance = False
             base_asset_target_percentage = 0.0
             rebalance_threshold = 0.0
@@ -703,7 +797,34 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
 		 
 
         if market_type == "perp":
-            if strategy == "maker_hedge":
+            if strategy == "grid":
+                # 永續合約網格策略
+                market_maker = PerpGridStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    grid_upper_price=grid_upper_price,
+                    grid_lower_price=grid_lower_price,
+                    grid_num=grid_num,
+                    order_quantity=quantity,
+                    auto_price_range=auto_price_range,
+                    price_range_percent=price_range_percent,
+                    grid_mode=grid_mode,
+                    grid_type=grid_type,
+                    target_position=target_position,
+                    max_position=max_position,
+                    position_threshold=position_threshold,
+                    inventory_skew=inventory_skew,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=USE_DATABASE,
+                    db_instance=db if USE_DATABASE else None
+                )
+            elif strategy == "maker_hedge":
+                # 永續合約對沖策略
                 market_maker = MakerTakerHedgeStrategy(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -724,6 +845,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     market_type="perp"
                 )
             else:
+                # 永續合約標準策略
                 market_maker = PerpetualMarketMaker(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -744,7 +866,27 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     enable_database=USE_DATABASE
                 )
         else:
-            if strategy == "maker_hedge":
+            if strategy == "grid":
+                # 現貨網格策略
+                market_maker = GridStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    grid_upper_price=grid_upper_price,
+                    grid_lower_price=grid_lower_price,
+                    grid_num=grid_num,
+                    order_quantity=quantity,
+                    auto_price_range=auto_price_range,
+                    price_range_percent=price_range_percent,
+                    grid_mode=grid_mode,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=USE_DATABASE,
+                    db_instance=db if USE_DATABASE else None
+                )
+            elif strategy == "maker_hedge":
+                # 現貨對沖策略
                 market_maker = MakerTakerHedgeStrategy(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -759,6 +901,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     market_type="spot"
                 )
             else:
+                # 現貨標準策略
                 market_maker = MarketMaker(
                     api_key=api_key,
                     secret_key=secret_key,

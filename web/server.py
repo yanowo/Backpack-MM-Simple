@@ -9,6 +9,7 @@ import os
 import sys
 import traceback
 import time
+import socket
 from typing import Optional, Dict, Any
 from datetime import datetime
 
@@ -55,6 +56,13 @@ stats_update_running = False
 # 保留的最後統計數據（停止時不清除，啟動時才清除）
 last_stats: Dict[str, Any] = {}
 
+# 餘額緩存（避免頻繁查詢）
+balance_cache: Dict[str, Any] = {
+    'data': None,
+    'timestamp': 0,
+    'update_interval': 60  # 默認60秒更新一次餘額
+}
+
 
 @app.route('/')
 def index():
@@ -71,14 +79,16 @@ def get_status():
 @app.route('/api/start', methods=['POST'])
 def start_bot():
     """啟動做市機器人"""
-    global current_strategy, strategy_thread, bot_status, last_stats
+    global current_strategy, strategy_thread, bot_status, last_stats, balance_cache
 
     if bot_status['running']:
         return jsonify({'success': False, 'message': '機器人已在運行中'}), 400
 
-    # 啟動新機器人時清除舊的統計數據
+    # 啟動新機器人時清除舊的統計數據和餘額緩存
     last_stats = {}
     bot_status['stats'] = {}
+    balance_cache['data'] = None
+    balance_cache['timestamp'] = 0
 
     try:
         data = request.json
@@ -194,12 +204,48 @@ def start_bot():
         base_asset_target = float(data.get('base_asset_target', 30.0))
         rebalance_threshold = float(data.get('rebalance_threshold', 15.0))
 
+        # 網格策略參數
+        grid_upper_price = float(data['grid_upper_price']) if data.get('grid_upper_price') else None
+        grid_lower_price = float(data['grid_lower_price']) if data.get('grid_lower_price') else None
+        grid_num = int(data.get('grid_num', 10))
+        grid_mode = data.get('grid_mode', 'arithmetic')
+        auto_price_range = data.get('auto_price_range', False)
+        price_range_percent = float(data.get('price_range_percent', 5.0))
+        grid_type = data.get('grid_type', 'neutral')  # 永續合約網格類型
+
         # 創建策略實例
         if market_type == 'perp':
             from strategies.perp_market_maker import PerpetualMarketMaker
             from strategies.maker_taker_hedge import MakerTakerHedgeStrategy
+            from strategies.perp_grid_strategy import PerpGridStrategy
 
-            if strategy_name == 'maker_hedge':
+            if strategy_name == 'grid':
+                # 永續合約網格策略
+                current_strategy = PerpGridStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    grid_upper_price=grid_upper_price,
+                    grid_lower_price=grid_lower_price,
+                    grid_num=grid_num,
+                    order_quantity=quantity,
+                    auto_price_range=auto_price_range,
+                    price_range_percent=price_range_percent,
+                    grid_mode=grid_mode,
+                    grid_type=grid_type,
+                    target_position=target_position,
+                    max_position=max_position,
+                    position_threshold=position_threshold,
+                    inventory_skew=inventory_skew,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=enable_db
+                )
+            elif strategy_name == 'maker_hedge':
+                # 永續合約對沖策略
                 current_strategy = MakerTakerHedgeStrategy(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -219,6 +265,7 @@ def start_bot():
                     market_type='perp'
                 )
             else:
+                # 永續合約標準策略
                 current_strategy = PerpetualMarketMaker(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -240,8 +287,28 @@ def start_bot():
         else:
             from strategies.market_maker import MarketMaker
             from strategies.maker_taker_hedge import MakerTakerHedgeStrategy
+            from strategies.grid_strategy import GridStrategy
 
-            if strategy_name == 'maker_hedge':
+            if strategy_name == 'grid':
+                # 現貨網格策略
+                current_strategy = GridStrategy(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    symbol=symbol,
+                    grid_upper_price=grid_upper_price,
+                    grid_lower_price=grid_lower_price,
+                    grid_num=grid_num,
+                    order_quantity=quantity,
+                    auto_price_range=auto_price_range,
+                    price_range_percent=price_range_percent,
+                    grid_mode=grid_mode,
+                    ws_proxy=ws_proxy,
+                    exchange=exchange,
+                    exchange_config=exchange_config,
+                    enable_database=enable_db
+                )
+            elif strategy_name == 'maker_hedge':
+                # 現貨對沖策略
                 current_strategy = MakerTakerHedgeStrategy(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -255,6 +322,7 @@ def start_bot():
                     market_type='spot'
                 )
             else:
+                # 現貨標準策略
                 current_strategy = MarketMaker(
                     api_key=api_key,
                     secret_key=secret_key,
@@ -379,7 +447,7 @@ def get_config():
     return jsonify({
         'exchanges': ['backpack', 'aster', 'paradex'],
         'market_types': ['spot', 'perp'],
-        'strategies': ['standard', 'maker_hedge'],
+        'strategies': ['standard', 'maker_hedge', 'grid'],
         'env_configured': {
             'backpack': bool(os.getenv('BACKPACK_KEY') and os.getenv('BACKPACK_SECRET')),
             'aster': bool(os.getenv('ASTER_API_KEY') and os.getenv('ASTER_SECRET_KEY')),
@@ -413,7 +481,7 @@ def handle_ping():
 
 def collect_strategy_stats():
     """收集策略統計數據"""
-    global current_strategy, last_stats
+    global current_strategy, last_stats, balance_cache
 
     if not current_strategy:
         # 返回保留的最後統計數據
@@ -427,98 +495,161 @@ def collect_strategy_stats():
             'quote_asset': current_strategy.quote_asset,
         }
 
-        # 獲取餘額 - 只獲取報價資產（USDT/USDC/USD）
-        try:
-            # 獲取客户端實例
-            client = current_strategy.client if hasattr(current_strategy, 'client') else None
-
-            if client:
-                # 獲取完整餘額信息
-                balances = client.get_balance()
-
-                # 只初始化報價資產餘額變量
-                quote_balance = 0.0
-
-                # 檢查是否有錯誤
-                has_error = isinstance(balances, dict) and "error" in balances and balances.get("error")
-
-                if not has_error and isinstance(balances, dict):
-                    # 確定報價資產的鍵名（處理不同交易所的命名差異）
-                    quote_asset_key = current_strategy.quote_asset
-
-                    # Paradex 特殊處理：將 USD 映射到 USDC
-                    if current_strategy.exchange.lower() == 'paradex':
-                        if quote_asset_key == 'USD' and 'USDC' in balances:
-                            logger.debug(f"Paradex 資產映射: {quote_asset_key} -> USDC")
-                            quote_asset_key = 'USDC'
-
-                    # Lighter 特殊處理：統一使用 USDC（因為返回了別名）
-                    if current_strategy.exchange.lower() == 'lighter':
-                        # Lighter 返回 USDC/USD/USDT 三個別名，優先使用 USDC
-                        if 'USDC' in balances:
-                            logger.debug(f"Lighter 使用 USDC 作為報價資產 (原始: {quote_asset_key})")
-                            quote_asset_key = 'USDC'
-
-                    # 嘗試多個可能的報價資產名稱（USDT, USDC, USD）
-                    possible_quote_keys = [quote_asset_key]
-                    if quote_asset_key not in ['USDT', 'USDC', 'USD']:
-                        possible_quote_keys.extend(['USDC', 'USDT', 'USD'])
-
-                    # 獲取報價資產餘額
-                    for key in possible_quote_keys:
-                        if key in balances:
-                            quote_info = balances[key]
-                            try:
-                                if isinstance(quote_info, dict):
-                                    # 字典格式：{available: "xxx", locked: "xxx", total: "xxx"}
-                                    # 優先使用 available，其次 total
-                                    available_value = quote_info.get('available', quote_info.get('total', 0))
-                                    if available_value not in (None, ''):
-                                        quote_balance = float(available_value)
-                                    else:
-                                        quote_balance = 0.0
-                                else:
-                                    # 直接是數值
-                                    if quote_info not in (None, ''):
-                                        quote_balance = float(quote_info)
-                                    else:
-                                        quote_balance = 0.0
-
-                                logger.debug(f"[{current_strategy.exchange}] 報價資產 {key} 餘額: {quote_balance:.2f}")
-                                break  # 找到就退出循環
-                            except (ValueError, TypeError) as e:
-                                logger.error(f"轉換報價資產餘額失敗: {e}, quote_info={quote_info}")
-                                continue
-                    else:
-                        logger.error(f"[{current_strategy.exchange}] 未找到報價資產餘額，嘗試的鍵: {possible_quote_keys}")
-                        quote_balance = 0.0
-                else:
-                    if has_error:
-                        logger.error(f"[{current_strategy.exchange}] 獲取餘額返回錯誤: {balances.get('error')}")
-                    else:
-                        logger.error(f"[{current_strategy.exchange}] 獲取餘額返回格式不正確: type={type(balances)}")
-
-                # 設置統計數據（不再獲取基礎資產，總餘額直接使用報價資產餘額）
-                stats['base_balance'] = 0.0  # 不再顯示基礎資產
-                stats['quote_balance'] = round(quote_balance, 2)
-                stats['total_balance_usd'] = round(quote_balance, 2)  # 總餘額就是報價資產餘額
+        # 獲取餘額 - 使用緩存機制，根據策略的更新週期來控制
+        current_time = time.time()
+        should_update_balance = False
+        
+        # 如果有緩存且還在有效期內，使用緩存
+        if balance_cache['data'] is not None:
+            elapsed = current_time - balance_cache['timestamp']
+            
+            # 獲取策略的更新間隔（如果有的話）
+            strategy_interval = getattr(current_strategy, 'interval_seconds', 60)
+            balance_cache['update_interval'] = max(strategy_interval, 30)  # 最少30秒
+            
+            if elapsed < balance_cache['update_interval']:
+                # 使用緩存的餘額數據
+                stats.update(balance_cache['data'])
+                logger.debug(f"使用緩存的餘額數據（{elapsed:.1f}s 前更新，間隔{balance_cache['update_interval']}s）")
             else:
-                # 如果沒有客户端，使用原有方法獲取報價資產
-                quote_balance_result = current_strategy.get_asset_balance(current_strategy.quote_asset)
+                should_update_balance = True
+        else:
+            # 首次查詢
+            should_update_balance = True
+        
+        # 需要更新餘額
+        if should_update_balance:
+            try:
+                # 獲取客户端實例
+                client = current_strategy.client if hasattr(current_strategy, 'client') else None
 
-                # 處理可能返回元組的情況
-                quote_balance = quote_balance_result[0] if isinstance(quote_balance_result, tuple) else quote_balance_result
+                balance_data = {}
 
-                stats['base_balance'] = 0.0  # 不再顯示基礎資產
-                stats['quote_balance'] = round(float(quote_balance), 2)
-                stats['total_balance_usd'] = round(float(quote_balance), 2)
+                if client:
+                    # 獲取普通餘額
+                    balances = client.get_balance()
 
-        except Exception as e:
-            logger.error(f"獲取餘額時出錯: {e}")
-            traceback.print_exc()
-            stats['base_balance'] = 0.0
-            stats['quote_balance'] = 0.0
-            stats['total_balance_usd'] = 0.0
+                    # 初始化報價資產餘額變量
+                    quote_balance = 0.0
+                    quote_collateral_balance = 0.0
+
+                    # 檢查是否有錯誤
+                    has_error = isinstance(balances, dict) and "error" in balances and balances.get("error")
+
+                    if not has_error and isinstance(balances, dict):
+                        # 確定報價資產的鍵名（處理不同交易所的命名差異）
+                        quote_asset_key = current_strategy.quote_asset
+
+                        # Paradex 特殊處理：將 USD 映射到 USDC
+                        if current_strategy.exchange.lower() == 'paradex':
+                            if quote_asset_key == 'USD' and 'USDC' in balances:
+                                quote_asset_key = 'USDC'
+
+                        # Lighter 特殊處理：統一使用 USDC（因為返回了別名）
+                        if current_strategy.exchange.lower() == 'lighter':
+                            if 'USDC' in balances:
+                                quote_asset_key = 'USDC'
+
+                        # 嘗試多個可能的報價資產名稱（USDT, USDC, USD）
+                        possible_quote_keys = [quote_asset_key]
+                        if quote_asset_key not in ['USDT', 'USDC', 'USD']:
+                            possible_quote_keys.extend(['USDC', 'USDT', 'USD'])
+
+                        # 獲取普通餘額中的報價資產
+                        for key in possible_quote_keys:
+                            if key in balances:
+                                quote_info = balances[key]
+                                try:
+                                    if isinstance(quote_info, dict):
+                                        # 字典格式：{available: "xxx", locked: "xxx", total: "xxx"}
+                                        # 優先使用 available，其次 total
+                                        available_value = quote_info.get('available', quote_info.get('total', 0))
+                                        if available_value not in (None, ''):
+                                            quote_balance = float(available_value)
+                                        else:
+                                            quote_balance = 0.0
+                                    else:
+                                        # 直接是數值
+                                        if quote_info not in (None, ''):
+                                            quote_balance = float(quote_info)
+                                        else:
+                                            quote_balance = 0.0
+
+                                    break  # 找到就退出循環
+                                except (ValueError, TypeError) as e:
+                                    logger.error(f"轉換報價資產餘額失敗: {e}")
+                                    continue
+                        else:
+                            quote_balance = 0.0
+
+                        # 對於 Backpack，還需要獲取抵押品餘額
+                        if current_strategy.exchange.lower() == 'backpack':
+                            try:
+                                collateral = client.get_collateral()
+                                if isinstance(collateral, dict) and "error" in collateral:
+                                    logger.warning(f"獲取 Backpack 抵押品餘額失敗: {collateral.get('error')}")
+                                elif isinstance(collateral, dict):
+                                    collateral_assets = collateral.get('assets') or collateral.get('collateral', [])
+
+                                    if collateral_assets:
+                                        # 遍歷抵押品資產，查找報價資產
+                                        for item in collateral_assets:
+                                            symbol = item.get('symbol', '')
+                                            if symbol in possible_quote_keys:
+                                                try:
+                                                    # 使用 totalQuantity（包含借貸中的資產）
+                                                    total_quantity = float(item.get('totalQuantity', 0))
+                                                    if total_quantity > 0:
+                                                        quote_collateral_balance += total_quantity
+                                                except (ValueError, TypeError) as e:
+                                                    logger.error(f"轉換抵押品餘額失敗: {e}")
+                            except Exception as e:
+                                logger.warning(f"獲取 Backpack 抵押品餘額時出錯: {e}")
+
+                    else:
+                        if has_error:
+                            logger.error(f"[{current_strategy.exchange}] 獲取餘額返回錯誤: {balances.get('error')}")
+                        else:
+                            logger.error(f"[{current_strategy.exchange}] 獲取餘額返回格式不正確: type={type(balances)}")
+
+                    # 計算總餘額（普通餘額 + 抵押品餘額）
+                    total_quote_balance = quote_balance + quote_collateral_balance
+
+                    logger.info(f"[{current_strategy.exchange}] 報價資產總餘額: 普通={quote_balance:.2f}, 抵押品={quote_collateral_balance:.2f}, 總計={total_quote_balance:.2f}")
+
+                    # 設置統計數據
+                    balance_data['base_balance'] = 0.0  # 不再顯示基礎資產
+                    balance_data['quote_balance'] = round(total_quote_balance, 2)
+                    balance_data['total_balance_usd'] = round(total_quote_balance, 2)  # 總餘額包含普通和抵押品
+                else:
+                    # 如果沒有客户端，使用原有方法獲取報價資產
+                    quote_balance_result = current_strategy.get_asset_balance(current_strategy.quote_asset)
+
+                    # 處理可能返回元組的情況
+                    quote_balance = quote_balance_result[0] if isinstance(quote_balance_result, tuple) else quote_balance_result
+
+                    balance_data['base_balance'] = 0.0  # 不再顯示基礎資產
+                    balance_data['quote_balance'] = round(float(quote_balance), 2)
+                    balance_data['total_balance_usd'] = round(float(quote_balance), 2)
+
+                # 更新緩存
+                balance_cache['data'] = balance_data
+                balance_cache['timestamp'] = current_time
+                
+                # 應用到統計數據
+                stats.update(balance_data)
+                
+            except Exception as e:
+                logger.error(f"獲取餘額時出錯: {e}")
+                traceback.print_exc()
+                balance_data = {
+                    'base_balance': 0.0,
+                    'quote_balance': 0.0,
+                    'total_balance_usd': 0.0
+                }
+                balance_cache['data'] = balance_data
+                balance_cache['timestamp'] = current_time
+                stats.update(balance_data)
 
         # 獲取當前價格
         try:
@@ -667,6 +798,21 @@ def collect_strategy_stats():
             stats['runtime_seconds'] = 0
             stats['runtime_formatted'] = '00:00:00'
 
+        # 網格策略特有的統計數據
+        if hasattr(current_strategy, 'grid_levels'):
+            stats['grid_profit'] = stats.get('realized_pnl', 0)
+            stats['grid_buy_filled'] = len(current_strategy.session_buy_trades)
+            stats['grid_sell_filled'] = len(current_strategy.session_sell_trades)
+            stats['grid_count'] = len(current_strategy.grid_levels)
+
+            # 添加網格價格區間
+            if hasattr(current_strategy, 'grid_upper_price') and hasattr(current_strategy, 'grid_lower_price'):
+                stats['grid_upper_price'] = current_strategy.grid_upper_price
+                stats['grid_lower_price'] = current_strategy.grid_lower_price
+
+            if hasattr(current_strategy, 'grid_orders_by_id'):
+                stats['active_grid_orders'] = len(current_strategy.grid_orders_by_id)
+
         return stats
 
     except Exception as e:
@@ -729,11 +875,53 @@ def broadcast_status_update(data: Dict[str, Any]):
     socketio.emit('status_update', data)
 
 
+def is_port_available(host: str, port: int) -> bool:
+    """檢查端口是否可用"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, port))
+            return True
+    except (OSError, socket.error) as e:
+        logger.debug(f"端口 {port} 不可用: {e}")
+        return False
+
+
+def find_available_port(host: str, start_port: int = 5001, end_port: int = 6000) -> Optional[int]:
+    """在指定範圍內查找可用端口"""
+    for port in range(start_port, end_port + 1):
+        if is_port_available(host, port):
+            return port
+    return None
+
+
 def run_server(host='0.0.0.0', port=5000, debug=False):
     """運行Web服務器"""
+    # 從 .env 讀取配置
+    web_host = os.getenv('WEB_HOST', '127.0.0.1')
+    web_port = int(os.getenv('WEB_PORT', '5000'))
+    web_debug = os.getenv('WEB_DEBUG', 'false').lower() in ('true', '1', 'yes')
+
+    # 使用環境變量的配置（如果有的話）
+    host = web_host if web_host else host
+    port = web_port if web_port else port
+    debug = web_debug
+
+    # 檢查端口是否可用
+    if not is_port_available(host, port):
+        logger.warning(f"端口 {port} 已被占用，正在尋找可用端口...")
+        new_port = find_available_port(host, 5001, 6000)
+
+        if new_port:
+            logger.info(f"找到可用端口: {new_port}")
+            port = new_port
+        else:
+            logger.error("無法在 5001-6000 範圍內找到可用端口，服務器啟動失敗")
+            return
+
     logger.info(f"啟動Web服務器於 http://{host}:{port}")
+    logger.info(f"調試模式: {'開啟' if debug else '關閉'}")
     socketio.run(app, host=host, port=port, debug=debug, allow_unsafe_werkzeug=True)
 
 
 if __name__ == '__main__':
-    run_server(debug=True)
+    run_server()

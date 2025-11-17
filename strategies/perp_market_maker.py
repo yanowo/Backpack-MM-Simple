@@ -234,10 +234,18 @@ class PerpetualMarketMaker(MarketMaker):
         unmatched_notional = sum(price * quantity for price, quantity in sell_queue)
         return unmatched_notional / unmatched_quantity
 
-    def _update_position_state(self) -> None:
-        """更新倉位相關統計。"""
+    def _update_position_state(self, current_price: Optional[float] = None) -> None:
+        """更新倉位相關統計。
+        
+        Args:
+            current_price: 可選的當前價格，如果提供則避免重複API請求
+        """
         net = self.get_net_position()  # 現在這會從API獲取實際倉位
-        current_price = self.get_current_price()
+        
+        # 優化：如果外部已經提供了價格，就不再重複請求
+        if current_price is None:
+            current_price = self.get_current_price()
+        
         direction = "FLAT"
         avg_entry = 0.0
         unrealized = 0.0
@@ -331,7 +339,11 @@ class PerpetualMarketMaker(MarketMaker):
         
         # 如果API未實現盈虧為0但有倉位，手動計算
         if unrealized == 0.0 and net != 0.0:
-            current_price = self.get_current_price()
+            # 優化：從 position_state 中獲取已緩存的價格，避免重複請求
+            current_price = float(position_state.get("current_price", 0.0))
+            if not current_price:
+                current_price = self.get_current_price()
+            
             entry_price = float(position_state.get("avg_entry", 0.0))
             
             if current_price and entry_price:
@@ -400,6 +412,7 @@ class PerpetualMarketMaker(MarketMaker):
         order_type: str = "Limit",
         reduce_only: bool = False,
         time_in_force: str = "GTC",
+        post_only: bool = False,
         client_id: Optional[str] = None,
     ) -> Dict:
         """提交開倉或平倉訂單。"""
@@ -432,6 +445,9 @@ class PerpetualMarketMaker(MarketMaker):
                 raise ValueError("Limit 訂單需要提供價格")
             price_value = round_to_tick_size(price, self.tick_size)
             order_details["price"] = str(price_value)
+            # 添加 post_only 參數
+            if post_only:
+                order_details["postOnly"] = True
         else:
             # 使用當前深度推估價格方便記錄
             bid_price, ask_price = self.get_market_depth()
@@ -470,6 +486,7 @@ class PerpetualMarketMaker(MarketMaker):
         price: Optional[float] = None,
         order_type: str = "Limit",
         reduce_only: bool = False,
+        post_only: bool = False,
         **kwargs,
     ) -> Dict:
         """開啟或增加多頭倉位。"""
@@ -479,6 +496,7 @@ class PerpetualMarketMaker(MarketMaker):
             price=price,
             order_type=order_type,
             reduce_only=reduce_only,
+            post_only=post_only,
             **kwargs,
         )
 
@@ -488,6 +506,7 @@ class PerpetualMarketMaker(MarketMaker):
         price: Optional[float] = None,
         order_type: str = "Limit",
         reduce_only: bool = False,
+        post_only: bool = False,
         **kwargs,
     ) -> Dict:
         """開啟或增加空頭倉位。"""
@@ -497,6 +516,7 @@ class PerpetualMarketMaker(MarketMaker):
             price=price,
             order_type=order_type,
             reduce_only=reduce_only,
+            post_only=post_only,
             **kwargs,
         )
 
@@ -652,35 +672,55 @@ class PerpetualMarketMaker(MarketMaker):
     # 報價調整 (核心修改)
     # ------------------------------------------------------------------
     def calculate_prices(self):  # type: ignore[override]
-        """計算買賣訂單價格，並根據淨倉位進行偏移以控制方向風險。"""
+        """計算買賣訂單價格，並根據淨倉位進行偏移以控制方向風險。
+        
+        優化：減少API請求次數，避免 rate limit
+        - 使用父類已獲取的 market depth 數據
+        - 只在需要時才獲取額外的倉位信息
+        """
         buy_prices, sell_prices = super().calculate_prices()
         if not buy_prices or not sell_prices:
             return buy_prices, sell_prices
 
+        # 如果沒有庫存偏移係數，直接返回，避免不必要的 API 請求
+        if self.inventory_skew <= 0:
+            return buy_prices, sell_prices
+        
+        if self.max_position <= 0:
+            return buy_prices, sell_prices
+
+        # 只在需要偏移時才獲取倉位（減少 API 請求）
         net = self.get_net_position()
-        current_price = self.get_current_price()
+        if abs(net) < self.min_order_size:
+            logger.debug(f"倉位 {net:.4f} 低於最小值，無需偏移")
+            return buy_prices, sell_prices
         
-        # 獲取盤口信息
-        orderbook = self.client.get_order_book(self.symbol)
-        best_bid = best_ask = None
-        if orderbook and 'bids' in orderbook and 'asks' in orderbook:
-            if orderbook['bids']:
-                best_bid = float(orderbook['bids'][0][0])
-            if orderbook['asks']:
-                best_ask = float(orderbook['asks'][0][0])
+        # 使用父類已經獲取的 market depth，避免重複請求 orderbook
+        # get_market_depth() 在父類 calculate_prices() 中已經調用過了
+        bid_price, ask_price = self.get_market_depth()
+        current_price = None
         
-        # 輸出盤口和持倉信息
-        logger.info("=== 市場狀態 ===")
-        if best_bid and best_ask:
+        if bid_price and ask_price:
+            current_price = (bid_price + ask_price) / 2
+            best_bid = bid_price
+            best_ask = ask_price
+            
+            # 輸出市場狀態（僅當有倉位需要偏移時）
+            logger.info("=== 市場狀態 ===")
             spread = best_ask - best_bid
             spread_pct = (spread / current_price * 100) if current_price else 0
             logger.info(f"盤口: Bid {best_bid:.3f} | Ask {best_ask:.3f} | 價差 {spread:.3f} ({spread_pct:.3f}%)")
-        if current_price:
             logger.info(f"中間價: {current_price:.3f}")
+        else:
+            # 備用：如果 market depth 沒有數據，才調用 get_current_price()
+            current_price = self.get_current_price()
+            if not current_price:
+                logger.warning("無法獲取當前價格，跳過倉位偏移")
+                return buy_prices, sell_prices
         
         # 輸出持倉信息
         direction = "空頭" if net < 0 else "多頭" if net > 0 else "無倉位"
-        logger.info(f"持倉: {direction} {abs(net):.3f} SOL | 目標: {self.target_position:.1f} | 上限: {self.max_position:.1f}")
+        logger.info(f"持倉: {direction} {abs(net):.3f} {self.base_asset} | 目標: {self.target_position:.1f} | 上限: {self.max_position:.1f}")
 
         # 如果沒有庫存偏移係數或沒有倉位，則不進行調整
         if self.inventory_skew <= 0 or abs(net) < self.min_order_size:
