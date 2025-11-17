@@ -21,4 +21,7 @@ __all__ = [
     "StrategyConfigError",
     "GridStrategy",
     "PerpGridStrategy"
+    "GridStrategy",
+    "PerpGridStrategy",
+    "VolumeHoldStrategy"
 ]

@@ -1,6 +1,7 @@
 PyNaCl
 requests
 websocket-client
+websockets
 numpy
 python-dotenv
 starknet-py
