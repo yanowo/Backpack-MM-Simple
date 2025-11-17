@@ -42,7 +42,7 @@ def parse_arguments():
     parser.add_argument('--stop-loss', type=float, help='永續倉位止損觸發值 (以報價資產計價)')
     parser.add_argument('--take-profit', type=float, help='永續倉位止盈觸發值 (以報價資產計價)')
     parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'grid', 'perp_grid', 'volume_hold'], default='standard', help='策略選擇 (standard, maker_hedge, grid, perp_grid 或 volume_hold)')
-
+    parser.add_argument('--strategy-config', type=str, help="Path to strategy configuration JSON file")
     # 網格策略參數
     parser.add_argument('--grid-upper', type=float, help='網格上限價格')
     parser.add_argument('--grid-lower', type=float, help='網格下限價格')
@@ -102,8 +102,8 @@ def main():
             logger.error("請使用 --strategy-config 指定配置檔，或設定環境變數 VOLUME_HOLD_CONFIG。")
             sys.exit(1)
         try:
-            from strategies.volume_hold_strategy import (
-                VolumeHoldStrategy,
+            from strategies.volume_hold_strategy_refactor import (
+                VolumeHoldStrategyRefactor,
                 VolumeHoldStrategyConfig,
                 StrategyConfigError,
             )
@@ -117,7 +117,7 @@ def main():
             logger.error(f"載入 volume_hold 配置檔失敗: {exc}")
             sys.exit(1)
 
-        strategy = VolumeHoldStrategy(strategy_config)
+        strategy = VolumeHoldStrategyRefactor(strategy_config)
         strategy.run()
         return
     
