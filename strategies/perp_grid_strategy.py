@@ -795,7 +795,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     # 開多單（買入）
                     orders_to_place.append({
                         "orderType": "Limit",
-                        "price": str(price),
+                        "price": price,  # 保持為 float，讓 client 處理格式化
                         "quantity": str(self.order_quantity),
                         "side": "Bid",
                         "symbol": self.symbol,
@@ -806,7 +806,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     # 開空單（賣出）
                     orders_to_place.append({
                         "orderType": "Limit",
-                        "price": str(price),
+                        "price": price,  # 保持為 float，讓 client 處理格式化
                         "quantity": str(self.order_quantity),
                         "side": "Ask",
                         "symbol": self.symbol,
@@ -819,7 +819,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 if price <= current_price:
                     orders_to_place.append({
                         "orderType": "Limit",
-                        "price": str(price),
+                        "price": price,  # 保持為 float，讓 client 處理格式化
                         "quantity": str(self.order_quantity),
                         "side": "Bid",
                         "symbol": self.symbol,
@@ -832,7 +832,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 if price >= current_price:
                     orders_to_place.append({
                         "orderType": "Limit",
-                        "price": str(price),
+                        "price": price,  # 保持為 float，讓 client 處理格式化
                         "quantity": str(self.order_quantity),
                         "side": "Ask",
                         "symbol": self.symbol,
