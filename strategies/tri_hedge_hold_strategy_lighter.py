@@ -12,7 +12,7 @@ from api.lighter_client import LighterClient
 from logger import setup_logger
 from utils.helpers import round_to_precision, round_to_tick_size
 
-logger = setup_logger("volume_hold_strategy")
+logger = setup_logger("tri_hedge_strategy")
 
 
 MIN_QUOTE_THRESHOLD = 11.0

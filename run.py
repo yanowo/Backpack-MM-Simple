@@ -41,7 +41,7 @@ def parse_arguments():
     parser.add_argument('--inventory-skew', type=float, default=0.0, help='永續倉位偏移調整係數 (0-1)')
     parser.add_argument('--stop-loss', type=float, help='永續倉位止損觸發值 (以報價資產計價)')
     parser.add_argument('--take-profit', type=float, help='永續倉位止盈觸發值 (以報價資產計價)')
-    parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'grid', 'perp_grid', 'volume_hold'], default='standard', help='策略選擇 (standard, maker_hedge, grid, perp_grid 或 volume_hold)')
+    parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'grid', 'perp_grid', 'tri_hedge'], default='standard', help='策略選擇 (standard, maker_hedge, grid, perp_grid 或 tri_hedge)')
     parser.add_argument('--strategy-config', type=str, help="Path to strategy configuration JSON file")
     # 網格策略參數
     parser.add_argument('--grid-upper', type=float, help='網格上限價格')
@@ -51,7 +51,7 @@ def parse_arguments():
     parser.add_argument('--price-range', type=float, default=5.0, help='自動模式下的價格範圍百分比 (默認: 5.0)')
     parser.add_argument('--grid-mode', choices=['arithmetic', 'geometric'], default='arithmetic', help='網格模式 (arithmetic 或 geometric)')
     parser.add_argument('--grid-type', choices=['neutral', 'long', 'short'], default='neutral', help='永續網格類型 (neutral, long 或 short)')
-    parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'grid', 'perp_grid'], default='standard', help='策略選擇 (standard, maker_hedge, grid 或 perp_grid)')
+    parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'grid', 'perp_grid','tri_hedge'], default='standard', help='策略選擇 (standard, maker_hedge, grid, perp_grid 或 tri_hedge)')
 
     # 網格策略參數
     parser.add_argument('--grid-upper', type=float, help='網格上限價格')
@@ -100,16 +100,16 @@ def main():
     # 驗證重平參數
     validate_rebalance_args(args)
 
-    if args.strategy == 'volume_hold':
+    if args.strategy == 'tri_hedge':
         if args.cli or args.web:
-            logger.error("volume_hold 策略僅支援直接運行模式，請勿同時指定 --cli 或 --web。")
+            logger.error("tri_hedge 策略僅支援直接運行模式，請勿同時指定 --cli 或 --web。")
             sys.exit(1)
         if args.exchange != 'lighter':
-            logger.error("volume_hold 策略目前僅支援 Lighter 交易所。")
+            logger.error("tri_hedge 策略目前僅支援 Lighter 交易所。")
             sys.exit(1)
-        config_path = args.strategy_config or os.getenv('VOLUME_HOLD_CONFIG')
+        config_path = args.strategy_config or os.getenv('TRI_HEDGE_CONFIG')
         if not config_path:
-            logger.error("請使用 --strategy-config 指定配置檔，或設定環境變數 VOLUME_HOLD_CONFIG。")
+            logger.error("請使用 --strategy-config 指定配置檔，或設定環境變數 TRI_HEDGE_CONFIG。")
             sys.exit(1)
         try:
             from .strategies import (
@@ -118,13 +118,13 @@ def main():
                 StrategyConfigError,
             )
         except ImportError as exc:
-            logger.error(f"無法載入 volume_hold 策略模組: {exc}")
+            logger.error(f"無法載入 tri_hedge 策略模組: {exc}")
             sys.exit(1)
 
         try:
             strategy_config = TriHedgeHoldStrategyConfig.from_file(config_path)
         except StrategyConfigError as exc:
-            logger.error(f"載入 volume_hold 配置檔失敗: {exc}")
+            logger.error(f"載入 tri_hedge 配置檔失敗: {exc}")
             sys.exit(1)
 
         strategy = TriHedgeHoldStrategy(strategy_config)

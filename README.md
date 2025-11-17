@@ -303,7 +303,7 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 
 # Lighter Volume Hold（三帳號輪轉）
-python run.py --exchange lighter --strategy volume_hold --strategy-config settings/volume_hold_strategy.sample.json
+python run.py --exchange lighter --strategy tri_hedge --strategy-config settings/tri_hedge_strategy.sample.json
 
 # BackPack 現貨網格交易（自動價格範圍）
 python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --grid-num 10 --quantity 0.1 --duration 3600 --interval 60
@@ -351,10 +351,10 @@ python run.py --exchange lighter --market-type perp --symbol BTC --strategy perp
 - `--duration`: 運行時間（秒）
 - `--interval`: 更新間隔（秒）
 - `--market-type`: 市場類型 (`spot` 或 `perp`)
-- `--strategy`: 策略選擇 (`standard`、`maker_hedge`、`volume_hold`)
+- `--strategy`: 策略選擇 (`standard`、`maker_hedge`、`tri_hedge`)
 
 #### 高級參數
-- `--strategy-config`: volume_hold 等高階策略的 JSON 配置路徑
+- `--strategy-config`: tri_hedge 等高階策略的 JSON 配置路徑
 - `--enable-db` / `--disable-db`: 資料庫寫入控制
 - `--target-position`: 永續合約目標淨倉位
 - `--max-position`: 永續合約最大允許淨倉
