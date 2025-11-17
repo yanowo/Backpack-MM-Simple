@@ -706,10 +706,25 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 自動計算價格範圍
         if self.auto_price_range or self.grid_upper_price is None or self.grid_lower_price is None:
             price_range = current_price * (self.price_range_percent / 100)
-            self.grid_upper_price = current_price + price_range
-            self.grid_lower_price = current_price - price_range
-            logger.info("自動設置網格價格範圍: %.4f ~ %.4f (當前價格: %.4f)",
-                       self.grid_lower_price, self.grid_upper_price, current_price)
+
+            if self.grid_type == "short":
+                # 做空網格：只在當前價格以上設置網格
+                self.grid_lower_price = current_price
+                self.grid_upper_price = current_price + price_range
+                logger.info("自動設置做空網格價格範圍: %.4f ~ %.4f (當前價格: %.4f)",
+                           self.grid_lower_price, self.grid_upper_price, current_price)
+            elif self.grid_type == "long":
+                # 做多網格：只在當前價格以下設置網格
+                self.grid_lower_price = current_price - price_range
+                self.grid_upper_price = current_price
+                logger.info("自動設置做多網格價格範圍: %.4f ~ %.4f (當前價格: %.4f)",
+                           self.grid_lower_price, self.grid_upper_price, current_price)
+            else:
+                # 中性網格：在當前價格上下設置網格
+                self.grid_upper_price = current_price + price_range
+                self.grid_lower_price = current_price - price_range
+                logger.info("自動設置中性網格價格範圍: %.4f ~ %.4f (當前價格: %.4f)",
+                           self.grid_lower_price, self.grid_upper_price, current_price)
 
         # 驗證價格範圍
         if self.grid_lower_price >= self.grid_upper_price:
