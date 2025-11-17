@@ -25,7 +25,6 @@ def parse_arguments():
     parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex', 'lighter'], default='backpack', help='交易所選擇 (backpack、aster、paradex 或 lighter)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
-    parser.add_argument('--ws-proxy', type=str, help='WebSocket Proxy (可選，默認使用環境變數或配置文件)')
     
     # 做市參數
     parser.add_argument('--symbol', type=str, help='交易對 (例如: SOL_USDC)')

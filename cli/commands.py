@@ -1321,7 +1321,7 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, enable_database=ENABLE_DATA
         print("2 - 查詢餘額")
         print("3 - 獲取市場信息")
         print("4 - 獲取訂單簿")
-        print("5 - 執行現貨/合約做市策略or對沖")
+        print("5 - 執行現貨/合約做市/對沖/網格 策略")
         stats_label = "6 - 交易統計報表" if USE_DATABASE else "6 - 交易統計報表 (已停用)"
         print(stats_label)
         print("7 - 市場分析")

@@ -875,12 +875,11 @@ class MarketMaker:
             if self.exchange == 'backpack':
                 # 創建新的連接
                 self.ws = BackpackWebSocket(
-                    self.api_key, 
-                    self.secret_key, 
-                    self.symbol, 
-                    self.on_ws_message, 
-                    auto_reconnect=True,
-                    proxy=self.ws_proxy
+                    self.api_key,
+                    self.secret_key,
+                    self.symbol,
+                    self.on_ws_message,
+                    auto_reconnect=True
                 )
             elif self.exchange == 'xx':
                 ...
@@ -1984,7 +1983,7 @@ class MarketMaker:
         )
 
         if self.total_quote_volume > 0:
-            loss = min(net_pnl, 0)  # 仅取亏损
+            loss = min(net_pnl, 0)  # 僅取虧損
             wear_rate_value = abs(loss) / self.total_quote_volume * 100
             wear_rate_display = f"{wear_rate_value:.4f}%"
         else:
