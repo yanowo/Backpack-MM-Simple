@@ -412,6 +412,16 @@ class VolumeHoldStrategyRefactor:
             )
             self._stop_event.wait(max(delay, 0.0))  # jittered delay between slices so we don't spam the venue
 
+        reference_price = self._compute_reference_price(client, plan.symbol, "Bid", plan.entry_offset_bps)
+        self._rebalance_exposure(
+            symbol=plan.symbol,
+            primary_idx=primary_idx,
+            hedger_indices=hedgers,
+            limits=limits,
+            reference_price=reference_price,
+            allow_additional_shorts=True,
+            allow_reduce_shorts=True,
+        )
         return total_base_filled
 
     def _flatten_position(

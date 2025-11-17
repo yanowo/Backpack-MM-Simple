@@ -13,22 +13,26 @@
     "coinlist": [
         {
             "symbol": "USELESS",
-            "target_notional": 150,
-            "slice_notional": 50,
-            "notes": "amt per trade"
+            "target_notional": 200,
+            "slice_notional": 50
         },
         {
             "symbol": "FF",
-            "target_notional": 150,
+            "target_notional": 200,
+            "slice_notional": 50
+        },
+        {
+            "symbol": "0G",
+            "target_notional": 200,
             "slice_notional": 50
         }
     ],
     "accounts": [
         {
             "label": "Acct-primary",
-            "api_private_key": "",
-            "api_key_index": 3,
-            "account_address": ""
+            "api_private_key": "private key",
+            "account_address": "<wallet address>",
+            "api_key_index": 3
         },
         {
             "label": "Acct-hedge1",
@@ -38,8 +42,8 @@
         },
         {
             "label": "Acct-hedge2",
-            "api_private_key": "private key",
-            "account_address": "<wallet address>",
+            "api_private_key": "",
+            "account_address": "",
             "api_key_index": 4
         }
     ]
