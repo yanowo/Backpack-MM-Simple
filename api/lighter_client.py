@@ -546,6 +546,9 @@ class LighterClient(BaseExchangeClient):
             proxies = {}
             if http_proxy:
                 proxies['http'] = http_proxy
+                # 如果没有单独设置 https_proxy，HTTPS 也使用 http_proxy
+                if not https_proxy:
+                    proxies['https'] = http_proxy
             if https_proxy:
                 proxies['https'] = https_proxy
             self.session.proxies.update(proxies)
