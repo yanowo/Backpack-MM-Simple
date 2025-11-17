@@ -5,8 +5,8 @@ from .market_maker import MarketMaker
 from .perp_market_maker import PerpetualMarketMaker
 from .maker_taker_hedge import MakerTakerHedgeStrategy
 from .volume_hold_strategy import (
-    VolumeHoldStrategy,
-    VolumeHoldStrategyConfig,
+    TriHedgeHoldStrategy,
+    TriHedgeHoldStrategyConfig,
     StrategyConfigError,
 )
 from .grid_strategy import GridStrategy
@@ -16,12 +16,12 @@ __all__ = [
     "MarketMaker",
     "PerpetualMarketMaker",
     "MakerTakerHedgeStrategy",
-    "VolumeHoldStrategy",
-    "VolumeHoldStrategyConfig",
+    "TriHedgeHoldStrategy",
+    "TriHedgeHoldStrategyConfig",
     "StrategyConfigError",
     "GridStrategy",
     "PerpGridStrategy"
     "GridStrategy",
     "PerpGridStrategy",
-    "VolumeHoldStrategy"
+    "TriHedgeHoldStrategy"
 ]

@@ -51,6 +51,16 @@ def parse_arguments():
     parser.add_argument('--price-range', type=float, default=5.0, help='自動模式下的價格範圍百分比 (默認: 5.0)')
     parser.add_argument('--grid-mode', choices=['arithmetic', 'geometric'], default='arithmetic', help='網格模式 (arithmetic 或 geometric)')
     parser.add_argument('--grid-type', choices=['neutral', 'long', 'short'], default='neutral', help='永續網格類型 (neutral, long 或 short)')
+    parser.add_argument('--strategy', choices=['standard', 'maker_hedge', 'grid', 'perp_grid'], default='standard', help='策略選擇 (standard, maker_hedge, grid 或 perp_grid)')
+
+    # 網格策略參數
+    parser.add_argument('--grid-upper', type=float, help='網格上限價格')
+    parser.add_argument('--grid-lower', type=float, help='網格下限價格')
+    parser.add_argument('--grid-num', type=int, default=10, help='網格數量 (默認: 10)')
+    parser.add_argument('--auto-price', action='store_true', help='自動設置網格價格範圍')
+    parser.add_argument('--price-range', type=float, default=5.0, help='自動模式下的價格範圍百分比 (默認: 5.0)')
+    parser.add_argument('--grid-mode', choices=['arithmetic', 'geometric'], default='arithmetic', help='網格模式 (arithmetic 或 geometric)')
+    parser.add_argument('--grid-type', choices=['neutral', 'long', 'short'], default='neutral', help='永續網格類型 (neutral, long 或 short)')
 
     # 數據庫選項
     parser.add_argument('--enable-db', dest='enable_db', action='store_true', help='啟用資料庫寫入功能')
@@ -102,9 +112,9 @@ def main():
             logger.error("請使用 --strategy-config 指定配置檔，或設定環境變數 VOLUME_HOLD_CONFIG。")
             sys.exit(1)
         try:
-            from strategies.volume_hold_strategy_refactor import (
-                VolumeHoldStrategyRefactor,
-                VolumeHoldStrategyConfig,
+            from .strategies import (
+                TriHedgeHoldStrategy,
+                TriHedgeHoldStrategyConfig,
                 StrategyConfigError,
             )
         except ImportError as exc:
@@ -112,12 +122,12 @@ def main():
             sys.exit(1)
 
         try:
-            strategy_config = VolumeHoldStrategyConfig.from_file(config_path)
+            strategy_config = TriHedgeHoldStrategyConfig.from_file(config_path)
         except StrategyConfigError as exc:
             logger.error(f"載入 volume_hold 配置檔失敗: {exc}")
             sys.exit(1)
 
-        strategy = VolumeHoldStrategyRefactor(strategy_config)
+        strategy = TriHedgeHoldStrategy(strategy_config)
         strategy.run()
         return
     
@@ -148,6 +158,7 @@ def main():
             'api_key': api_key,
             'secret_key': secret_key,
         }
+
     elif exchange == 'lighter':
         api_key = os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
         secret_key = os.getenv('LIGHTER_SECRET_KEY') or api_key

@@ -1,4 +1,3 @@
-"""Refactored multi-account volume/hold strategy (position-driven fills)."""
 from __future__ import annotations
 
 import json
@@ -13,7 +12,7 @@ from api.lighter_client import LighterClient
 from logger import setup_logger
 from utils.helpers import round_to_precision, round_to_tick_size
 
-logger = setup_logger("volume_hold_strategy_refactor")
+logger = setup_logger("volume_hold_strategy")
 
 
 MIN_QUOTE_THRESHOLD = 11.0
@@ -35,7 +34,7 @@ class AccountCredentials:
     chain_id: Optional[int] = None
     signer_lib_dir: Optional[str] = None
 
-    def as_client_config(self, defaults: "VolumeHoldStrategyConfig") -> Dict[str, Any]:
+    def as_client_config(self, defaults: "TriHedgeHoldStrategyConfig") -> Dict[str, Any]:
         base_url = self.base_url or defaults.base_url
         if not base_url:
             raise StrategyConfigError(f"Base URL missing for account {self.label}")
@@ -77,7 +76,7 @@ class MarketConstraints:
 
 
 @dataclass
-class VolumeHoldStrategyConfig:
+class TriHedgeHoldStrategyConfig:
     """Runtime configuration for the volume hold strategy."""
 
     accounts: List[AccountCredentials]
@@ -101,7 +100,7 @@ class VolumeHoldStrategyConfig:
     primary_time_in_force: str = "GTC"
 
     @classmethod
-    def from_file(cls, path: str) -> "VolumeHoldStrategyConfig":
+    def from_file(cls, path: str) -> "TriHedgeHoldStrategyConfig":
         if not os.path.isfile(path):
             raise StrategyConfigError(f"Config file not found: {path}")
         with open(path, "r", encoding="utf-8") as handle:
@@ -109,7 +108,7 @@ class VolumeHoldStrategyConfig:
         return cls.from_dict(payload)
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "VolumeHoldStrategyConfig":
+    def from_dict(cls, payload: Dict[str, Any]) -> "TriHedgeHoldStrategyConfig":
         base_url = payload.get("base_url") or os.getenv("LIGHTER_BASE_URL")
         chain_id = payload.get("chain_id") or os.getenv("LIGHTER_CHAIN_ID")
         signer_lib_dir = payload.get("signer_lib_dir")
@@ -202,10 +201,10 @@ class VolumeHoldStrategyConfig:
         return config
 
 
-class VolumeHoldStrategyRefactor:
+class TriHedgeHoldStrategy:
     """Implements the refactored multi-account volume/holding strategy."""
 
-    def __init__(self, config: VolumeHoldStrategyConfig, *, random_seed: Optional[int] = None) -> None:
+    def __init__(self, config: TriHedgeHoldStrategyConfig, *, random_seed: Optional[int] = None) -> None:
         self.config = config
         self._random = random.Random(random_seed)
         self._clients = [LighterClient(acc.as_client_config(config)) for acc in config.accounts]
@@ -226,7 +225,7 @@ class VolumeHoldStrategyRefactor:
         self._stop_event.set()
 
     def run(self) -> None:
-        logger.info("VolumeHold(refactor) booted with %d symbols", len(self.config.symbols))
+        logger.info("TriHedgeHold Strategy booted with %d symbols", len(self.config.symbols))
         cycles_completed = 0
         while not self._stop_event.is_set():
             plan = self.config.symbols[self._current_symbol_index]
