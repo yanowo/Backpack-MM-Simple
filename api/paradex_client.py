@@ -27,6 +27,7 @@ from .base_client import (
     OrderBookLevel,
     TradeInfo
 )
+from .proxy_utils import get_proxy_config
 from logger import setup_logger
 
 logger = setup_logger("api.paradex_client")
@@ -56,6 +57,12 @@ class ParadexClient(BaseExchangeClient):
         self.timeout = float(config.get("timeout", 30))
         self.max_retries = int(config.get("max_retries", 3))
         self.session = requests.Session()
+
+        # 從環境變量讀取代理配置
+        proxies = get_proxy_config()
+        if proxies:
+            self.session.proxies.update(proxies)
+            logger.info(f"Paradex 客户端已配置代理: {proxies}")
 
         # JWT 相關
         self._jwt_token: Optional[str] = None

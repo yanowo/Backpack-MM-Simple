@@ -33,7 +33,6 @@ class PerpetualMarketMaker(MarketMaker):
         leverage: float = 1.0,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
-        ws_proxy: Optional[str] = None,
         exchange: str = 'backpack',
         exchange_config: Optional[Dict[str, Any]] = None,
         **kwargs,
@@ -50,14 +49,12 @@ class PerpetualMarketMaker(MarketMaker):
             position_threshold (float): 觸發倉位調整的閾值。
             inventory_skew (float): 庫存偏移，影響報價的不對稱性，以將淨倉位推向0。
             leverage (float): 槓桿倍數。
-            ws_proxy (Optional[str]): WebSocket代理地址。
         """
         kwargs.setdefault("enable_rebalance", False)
         super().__init__(
             api_key=api_key,
             secret_key=secret_key,
             symbol=symbol,
-            ws_proxy=ws_proxy,
             exchange=exchange,
             exchange_config=exchange_config,
             **kwargs,

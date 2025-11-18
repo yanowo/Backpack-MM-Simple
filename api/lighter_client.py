@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import requests
 
 from .base_client import BaseExchangeClient
+from .proxy_utils import get_proxy_config
 from logger import setup_logger
 
 logger = setup_logger("api.lighter_client")
@@ -328,7 +329,7 @@ class SimpleSignerClient:
         trigger_price: int = NIL_TRIGGER_PRICE,
         order_expiry: int = DEFAULT_28_DAY_ORDER_EXPIRY,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        # 支持 nonce 错误重试，最多重试 2 次
+        # 支持 nonce 錯誤重試，最多重試 2 次
         for attempt in range(2):
             nonce = self._next_nonce()
             payload, error = self._decode_str_or_err(
@@ -358,7 +359,7 @@ class SimpleSignerClient:
                 return parsed_payload, response, None
             except SimpleSignerError as exc:
                 error_msg = str(exc)
-                # 如果是 nonce 错误且还有重试机会，则重新获取 nonce 并重试
+                # 如果是 nonce 錯誤且還有重試機會，則重新獲取 nonce 並重試
                 if "invalid nonce" in error_msg.lower() and attempt == 0:
                     with self._nonce_lock:
                         self._fetch_nonce()
@@ -374,7 +375,7 @@ class SimpleSignerClient:
         market_index: int,
         order_index: int,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        # 支持 nonce 错误重试，最多重试 2 次
+        # 支持 nonce 錯誤重試，最多重試 2 次
         for attempt in range(2):
             nonce = self._next_nonce()
             payload, error = self._decode_str_or_err(
@@ -396,7 +397,7 @@ class SimpleSignerClient:
                 return parsed_payload, response, None
             except SimpleSignerError as exc:
                 error_msg = str(exc)
-                # 如果是 nonce 错误且还有重试机会，则重新获取 nonce 并重试
+                # 如果是 nonce 錯誤且還有重試機會，則重新獲取 nonce 並重試
                 if "invalid nonce" in error_msg.lower() and attempt == 0:
                     with self._nonce_lock:
                         self._fetch_nonce()
@@ -489,7 +490,7 @@ class SimpleSignerClient:
             except SimpleSignerError as exc:
                 message = str(exc)
                 if "invalid nonce" in message.lower() and attempt == 0:
-                    # 使用锁保护重新获取 nonce
+                    # 使用鎖保護重新獲取 nonce
                     with self._nonce_lock:
                         self._fetch_nonce()
                     time.sleep(0.1)
@@ -538,6 +539,12 @@ class LighterClient(BaseExchangeClient):
                 "Accept": "application/json",
             }
         )
+
+        # 從環境變量讀取代理配置
+        proxies = get_proxy_config()
+        if proxies:
+            self.session.proxies.update(proxies)
+            logger.info(f"Lighter 客户端已配置代理: {proxies}")
 
         overrides = dict(DEFAULT_SYMBOL_OVERRIDES)
         overrides.update(config.get("symbol_overrides", {}) or {})
@@ -1443,7 +1450,7 @@ class LighterClient(BaseExchangeClient):
             return {"error": "Invalid price or quantity format"}
         min_quote_value = float(market.get("min_quote_value") or 0.0)
         quantity_float = float(quantity_value)
-        # 最小下单金额 10u
+        # 最小下單金額 10u
         price_float = float(price_value)
         min_quote_value = 10.0
         required_base = min_quote_value / price_float

@@ -193,45 +193,45 @@ def get_address_command(api_key, secret_key):
 
 def get_balance_command(api_key, secret_key):
     """獲取餘額命令 - 檢查所有已配置的交易所"""
-    
+
     # 定義要檢查的交易所列表
     exchanges_to_check = []
-    
+
     # 檢查 Backpack
     backpack_api, backpack_secret = _resolve_api_credentials('backpack', api_key, secret_key)
     if backpack_api and backpack_secret:
         exchanges_to_check.append(('backpack', backpack_api, backpack_secret))
-    
+
     # 檢查 Aster
     aster_api, aster_secret = _resolve_api_credentials('aster', None, None)
     if aster_api and aster_secret:
         exchanges_to_check.append(('aster', aster_api, aster_secret))
-    
+
     # 檢查 Paradex
     paradex_account, paradex_key = _resolve_api_credentials('paradex', None, None)
     if paradex_account and paradex_key:
         exchanges_to_check.append(('paradex', paradex_account, paradex_key))
-    
+
     # 檢查 Lighter
     lighter_private, lighter_account_index = _resolve_api_credentials('lighter', None, None)
     if lighter_private and lighter_account_index:
         exchanges_to_check.append(('lighter', lighter_private, lighter_account_index))
-    
+
     if not exchanges_to_check:
         print("未找到任何已配置的交易所 API 密鑰")
         return
-    
+
     # 遍歷所有交易所並獲取餘額
     for exchange, ex_api_key, ex_secret_key in exchanges_to_check:
         print(f"\n{'='*60}")
         print(f"交易所: {exchange.upper()}")
         print(f"{'='*60}")
-        
+
         try:
             exchange_config = {
                 'api_key': ex_api_key,
             }
-            
+
             if exchange == 'paradex':
                 exchange_config['private_key'] = ex_secret_key
                 exchange_config['account_address'] = ex_api_key
@@ -363,12 +363,12 @@ def get_markets_command():
         market_type = market.get('marketType')
         print(f"{i+1}. {symbol} ({base}/{quote}) - {market_type}")
 
-def get_orderbook_command(api_key, secret_key, ws_proxy=None):
+def get_orderbook_command(api_key, secret_key):
     """獲取市場深度命令"""
     symbol = input("請輸入交易對 (例如: SOL_USDC): ")
     try:
         print("連接WebSocket獲取實時訂單簿...")
-        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True, proxy=ws_proxy)
+        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True)
         ws.connect()
         
         # 等待連接建立
@@ -525,7 +525,7 @@ def configure_rebalance_settings():
     
     return enable_rebalance, base_asset_target_percentage, rebalance_threshold
 
-def run_market_maker_command(api_key, secret_key, ws_proxy=None):
+def run_market_maker_command(api_key, secret_key):
     """執行做市策略命令"""
     # [整合功能] 1. 增加交易所選擇
     exchange_input = input("請選擇交易所 (backpack/aster/paradex/lighter，默認 backpack): ").strip().lower()
@@ -555,7 +555,7 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
             'secret_key': secret_key,
             'base_url': os.getenv('BASE_URL', 'https://api.backpack.work'),
             'api_version': 'v1',
-            'default_window': '5000'
+            'default_window': '5000',
         }
     elif exchange == 'aster':
         exchange_config = {
@@ -816,7 +816,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     inventory_skew=inventory_skew,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE,
@@ -837,7 +836,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     inventory_skew=inventory_skew,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE,
@@ -859,7 +857,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     inventory_skew=inventory_skew,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE
@@ -878,7 +875,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     auto_price_range=auto_price_range,
                     price_range_percent=price_range_percent,
                     grid_mode=grid_mode,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE,
@@ -893,7 +889,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     db_instance=db if USE_DATABASE else None,
                     base_spread_percentage=spread_percentage,
                     order_quantity=quantity,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE,
@@ -912,7 +907,6 @@ def run_market_maker_command(api_key, secret_key, ws_proxy=None):
                     enable_rebalance=enable_rebalance,
                     base_asset_target_percentage=base_asset_target_percentage,
                     rebalance_threshold=rebalance_threshold,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=USE_DATABASE
@@ -1122,14 +1116,14 @@ def toggle_database_command():
         print("輸入無效，設定未變更。")
 
 
-def market_analysis_command(api_key, secret_key, ws_proxy=None):
+def market_analysis_command(api_key, secret_key):
     """市場分析命令"""
     symbol = input("請輸入要分析的交易對 (例如: SOL_USDC): ")
     try:
         print("\n執行市場分析...")
-        
+
         # 創建臨時WebSocket連接
-        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True, proxy=ws_proxy)
+        ws = BackpackWebSocket(api_key, secret_key, symbol, auto_reconnect=True)
         ws.connect()
         
         # 等待連接建立
@@ -1297,7 +1291,7 @@ def market_analysis_command(api_key, secret_key, ws_proxy=None):
         import traceback
         traceback.print_exc()
 
-def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_database=ENABLE_DATABASE, exchange='backpack'):
+def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, enable_database=ENABLE_DATABASE, exchange='backpack'):
     """主CLI函數"""
     global USE_DATABASE
     USE_DATABASE = bool(enable_database)
@@ -1319,7 +1313,7 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_datab
         print("2 - 查詢餘額")
         print("3 - 獲取市場信息")
         print("4 - 獲取訂單簿")
-        print("5 - 執行現貨/合約做市策略or對沖")
+        print("5 - 執行現貨/合約做市/對沖/網格 策略")
         stats_label = "6 - 交易統計報表" if USE_DATABASE else "6 - 交易統計報表 (已停用)"
         print(stats_label)
         print("7 - 市場分析")
@@ -1337,13 +1331,13 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, ws_proxy=None, enable_datab
         elif operation == '3':
             get_markets_command()
         elif operation == '4':
-            get_orderbook_command(api_key, secret_key, ws_proxy=ws_proxy)
+            get_orderbook_command(api_key, secret_key)
         elif operation == '5':
-            run_market_maker_command(api_key, secret_key, ws_proxy=ws_proxy)
+            run_market_maker_command(api_key, secret_key)
         elif operation == '6':
             trading_stats_command(api_key, secret_key)
         elif operation == '7':
-            market_analysis_command(api_key, secret_key, ws_proxy=ws_proxy)
+            market_analysis_command(api_key, secret_key)
         elif operation == '8':
             rebalance_settings_command()
         elif operation.lower() == 'd':

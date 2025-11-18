@@ -46,7 +46,6 @@ class MarketMaker:
         rebalance_threshold=15.0,
         enable_rebalance=True,
         base_asset_target_percentage=30.0,
-        ws_proxy=None,
         exchange='backpack',
         exchange_config=None,
         enable_database=False
@@ -158,10 +157,9 @@ class MarketMaker:
         self._last_reconnect_attempt = 0
 
         # 添加代理參數
-        self.ws_proxy = ws_proxy
         # 建立WebSocket連接（僅對Backpack）
         if exchange == 'backpack':
-            self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True, proxy=self.ws_proxy)
+            self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
             self.ws.connect()
         elif exchange == 'xx':
             ...
@@ -877,12 +875,11 @@ class MarketMaker:
             if self.exchange == 'backpack':
                 # 創建新的連接
                 self.ws = BackpackWebSocket(
-                    self.api_key, 
-                    self.secret_key, 
-                    self.symbol, 
-                    self.on_ws_message, 
-                    auto_reconnect=True,
-                    proxy=self.ws_proxy
+                    self.api_key,
+                    self.secret_key,
+                    self.symbol,
+                    self.on_ws_message,
+                    auto_reconnect=True
                 )
             elif self.exchange == 'xx':
                 ...
@@ -1986,7 +1983,7 @@ class MarketMaker:
         )
 
         if self.total_quote_volume > 0:
-            loss = min(net_pnl, 0)  # 仅取亏损
+            loss = min(net_pnl, 0)  # 僅取虧損
             wear_rate_value = abs(loss) / self.total_quote_volume * 100
             wear_rate_display = f"{wear_rate_value:.4f}%"
         else:

@@ -9,21 +9,27 @@ from .auth import create_signature
 from config import API_URL, API_VERSION, DEFAULT_WINDOW
 from logger import setup_logger
 from .base_client import BaseExchangeClient
+from .proxy_utils import get_proxy_config
 
 logger = setup_logger("api.client")
 
 
 class BPClient(BaseExchangeClient):
     """Backpack exchange client (REST).
-    
+
     統一封裝 API 請求、簽名與重試邏輯。
     與早期函數式實現對齊（/api vs /wapi 端點與 instruction 名稱），方便遷移。
     """
-    
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.api_key = config.get("api_key")
         self.secret_key = config.get("secret_key")
+
+        # 從環境變量讀取代理配置
+        self.proxies = get_proxy_config()
+        if self.proxies:
+            logger.info(f"Backpack 客户端已配置代理: {self.proxies}")
 
     def get_exchange_name(self) -> str:
         return "Backpack"
@@ -94,11 +100,11 @@ class BPClient(BaseExchangeClient):
         for attempt in range(retry_count):
             try:
                 if method.upper() == 'GET':
-                    response = requests.get(url, headers=headers, timeout=10)
+                    response = requests.get(url, headers=headers, proxies=self.proxies or None, timeout=10)
                 elif method.upper() == 'POST':
-                    response = requests.post(url, headers=headers, data=json.dumps(data) if data else None, timeout=10)
+                    response = requests.post(url, headers=headers, data=json.dumps(data) if data else None, proxies=self.proxies or None, timeout=10)
                 elif method.upper() == 'DELETE':
-                    response = requests.delete(url, headers=headers, data=json.dumps(data) if data else None, timeout=10)
+                    response = requests.delete(url, headers=headers, data=json.dumps(data) if data else None, proxies=self.proxies or None, timeout=10)
                 else:
                     return {"error": f"不支持的請求方法: {method}"}
                 
@@ -288,7 +294,7 @@ class BPClient(BaseExchangeClient):
         retry_count = 3
         for attempt in range(retry_count):
             try:
-                response = requests.post(url, headers=headers, data=json.dumps(data), timeout=30)
+                response = requests.post(url, headers=headers, data=json.dumps(data), proxies=self.proxies or None, timeout=30)
 
                 if response.status_code in [200, 201]:
                     return response.json() if response.text.strip() else {}

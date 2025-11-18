@@ -120,13 +120,17 @@ pip install -r requirements.txt
 複製 `.env.example` 為 `.env` 並添加:
 
 ```
+# ==================== 全局代理配置 ====================
+# HTTP/HTTPS 代理（支持所有交易所：Backpack、Aster、Paradex、Lighter）
+# 格式: http://USER:PASS@HOST:PORT 或 https://USER:PASS@HOST:PORT
+# 若不需要代理，留空即可
+HTTP_PROXY=
+HTTPS_PROXY=
+
 # Backpack Exchange
 BACKPACK_KEY=your_backpack_api_key
 BACKPACK_SECRET=your_backpack_secret_key
 BASE_URL=https://api.backpack.work
-
-# WS 代理格式 http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
-BACKPACK_PROXY_WEBSOCKET=
 
 
 # Aster Exchange
@@ -138,9 +142,6 @@ ASTER_SECRET_KEY=your_aster_secret_key
 PARADEX_PRIVATE_KEY=your_paradex_private_key
 PARADEX_ACCOUNT_ADDRESS=your_paradex_account_address
 PARADEX_BASE_URL=https://api.prod.paradex.trade/v1
-
-# WS 代理格式 http://user:pass@host:port/ 或者 http://host:port (若不需要則留空或移除)
-PARADEX_PROXY_WEBSOCKET=
 
 # Lighter Exchange
 LIGHTER_PRIVATE_KEY=your_private_key
@@ -160,7 +161,7 @@ LIGHTER_BASE_URL=https://mainnet.zklighter.elliot.ai
 # Web 服務器配置
 # 主機地址（127.0.0.1 為僅本機訪問）
 WEB_HOST=127.0.0.1
-# Web 服務器端口號（如果端口被占用，會自動在 5001-6000 範圍內尋找可用端口）
+# Web 服務器端口號（如果端口被佔用，會自動在 5001-6000 範圍內尋找可用端口）
 WEB_PORT=5000
 # 調試模式（true 開啟，false 關閉）
 WEB_DEBUG=false

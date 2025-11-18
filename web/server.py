@@ -100,30 +100,27 @@ def start_bot():
             if field not in data or not data[field]:
                 return jsonify({'success': False, 'message': f'缺少必要參數: {field}'}), 400
 
-        # 從環境變量獲取API密鑰
+        # 從環境變量獲取API密鑰和全局代理配置
         exchange = data['exchange']
         api_key = ''
         secret_key = ''
         account_address: Optional[str] = None
-        ws_proxy = None
         exchange_config = {}
 
         if exchange == 'backpack':
             api_key = os.getenv('BACKPACK_KEY', '')
             secret_key = os.getenv('BACKPACK_SECRET', '')
-            ws_proxy = os.getenv('BACKPACK_PROXY_WEBSOCKET')
             base_url = os.getenv('BASE_URL', 'https://api.backpack.work')
             exchange_config = {
                 'api_key': api_key,
                 'secret_key': secret_key,
                 'base_url': base_url,
                 'api_version': 'v1',
-                'default_window': '5000'
+                'default_window': '5000',
             }
         elif exchange == 'aster':
             api_key = os.getenv('ASTER_API_KEY', '')
             secret_key = os.getenv('ASTER_SECRET_KEY', '')
-            ws_proxy = os.getenv('ASTER_PROXY_WEBSOCKET')
             exchange_config = {
                 'api_key': api_key,
                 'secret_key': secret_key,
@@ -131,7 +128,6 @@ def start_bot():
         elif exchange == 'lighter':
             api_key = os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
             secret_key = os.getenv('LIGHTER_SECRET_KEY') or api_key
-            ws_proxy = os.getenv('LIGHTER_PROXY_WEBSOCKET') or os.getenv('LIGHTER_WS_PROXY')
             base_url = os.getenv('LIGHTER_BASE_URL')
             account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
             account_address = os.getenv('LIGHTER_ADDRESS')
@@ -154,11 +150,10 @@ def start_bot():
                 sys.exit(1)
             if not exchange_config.get('account_index'):
                 logger.error("缺少 Lighter Account Index，請透過環境變量 LIGHTER_ACCOUNT_INDEX 提供")
-                
+
         elif exchange == 'paradex':
             private_key = os.getenv('PARADEX_PRIVATE_KEY', '')
             account_address = os.getenv('PARADEX_ACCOUNT_ADDRESS')
-            ws_proxy = os.getenv('PARADEX_PROXY_WEBSOCKET')
             base_url = os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1')
 
             secret_key = private_key
@@ -239,7 +234,6 @@ def start_bot():
                     inventory_skew=inventory_skew,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=enable_db
@@ -258,7 +252,6 @@ def start_bot():
                     inventory_skew=inventory_skew,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=enable_db,
@@ -279,7 +272,6 @@ def start_bot():
                     inventory_skew=inventory_skew,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=enable_db
@@ -302,7 +294,6 @@ def start_bot():
                     auto_price_range=auto_price_range,
                     price_range_percent=price_range_percent,
                     grid_mode=grid_mode,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=enable_db
@@ -315,7 +306,6 @@ def start_bot():
                     symbol=symbol,
                     base_spread_percentage=spread,
                     order_quantity=quantity,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=enable_db,
@@ -333,7 +323,6 @@ def start_bot():
                     enable_rebalance=enable_rebalance,
                     base_asset_target_percentage=base_asset_target,
                     rebalance_threshold=rebalance_threshold,
-                    ws_proxy=ws_proxy,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=enable_db
@@ -908,7 +897,7 @@ def run_server(host='0.0.0.0', port=5000, debug=False):
 
     # 檢查端口是否可用
     if not is_port_available(host, port):
-        logger.warning(f"端口 {port} 已被占用，正在尋找可用端口...")
+        logger.warning(f"端口 {port} 已被佔用，正在尋找可用端口...")
         new_port = find_available_port(host, 5001, 6000)
 
         if new_port:

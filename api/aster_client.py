@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import requests
 
 from .base_client import BaseExchangeClient
+from .proxy_utils import get_proxy_config
 from logger import setup_logger
 
 logger = setup_logger("api.aster_client")
@@ -30,6 +31,13 @@ class AsterClient(BaseExchangeClient):
         self.timeout = float(config.get("timeout", 10))
         self.max_retries = int(config.get("max_retries", 3))
         self.session = requests.Session()
+
+        # 從環境變量讀取代理配置
+        proxies = get_proxy_config()
+        if proxies:
+            self.session.proxies.update(proxies)
+            logger.info(f"Aster 客户端已配置代理: {proxies}")
+
         self._symbol_cache: Dict[str, str] = {}
         self._market_info_cache: Dict[str, Dict[str, Any]] = {}
 
