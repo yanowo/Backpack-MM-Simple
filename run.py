@@ -98,6 +98,9 @@ def main():
     # 讀取全局代理配置（HTTP/HTTPS 和 WebSocket 統一使用）
     http_proxy = os.getenv('HTTP_PROXY')
     https_proxy = os.getenv('HTTPS_PROXY')
+    # 如果沒有單獨設置 https_proxy，HTTPS 也使用 http_proxy
+    if http_proxy and not https_proxy:
+        https_proxy = http_proxy
 
     if exchange == 'backpack':
         api_key = os.getenv('BACKPACK_KEY', '')
