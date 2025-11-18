@@ -207,6 +207,8 @@ def start_bot():
         auto_price_range = data.get('auto_price_range', False)
         price_range_percent = float(data.get('price_range_percent', 5.0))
         grid_type = data.get('grid_type', 'neutral')  # 永續合約網格類型
+        auto_borrow = data.get('auto_borrow', True)  # 自動借貸
+        auto_borrow_repay = data.get('auto_borrow_repay', True)  # 自動還款
 
         # 創建策略實例
         if market_type == 'perp':
@@ -294,6 +296,8 @@ def start_bot():
                     auto_price_range=auto_price_range,
                     price_range_percent=price_range_percent,
                     grid_mode=grid_mode,
+                    auto_borrow=auto_borrow,
+                    auto_borrow_repay=auto_borrow_repay,
                     exchange=exchange,
                     exchange_config=exchange_config,
                     enable_database=enable_db

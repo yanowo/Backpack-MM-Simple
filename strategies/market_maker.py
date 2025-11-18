@@ -247,21 +247,25 @@ class MarketMaker:
         try:
             # 獲取普通餘額
             balances = self.client.get_balance()
+            logger.debug(f"普通餘額原始數據: {balances}")
             if isinstance(balances, dict) and "error" in balances:
                 logger.error(f"獲取普通餘額失敗: {balances['error']}")
                 return None
-            
+
             # 獲取抵押品餘額
             collateral = self.client.get_collateral()
+            logger.debug(f"抵押品原始數據: {collateral}")
             if isinstance(collateral, dict) and "error" in collateral:
                 logger.warning(f"獲取抵押品餘額失敗: {collateral['error']}")
                 collateral_assets = []
             else:
                 collateral_assets = collateral.get('assets') or collateral.get('collateral', [])
-            
+
+            logger.debug(f"抵押品資產列表: {collateral_assets}")
+
             # 初始化總餘額字典
             total_balances = {}
-            
+
             # 處理普通餘額
             if isinstance(balances, dict):
                 for asset, details in balances.items():
@@ -274,45 +278,56 @@ class MarketMaker:
                         'collateral_available': 0,
                         'collateral_total': 0
                     }
-            
+
+            logger.debug(f"處理普通餘額後的 total_balances: {total_balances}")
+
             # 添加抵押品餘額
             for item in collateral_assets:
                 symbol = item.get('symbol', '')
                 if symbol:
                     total_quantity = float(item.get('totalQuantity', 0))
                     available_quantity = float(item.get('availableQuantity', 0))
-                    
+                    lend_quantity = float(item.get('lendQuantity', 0))
+
+                    logger.debug(f"處理抵押品: {symbol}, 總量={total_quantity}, 可用={available_quantity}, 借出={lend_quantity}")
+
+                    # 對於 Backpack 抵押品，使用 totalQuantity 作為可用餘額
+                    # 因為借貸中的資產（lendQuantity）也可以用於交易
+                    effective_available = total_quantity
+
                     if symbol not in total_balances:
                         total_balances[symbol] = {
                             'available': 0,
                             'locked': 0,
                             'total': 0,
-                            'collateral_available': available_quantity,
+                            'collateral_available': effective_available,
                             'collateral_total': total_quantity
                         }
                     else:
-                        total_balances[symbol]['collateral_available'] = available_quantity
+                        total_balances[symbol]['collateral_available'] = effective_available
                         total_balances[symbol]['collateral_total'] = total_quantity
-                    
+
                     # 更新總可用量和總量
                     total_balances[symbol]['total_available'] = (
-                        total_balances[symbol]['available'] + 
+                        total_balances[symbol]['available'] +
                         total_balances[symbol]['collateral_available']
                     )
                     total_balances[symbol]['total_all'] = (
-                        total_balances[symbol]['total'] + 
+                        total_balances[symbol]['total'] +
                         total_balances[symbol]['collateral_total']
                     )
-            
+
             # 確保所有資產都有total_available和total_all字段
             for asset in total_balances:
                 if 'total_available' not in total_balances[asset]:
                     total_balances[asset]['total_available'] = total_balances[asset]['available']
                 if 'total_all' not in total_balances[asset]:
                     total_balances[asset]['total_all'] = total_balances[asset]['total']
-            
+
+            logger.debug(f"最終 total_balances 資產列表: {list(total_balances.keys())}")
+
             return total_balances
-            
+
         except Exception as e:
             logger.error(f"獲取總餘額時出錯: {e}")
             import traceback
