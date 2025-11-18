@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import requests
 
 from .base_client import BaseExchangeClient
+from .proxy_utils import get_proxy_config
 from logger import setup_logger
 
 logger = setup_logger("api.aster_client")
@@ -31,18 +32,9 @@ class AsterClient(BaseExchangeClient):
         self.max_retries = int(config.get("max_retries", 3))
         self.session = requests.Session()
 
-        # 代理配置
-        http_proxy = config.get("http_proxy")
-        https_proxy = config.get("https_proxy")
-        if http_proxy or https_proxy:
-            proxies = {}
-            if http_proxy:
-                proxies['http'] = http_proxy
-                # 如果没有单独设置 https_proxy，HTTPS 也使用 http_proxy
-                if not https_proxy:
-                    proxies['https'] = http_proxy
-            if https_proxy:
-                proxies['https'] = https_proxy
+        # 從環境變量讀取代理配置
+        proxies = get_proxy_config()
+        if proxies:
             self.session.proxies.update(proxies)
             logger.info(f"Aster 客户端已配置代理: {proxies}")
 

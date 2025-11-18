@@ -107,10 +107,6 @@ def start_bot():
         account_address: Optional[str] = None
         exchange_config = {}
 
-        # 讀取全局代理配置（HTTP/HTTPS 和 WebSocket 統一使用）
-        http_proxy = os.getenv('HTTP_PROXY')
-        https_proxy = os.getenv('HTTPS_PROXY')
-
         if exchange == 'backpack':
             api_key = os.getenv('BACKPACK_KEY', '')
             secret_key = os.getenv('BACKPACK_SECRET', '')
@@ -121,8 +117,6 @@ def start_bot():
                 'base_url': base_url,
                 'api_version': 'v1',
                 'default_window': '5000',
-                'http_proxy': http_proxy,
-                'https_proxy': https_proxy,
             }
         elif exchange == 'aster':
             api_key = os.getenv('ASTER_API_KEY', '')
@@ -130,8 +124,6 @@ def start_bot():
             exchange_config = {
                 'api_key': api_key,
                 'secret_key': secret_key,
-                'http_proxy': http_proxy,
-                'https_proxy': https_proxy,
             }
         elif exchange == 'lighter':
             api_key = os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
@@ -150,8 +142,6 @@ def start_bot():
                 'account_index': account_index,
                 'api_key_index': api_key_index,
                 'base_url': base_url,
-                'http_proxy': http_proxy,
-                'https_proxy': https_proxy,
             }
             if chain_id is not None:
                 exchange_config['chain_id'] = chain_id
@@ -173,8 +163,6 @@ def start_bot():
                 'private_key': private_key,
                 'account_address': account_address,
                 'base_url': base_url,
-                'http_proxy': http_proxy,
-                'https_proxy': https_proxy,
             }
         else:
             return jsonify({'success': False, 'message': f'不支持的交易所: {exchange}'}), 400

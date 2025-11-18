@@ -98,17 +98,6 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
         raise ValueError(f"不支持的交易所: {exchange}")
 
     config = dict(exchange_config or {})
-
-    # 自動添加全局代理配置（如果未在 exchange_config 中設置）
-    if 'http_proxy' not in config and 'https_proxy' not in config:
-        http_proxy = os.getenv('HTTP_PROXY')
-        https_proxy = os.getenv('HTTPS_PROXY')
-        # 如果沒有單獨設置 https_proxy，HTTPS 也使用 http_proxy
-        if http_proxy and not https_proxy:
-            https_proxy = http_proxy
-        if http_proxy or https_proxy:
-            config['http_proxy'] = http_proxy
-            config['https_proxy'] = https_proxy
     config_api_key = api_key or config.get('api_key')
     config_secret_key = secret_key or config.get('secret_key') or config.get('private_key')
 
@@ -205,13 +194,6 @@ def get_address_command(api_key, secret_key):
 def get_balance_command(api_key, secret_key):
     """獲取餘額命令 - 檢查所有已配置的交易所"""
 
-    # 讀取全局代理配置
-    http_proxy = os.getenv('HTTP_PROXY')
-    https_proxy = os.getenv('HTTPS_PROXY')
-    # 如果沒有單獨設置 https_proxy，HTTPS 也使用 http_proxy
-    if http_proxy and not https_proxy:
-        https_proxy = http_proxy
-
     # 定義要檢查的交易所列表
     exchanges_to_check = []
 
@@ -248,8 +230,6 @@ def get_balance_command(api_key, secret_key):
         try:
             exchange_config = {
                 'api_key': ex_api_key,
-                'http_proxy': http_proxy,
-                'https_proxy': https_proxy,
             }
 
             if exchange == 'paradex':
@@ -262,8 +242,6 @@ def get_balance_command(api_key, secret_key):
                     'account_index': ex_secret_key,
                     'api_key_index': os.getenv('LIGHTER_API_KEY_INDEX'),
                     'base_url': os.getenv('LIGHTER_BASE_URL'),
-                    'http_proxy': http_proxy,
-                    'https_proxy': https_proxy,
                 }
                 chain_id = os.getenv('LIGHTER_CHAIN_ID')
                 if chain_id:
@@ -571,13 +549,6 @@ def run_market_maker_command(api_key, secret_key):
     # 初始化 exchange_config
     exchange_config = None
 
-    # 讀取全局代理配置
-    http_proxy = os.getenv('HTTP_PROXY')
-    https_proxy = os.getenv('HTTPS_PROXY')
-    # 如果沒有單獨設置 https_proxy，HTTPS 也使用 http_proxy
-    if http_proxy and not https_proxy:
-        https_proxy = http_proxy
-
     if exchange == 'backpack':
         exchange_config = {
             'api_key': api_key,
@@ -585,31 +556,23 @@ def run_market_maker_command(api_key, secret_key):
             'base_url': os.getenv('BASE_URL', 'https://api.backpack.work'),
             'api_version': 'v1',
             'default_window': '5000',
-            'http_proxy': http_proxy,
-            'https_proxy': https_proxy,
         }
     elif exchange == 'aster':
         exchange_config = {
             'api_key': api_key,
             'secret_key': secret_key,
-            'http_proxy': http_proxy,
-            'https_proxy': https_proxy,
         }
     elif exchange == 'paradex':
         exchange_config = {
             'private_key': secret_key,  # Paradex 使用 StarkNet 私鑰
             'account_address': api_key or os.getenv('PARADEX_ACCOUNT_ADDRESS'),  # StarkNet 賬户地址
             'base_url': os.getenv('PARADEX_BASE_URL', 'https://api.prod.paradex.trade/v1'),
-            'http_proxy': http_proxy,
-            'https_proxy': https_proxy,
         }
     elif exchange == 'lighter':
         exchange_config = {
             'api_private_key': api_key,
             'account_index': secret_key,
             'base_url': os.getenv('LIGHTER_BASE_URL'),
-            'http_proxy': http_proxy,
-            'https_proxy': https_proxy,
         }
         api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
         if api_key_index:

@@ -9,6 +9,7 @@ from .auth import create_signature
 from config import API_URL, API_VERSION, DEFAULT_WINDOW
 from logger import setup_logger
 from .base_client import BaseExchangeClient
+from .proxy_utils import get_proxy_config
 
 logger = setup_logger("api.client")
 
@@ -25,18 +26,8 @@ class BPClient(BaseExchangeClient):
         self.api_key = config.get("api_key")
         self.secret_key = config.get("secret_key")
 
-        # 代理配置
-        http_proxy = config.get("http_proxy")
-        https_proxy = config.get("https_proxy")
-        self.proxies = {}
-        if http_proxy:
-            self.proxies['http'] = http_proxy
-            # 如果没有单独设置 https_proxy，HTTPS 也使用 http_proxy
-            if not https_proxy:
-                self.proxies['https'] = http_proxy
-        if https_proxy:
-            self.proxies['https'] = https_proxy
-
+        # 從環境變量讀取代理配置
+        self.proxies = get_proxy_config()
         if self.proxies:
             logger.info(f"Backpack 客户端已配置代理: {self.proxies}")
 
