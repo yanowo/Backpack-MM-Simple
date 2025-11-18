@@ -94,6 +94,7 @@ class SimpleSignerClient:
         self.verify_ssl = verify_ssl
         self._nonce: Optional[int] = None
         self._nonce_lock = threading.Lock()
+        self._nonce_fetch_retries = 3
         self.session = session or requests.Session()
         self.private_key = self._sanitize_private_key(private_key)
         self.chain_id = int(chain_id) if chain_id is not None else (304 if "mainnet" in self.base_url else 300)
@@ -203,24 +204,46 @@ class SimpleSignerClient:
             "account_index": self.account_index,
             "api_key_index": self.api_key_index,
         }
-        try:
-            response = self.session.get(url, params=params, timeout=self.timeout, verify=self.verify_ssl)
-        except requests.RequestException as exc:
-            raise SimpleSignerError(f"Failed to fetch nonce: {exc}") from exc
+        last_error: Optional[Exception] = None
 
-        if response.status_code != 200:
-            raise SimpleSignerError(f"Nonce request failed with status {response.status_code}: {response.text}")
+        for attempt in range(1, self._nonce_fetch_retries + 1):
+            try:
+                response = self.session.get(
+                    url,
+                    params=params,
+                    timeout=self.timeout,
+                    verify=self.verify_ssl,
+                )
+                if response.status_code != 200:
+                    raise SimpleSignerError(
+                        f"Nonce request failed with status {response.status_code}: {response.text}"
+                    )
 
-        try:
-            payload = response.json()
-        except json.JSONDecodeError as exc:
-            raise SimpleSignerError(f"Invalid nonce response: {exc}") from exc
+                try:
+                    payload = response.json()
+                except json.JSONDecodeError as exc:
+                    raise SimpleSignerError(f"Invalid nonce response: {exc}") from exc
 
-        nonce_value = payload.get("nonce")
-        if nonce_value is None:
-            raise SimpleSignerError(f"Nonce missing in response: {payload}")
-        self._nonce = int(nonce_value) - 1
-        return self._nonce
+                nonce_value = payload.get("nonce")
+                if nonce_value is None:
+                    raise SimpleSignerError(f"Nonce missing in response: {payload}")
+
+                self._nonce = int(nonce_value) - 1
+                return self._nonce
+            except (requests.RequestException, SimpleSignerError) as exc:
+                last_error = exc if isinstance(exc, SimpleSignerError) else SimpleSignerError(str(exc))
+                if attempt < self._nonce_fetch_retries:
+                    delay = min(2.0 * attempt, 10.0)
+                    logger.warning(
+                        "Failed to fetch nonce (attempt %d/%d): %s; retrying in %.1fs",
+                        attempt,
+                        self._nonce_fetch_retries,
+                        last_error,
+                        delay,
+                    )
+                    time.sleep(delay)
+
+        raise last_error or SimpleSignerError("Failed to fetch nonce: exhausted retries")
 
     def _next_nonce(self) -> int:
         with self._nonce_lock:
@@ -499,7 +522,6 @@ class SimpleSignerClient:
 
         return payloads, None, "Unable to submit batch orders after nonce retries"
 
-
 def _compact_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in data.items() if value is not None}
 
@@ -553,6 +575,8 @@ class LighterClient(BaseExchangeClient):
         self._alias_map: Dict[str, str] = {}
         self._market_id_map: Dict[int, Dict[str, Any]] = {}
         self._allow_fee_rate_inference: bool = bool(config.get("allow_fee_rate_inference", False))
+        self._market_fetch_retries: int = max(1, int(config.get("market_fetch_retries", 3)))
+        self._nonce_fetch_retries: int = max(1, int(config.get("nonce_fetch_retries", 3)))
 
         self.account_index: Optional[int] = self._as_int(
             config.get("account_index")
@@ -893,15 +917,39 @@ class LighterClient(BaseExchangeClient):
         }
 
     def _fetch_markets(self) -> List[Dict[str, Any]]:
-        payload = self.make_request("GET", "/api/v1/orderBookDetails")
-        if isinstance(payload, dict) and payload.get("error"):
-            logger.error("Failed to fetch Lighter markets: %s", payload["error"])
-            return []
-        details = payload.get("order_book_details") if isinstance(payload, dict) else None
-        if not isinstance(details, list):
-            logger.error("Unexpected market metadata format: %s", type(details).__name__)
-            return []
-        return [entry for entry in details if isinstance(entry, dict)]
+        last_error: Optional[str] = None
+        for attempt in range(1, self._market_fetch_retries + 1):
+            payload = self.make_request("GET", "/api/v1/orderBookDetails")
+            if isinstance(payload, dict) and "error" in payload:
+                last_error = payload["error"]
+                logger.error(
+                    "Failed to fetch Lighter markets (attempt %d/%d): %s",
+                    attempt,
+                    self._market_fetch_retries,
+                    last_error,
+                )
+                if attempt < self._market_fetch_retries:
+                    time.sleep(min(1.0, 0.2 * attempt))
+                continue
+
+            details = payload.get("order_book_details") if isinstance(payload, dict) else None
+            if not isinstance(details, list):
+                logger.error(
+                    "Unexpected market metadata format (attempt %d/%d): %s",
+                    attempt,
+                    self._market_fetch_retries,
+                    type(details).__name__,
+                )
+                if attempt < self._market_fetch_retries:
+                    time.sleep(min(1.0, 0.2 * attempt))
+                    continue
+                return []
+
+            return [entry for entry in details if isinstance(entry, dict)]
+
+        if last_error:
+            logger.error("Failed to fetch Lighter markets after retries: %s", last_error)
+        return []
 
     def _ensure_market_cache(self) -> None:
         if self._market_cache:
@@ -1926,12 +1974,6 @@ class LighterClient(BaseExchangeClient):
         # 注意：不能使用 or 運算符，因為 False 會被當作假值跳過
         maker_is_ask_raw = (
             trade.get("is_maker_ask")
-            if trade.get("is_maker_ask") is not None
-            else trade.get("maker_is_ask")
-            if trade.get("maker_is_ask") is not None
-            else trade.get("makerIsAsk")
-            if trade.get("makerIsAsk") is not None
-            else trade.get("maker_side_is_ask")
         )
         maker_is_ask = self._as_bool(maker_is_ask_raw)
 
@@ -1997,20 +2039,11 @@ class LighterClient(BaseExchangeClient):
         fee_source = "api_not_provided"
         fee_asset = None
 
-        order_identifier = (
-            trade.get("order_id")
-            or trade.get("orderId")
-            or trade.get("order_index")
-            or trade.get("orderIndex")
-            or trade.get("ask_id")
-            or trade.get("bid_id")
-        )
 
         timestamp = trade.get("timestamp") or trade.get("time")
 
         return {
             "trade_id": str(trade_id) if trade_id is not None else None,
-            "order_id": str(order_identifier) if order_identifier is not None else None,
             "market_id": trade.get("market_id"),
             "side": side,
             "size": size,
