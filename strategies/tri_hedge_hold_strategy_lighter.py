@@ -22,6 +22,10 @@ class StrategyConfigError(ValueError):
     """Raised when the strategy configuration is invalid."""
 
 
+class MarginFailsafeTriggered(RuntimeError):
+    """Raised when margin protection flattens positions and stops the strategy."""
+
+
 @dataclass
 class AccountCredentials:
     """Holds a single account configuration."""
@@ -219,6 +223,8 @@ class TriHedgeHoldStrategy:
         self._primary_time_in_force = str(config.primary_time_in_force or "GTC").upper()
         self._position_cache: Dict[int, Dict[str, float]] = {idx: {} for idx in range(len(self._clients))}
         self._small_fill_selector: Dict[Tuple[int, ...], int] = {}
+        self._active_cycle_context: Optional[Dict[str, Any]] = None
+        self._margin_failsafe_engaged = False
 
     # ------------------------------------------------------------------ lifecycle
     def stop(self) -> None:
@@ -227,58 +233,71 @@ class TriHedgeHoldStrategy:
     def run(self) -> None:
         logger.info("TriHedgeHold Strategy booted with %d symbols", len(self.config.symbols))
         cycles_completed = 0
-        while not self._stop_event.is_set():
-            plan = self.config.symbols[self._current_symbol_index]
-            primary_idx = self._current_primary_index
+        try:
+            while not self._stop_event.is_set():
+                plan = self.config.symbols[self._current_symbol_index]
+                primary_idx = self._current_primary_index
 
-            hedger_indices = [i for i in range(len(self._clients)) if i != primary_idx][:2]
-            primary_client = self._clients[primary_idx]
-            limits = self._get_market_limits(primary_client, plan.symbol)
-            logger.info(
-                "Starting cycle: symbol=%s primary=%s hedgers=%s target=%s slice=%s",
-                plan.symbol,
-                self._account_labels[primary_idx],
-                [self._account_labels[i] for i in hedger_indices],
-                plan.target_notional,
-                plan.slice_notional,
-            )
-
-            maker_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
-            target_base, _, price_hint = self._resolve_base_targets(primary_client, plan, limits)
-            epsilon = 1e-9
-            entry_summary = 0.0
-            performed_accumulation = False
-            maker_value_quote = maker_position * price_hint
-            if plan.target_notional > 0 and maker_value_quote + epsilon >= plan.target_notional:
+                hedger_indices = [i for i in range(len(self._clients)) if i != primary_idx][:2]
+                primary_client = self._clients[primary_idx]
+                limits = self._get_market_limits(primary_client, plan.symbol)
                 logger.info(
-                    "Existing %s position %.8f (≈ %.2f quote) >= target %.2f; skip accumulation and proceed to flatten.",
+                    "Starting cycle: symbol=%s primary=%s hedgers=%s target=%s slice=%s",
                     plan.symbol,
-                    maker_position,
-                    maker_value_quote,
+                    self._account_labels[primary_idx],
+                    [self._account_labels[i] for i in hedger_indices],
                     plan.target_notional,
+                    plan.slice_notional,
                 )
-                entry_summary = maker_position
-            else:
-                entry_summary = self._accumulate_position(primary_idx, hedger_indices, plan)
-                performed_accumulation = entry_summary > 0
 
-            if entry_summary <= 0:
-                logger.warning("No fills recorded or available for %s, skipping exit leg", plan.symbol)
-            else:
-                if performed_accumulation:
-                    self._hold_position(plan)
-                fresh_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
-                self._flatten_position(primary_idx, hedger_indices, plan, fresh_position)
-                self._print_cycle_summary(plan.symbol)
+                self._active_cycle_context = {
+                    "plan": plan,
+                    "primary_idx": primary_idx,
+                    "hedgers": tuple(hedger_indices),
+                }
+                try:
+                    maker_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
+                    target_base, _, price_hint = self._resolve_base_targets(primary_client, plan, limits)
+                    epsilon = 1e-9
+                    entry_summary = 0.0
+                    performed_accumulation = False
+                    maker_value_quote = maker_position * price_hint
+                    if plan.target_notional > 0 and maker_value_quote + epsilon >= plan.target_notional:
+                        logger.info(
+                            "Existing %s position %.8f (≈ %.2f quote) >= target %.2f; skip accumulation and proceed to flatten.",
+                            plan.symbol,
+                            maker_position,
+                            maker_value_quote,
+                            plan.target_notional,
+                        )
+                        entry_summary = maker_position
+                    else:
+                        entry_summary = self._accumulate_position(primary_idx, hedger_indices, plan)
+                        performed_accumulation = entry_summary > 0
 
-            cycles_completed += 1
-            if self.config.run_once and cycles_completed >= len(self.config.symbols):
-                logger.info("run_once enabled, stopping after one pass.")
-                break
+                    if entry_summary <= 0:
+                        logger.warning("No fills recorded or available for %s, skipping exit leg", plan.symbol)
+                    else:
+                        if performed_accumulation:
+                            self._hold_position(plan)
+                        fresh_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
+                        self._flatten_position(primary_idx, hedger_indices, plan, fresh_position)
+                        self._print_cycle_summary(plan.symbol)
+                finally:
+                    self._active_cycle_context = None
 
-            self._current_symbol_index = (self._current_symbol_index + 1) % len(self.config.symbols)
-            self._current_primary_index = (self._current_primary_index + 1) % len(self._clients)
-            self._stop_event.wait(self.config.pause_between_symbols)  # short pause between symbols; still interruptible
+                cycles_completed += 1
+                if self.config.run_once and cycles_completed >= len(self.config.symbols):
+                    logger.info("run_once enabled, stopping after one pass.")
+                    break
+
+                self._current_symbol_index = (self._current_symbol_index + 1) % len(self.config.symbols)
+                self._current_primary_index = (self._current_primary_index + 1) % len(self._clients)
+                self._stop_event.wait(self.config.pause_between_symbols)  # short pause between symbols; still interruptible
+        except MarginFailsafeTriggered:
+            logger.critical("Margin failsafe triggered; shutting down strategy loop.")
+        finally:
+            self._active_cycle_context = None
 
     # ------------------------------------------------------------------ core flow
     def _accumulate_position(self, primary_idx: int, hedgers: Sequence[int], plan: SymbolPlan) -> float:
@@ -609,6 +628,7 @@ class TriHedgeHoldStrategy:
         response = self._execute_with_nonce_retry(client, order, account_label)
         if isinstance(response, dict) and response.get("error"):
             logger.error("Limit order rejected for %s: %s", symbol, response["error"])
+            self._maybe_trigger_margin_failsafe(symbol, client_idx, str(response["error"]))
             return None, response, rounded_price, rounded_qty
         order_index = self._extract_order_index(response)
         return order_index, response, rounded_price, rounded_qty
@@ -1269,3 +1289,58 @@ class TriHedgeHoldStrategy:
             last_response = response
             break
         return last_response
+
+    def _maybe_trigger_margin_failsafe(self, symbol: str, account_idx: int, error_text: str) -> None:
+        if self._margin_failsafe_engaged:
+            return
+        lowered = (error_text or "").lower()
+        keywords = (
+            "not enough margin",
+            "insufficient margin",
+            "not enough collateral",
+            "insufficient collateral",
+        )
+        if not any(keyword in lowered for keyword in keywords):
+            return
+        self._margin_failsafe_engaged = True
+        logger.critical(
+            "Margin error detected for %s on %s: %s; triggering failsafe flatten.",
+            symbol,
+            self._account_labels[account_idx],
+            error_text,
+        )
+        self._trigger_margin_failsafe(symbol, account_idx, error_text)
+
+    def _trigger_margin_failsafe(self, symbol: str, account_idx: int, error_text: str) -> None:
+        context = self._active_cycle_context or {}
+        plan = context.get("plan") if isinstance(context, dict) else None
+        primary_idx = context.get("primary_idx") if isinstance(context, dict) else None
+        hedgers: Sequence[int] = tuple(context.get("hedgers") or ()) if isinstance(context, dict) else ()
+        target_symbol = plan.symbol if isinstance(plan, SymbolPlan) else symbol
+
+        if primary_idx is None or not isinstance(plan, SymbolPlan):
+            logger.critical(
+                "Failsafe context missing while handling margin error for %s; stopping immediately (account=%s, error=%s).",
+                symbol,
+                self._account_labels[account_idx],
+                error_text,
+            )
+            self.stop()
+            raise MarginFailsafeTriggered(error_text)
+
+        try:
+            fresh_position = max(self._refresh_position(primary_idx, target_symbol), 0.0)
+            logger.critical(
+                "Failsafe flatten starting for %s: primary=%s hedgers=%s existing_base=%.8f",
+                target_symbol,
+                self._account_labels[primary_idx],
+                [self._account_labels[idx] for idx in hedgers],
+                fresh_position,
+            )
+            self._flatten_position(primary_idx, hedgers, plan, fresh_position)
+            self._print_cycle_summary(target_symbol)
+        except Exception as exc:
+            logger.exception("Failsafe flatten encountered an error: %s", exc)
+        finally:
+            self.stop()
+        raise MarginFailsafeTriggered(error_text)
