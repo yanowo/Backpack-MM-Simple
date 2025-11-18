@@ -93,6 +93,7 @@ class SimpleSignerClient:
         self.verify_ssl = verify_ssl
         self._nonce: Optional[int] = None
         self._nonce_lock = threading.Lock()
+        self._nonce_fetch_retries = 3
         self.session = session or requests.Session()
         self.private_key = self._sanitize_private_key(private_key)
         self.chain_id = int(chain_id) if chain_id is not None else (304 if "mainnet" in self.base_url else 300)
@@ -202,24 +203,46 @@ class SimpleSignerClient:
             "account_index": self.account_index,
             "api_key_index": self.api_key_index,
         }
-        try:
-            response = self.session.get(url, params=params, timeout=self.timeout, verify=self.verify_ssl)
-        except requests.RequestException as exc:
-            raise SimpleSignerError(f"Failed to fetch nonce: {exc}") from exc
+        last_error: Optional[Exception] = None
 
-        if response.status_code != 200:
-            raise SimpleSignerError(f"Nonce request failed with status {response.status_code}: {response.text}")
+        for attempt in range(1, self._nonce_fetch_retries + 1):
+            try:
+                response = self.session.get(
+                    url,
+                    params=params,
+                    timeout=self.timeout,
+                    verify=self.verify_ssl,
+                )
+                if response.status_code != 200:
+                    raise SimpleSignerError(
+                        f"Nonce request failed with status {response.status_code}: {response.text}"
+                    )
 
-        try:
-            payload = response.json()
-        except json.JSONDecodeError as exc:
-            raise SimpleSignerError(f"Invalid nonce response: {exc}") from exc
+                try:
+                    payload = response.json()
+                except json.JSONDecodeError as exc:
+                    raise SimpleSignerError(f"Invalid nonce response: {exc}") from exc
 
-        nonce_value = payload.get("nonce")
-        if nonce_value is None:
-            raise SimpleSignerError(f"Nonce missing in response: {payload}")
-        self._nonce = int(nonce_value) - 1
-        return self._nonce
+                nonce_value = payload.get("nonce")
+                if nonce_value is None:
+                    raise SimpleSignerError(f"Nonce missing in response: {payload}")
+
+                self._nonce = int(nonce_value) - 1
+                return self._nonce
+            except (requests.RequestException, SimpleSignerError) as exc:
+                last_error = exc if isinstance(exc, SimpleSignerError) else SimpleSignerError(str(exc))
+                if attempt < self._nonce_fetch_retries:
+                    delay = min(2.0 * attempt, 10.0)
+                    logger.warning(
+                        "Failed to fetch nonce (attempt %d/%d): %s; retrying in %.1fs",
+                        attempt,
+                        self._nonce_fetch_retries,
+                        last_error,
+                        delay,
+                    )
+                    time.sleep(delay)
+
+        raise last_error or SimpleSignerError("Failed to fetch nonce: exhausted retries")
 
     def _next_nonce(self) -> int:
         with self._nonce_lock:
@@ -545,6 +568,7 @@ class LighterClient(BaseExchangeClient):
         self._market_id_map: Dict[int, Dict[str, Any]] = {}
         self._allow_fee_rate_inference: bool = bool(config.get("allow_fee_rate_inference", False))
         self._market_fetch_retries: int = max(1, int(config.get("market_fetch_retries", 3)))
+        self._nonce_fetch_retries: int = max(1, int(config.get("nonce_fetch_retries", 3)))
 
         self.account_index: Optional[int] = self._as_int(
             config.get("account_index")
