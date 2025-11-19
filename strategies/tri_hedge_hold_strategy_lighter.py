@@ -113,6 +113,7 @@ class TriHedgeHoldStrategyConfig:
     enable_hedge: bool = True
     primary_time_in_force: str = "GTC"
     market_fetch_retries: int = 3
+    order_submit_retries: int = 3
 
     @classmethod
     def from_file(cls, path: str) -> "TriHedgeHoldStrategyConfig":
