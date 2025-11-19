@@ -956,11 +956,9 @@ class TriHedgeHoldStrategy:
         limits: MarketConstraints,
     ) -> float:
         if not hedger_indices:
-            return limits.min_order_size
+            return None, limits.min_order_size
         reference_idx = hedger_indices[0]
         price = self._compute_aggressive_price(self._clients[reference_idx], symbol, side, limits.tick_size)
-        if price is None:
-            return limits.min_order_size
         return price, self._effective_min_quantity(price, limits)
 
     def _select_small_fill_target(self, hedger_indices: Sequence[int]) -> int:
