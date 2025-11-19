@@ -6,9 +6,9 @@ import random
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from api.lighter_client import LighterClient
+from api.lighter_client import LighterClient, SimpleSignerError
 from logger import setup_logger
 from utils.helpers import round_to_precision, round_to_tick_size
 
@@ -24,6 +24,16 @@ class StrategyConfigError(ValueError):
 
 class MarginFailsafeTriggered(RuntimeError):
     """Raised when margin protection flattens positions and stops the strategy."""
+
+
+class OrderSubmissionError(RuntimeError):
+    """Raised when an order submission fails and we need to unwind."""
+
+    def __init__(self, symbol: str, account_idx: int, account_label: str, message: str) -> None:
+        super().__init__(message)
+        self.symbol = symbol
+        self.account_idx = account_idx
+        self.account_label = account_label
 
 
 @dataclass
@@ -102,6 +112,8 @@ class TriHedgeHoldStrategyConfig:
     run_once: bool = False
     enable_hedge: bool = True
     primary_time_in_force: str = "GTC"
+    market_fetch_retries: int = 3
+    order_submit_retries: int = 3
 
     @classmethod
     def from_file(cls, path: str) -> "TriHedgeHoldStrategyConfig":
@@ -199,6 +211,7 @@ class TriHedgeHoldStrategyConfig:
             random_split_range=(low, high),
             run_once=bool(payload.get("run_once", False)),
             primary_time_in_force=str(payload.get("primary_time_in_force", "GTC")),
+            market_fetch_retries=int(payload.get("market_fetch_retries", 3)),
         )
         if not config.base_url and any(acc.base_url is None for acc in accounts):
             raise StrategyConfigError("base_url missing; configure global base_url or per-account base_url entries.")
@@ -223,6 +236,8 @@ class TriHedgeHoldStrategy:
         self._primary_time_in_force = str(config.primary_time_in_force or "GTC").upper()
         self._position_cache: Dict[int, Dict[str, float]] = {idx: {} for idx in range(len(self._clients))}
         self._small_fill_selector: Dict[Tuple[int, ...], int] = {}
+        self._market_fetch_retries = max(1, int(config.market_fetch_retries))
+        self._order_submit_retries = max(1, int(config.order_submit_retries))
         self._active_cycle_context: Optional[Dict[str, Any]] = None
         self._margin_failsafe_engaged = False
 
@@ -240,7 +255,7 @@ class TriHedgeHoldStrategy:
 
                 hedger_indices = [i for i in range(len(self._clients)) if i != primary_idx][:2]
                 primary_client = self._clients[primary_idx]
-                limits = self._get_market_limits(primary_client, plan.symbol)
+                limits = self._get_market_limits_with_retry(primary_client, plan.symbol)
                 logger.info(
                     "Starting cycle: symbol=%s primary=%s hedgers=%s target=%s slice=%s",
                     plan.symbol,
@@ -283,6 +298,8 @@ class TriHedgeHoldStrategy:
                         fresh_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
                         self._flatten_position(primary_idx, hedger_indices, plan, fresh_position)
                         self._print_cycle_summary(plan.symbol)
+                except OrderSubmissionError as exc:
+                    self._handle_order_failure(exc)
                 finally:
                     self._active_cycle_context = None
 
@@ -302,7 +319,7 @@ class TriHedgeHoldStrategy:
     # ------------------------------------------------------------------ core flow
     def _accumulate_position(self, primary_idx: int, hedgers: Sequence[int], plan: SymbolPlan) -> float:
         client = self._clients[primary_idx]
-        limits = self._get_market_limits(client, plan.symbol)
+        limits = self._get_market_limits_with_retry(client, plan.symbol)
         target_base_total, configured_slice_qty, conversion_price = self._resolve_base_targets(client, plan, limits)
         total_base_filled = 0.0
         self._prime_positions(plan.symbol, [primary_idx, *hedgers])
@@ -450,7 +467,7 @@ class TriHedgeHoldStrategy:
         target_base_quantity: float,
     ) -> None:
         client = self._clients[primary_idx]
-        limits = self._get_market_limits(client, plan.symbol)
+        limits = self._get_market_limits_with_retry(client, plan.symbol)
         remaining_base = float(target_base_quantity)
         epsilon = max(1e-12, 10 ** (-limits.base_precision))
         if remaining_base <= 0:
@@ -625,11 +642,24 @@ class TriHedgeHoldStrategy:
         }
         if order_expiry is not None:
             order["orderExpiry"] = order_expiry
-        response = self._execute_with_nonce_retry(client, order, account_label)
+        try:
+            response = self._execute_with_nonce_retry(
+                client,
+                order,
+                account_label,
+                max_retries=self._order_submit_retries,
+            )
+        except Exception as exc:
+            logger.error(
+                "Limit order submission exception for %s on %s: %s",
+                symbol,
+                account_label,
+                exc,
+            )
+            raise OrderSubmissionError(symbol, client_idx, account_label, str(exc)) from exc
         if isinstance(response, dict) and response.get("error"):
-            logger.error("Limit order rejected for %s: %s", symbol, response["error"])
-            self._maybe_trigger_margin_failsafe(symbol, client_idx, str(response["error"]))
-            return None, response, rounded_price, rounded_qty
+            logger.error("Limit order rejected for %s on %s: %s", symbol, account_label, response["error"])
+            raise OrderSubmissionError(symbol, client_idx, account_label, str(response["error"]))
         order_index = self._extract_order_index(response)
         return order_index, response, rounded_price, rounded_qty
 
@@ -661,7 +691,7 @@ class TriHedgeHoldStrategy:
             if signed_delta > epsilon:
                 filled += signed_delta
         if order_index:
-            cancel_result = client.cancel_order(order_index, symbol)
+            cancel_result = self._cancel_order_with_retry(client, order_index, symbol)
             if isinstance(cancel_result, dict) and cancel_result.get("error"):
                 logger.debug("Cancel %s for %s response: %s", order_index, symbol, cancel_result["error"])
         final_position = last_position
@@ -926,11 +956,9 @@ class TriHedgeHoldStrategy:
         limits: MarketConstraints,
     ) -> float:
         if not hedger_indices:
-            return limits.min_order_size
+            return None, limits.min_order_size
         reference_idx = hedger_indices[0]
         price = self._compute_aggressive_price(self._clients[reference_idx], symbol, side, limits.tick_size)
-        if price is None:
-            return limits.min_order_size
         return price, self._effective_min_quantity(price, limits)
 
     def _select_small_fill_target(self, hedger_indices: Sequence[int]) -> int:
@@ -1237,6 +1265,20 @@ class TriHedgeHoldStrategy:
             price = min(price, best_bid)
         return price
 
+    def _get_market_limits_with_retry(self, client: LighterClient, symbol: str) -> MarketConstraints:
+        return self._call_with_retry(
+            lambda: self._get_market_limits(client, symbol),
+            attempts=self._market_fetch_retries,
+            description=f"fetch market metadata for {symbol}",
+        )
+
+    def _cancel_order_with_retry(self, client: LighterClient, order_index: str, symbol: str) -> Any:
+        return self._call_with_retry(
+            lambda: client.cancel_order(order_index, symbol),
+            attempts=self._order_submit_retries,
+            description=f"cancel order {order_index} on {symbol}",
+        )
+
     def _get_market_limits(self, client: LighterClient, symbol: str) -> MarketConstraints:
         cached = self._market_cache.get(symbol)
         if cached:
@@ -1253,6 +1295,34 @@ class TriHedgeHoldStrategy:
         )
         self._market_cache[symbol] = limits
         return limits
+
+    def _call_with_retry(self, func: Callable[[], Any], attempts: int, description: str) -> Any:
+        max_attempts = max(1, attempts)
+        last_error: Optional[BaseException] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return func()
+            except Exception as exc:  # noqa: BLE001 - bubble original error after logging
+                last_error = exc
+                if attempt < max_attempts:
+                    logger.warning(
+                        "Failed to %s (attempt %s/%s): %s",
+                        description,
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    # Allow stop_event to interrupt long retry loops
+                    self._stop_event.wait(min(1.0 * attempt, 5.0))
+                else:
+                    logger.error(
+                        "Giving up trying to %s after %s attempts: %s",
+                        description,
+                        max_attempts,
+                        exc,
+                    )
+        assert last_error is not None
+        raise last_error
 
     @staticmethod
     def _refresh_client_nonce(client: LighterClient) -> Optional[int]:
@@ -1273,9 +1343,24 @@ class TriHedgeHoldStrategy:
         max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         last_response: Dict[str, Any] = {}
+        last_error: Optional[Exception] = None
         retries = max_retries if isinstance(max_retries, int) and max_retries > 0 else 1
         for attempt in range(1, retries + 1):
-            response = client.execute_order(order)
+            try:
+                response = client.execute_order(order)
+            except (SimpleSignerError, Exception) as exc:  # noqa: BLE001 - propagate after retries
+                last_error = exc
+                if attempt < retries:
+                    logger.warning(
+                        "Order submit attempt %s/%s for %s failed (%s); retrying...",
+                        attempt,
+                        retries,
+                        account_label,
+                        exc,
+                    )
+                    self._stop_event.wait(min(0.5 * attempt, 2.0))
+                    continue
+                raise exc
             if isinstance(response, dict) and response.get("error"):
                 error_text = str(response["error"]).lower()
                 if "nonce" in error_text and attempt < retries:
@@ -1288,28 +1373,27 @@ class TriHedgeHoldStrategy:
                 break
             last_response = response
             break
+        if last_error:
+            raise last_error
         return last_response
 
-    def _maybe_trigger_margin_failsafe(self, symbol: str, account_idx: int, error_text: str) -> None:
+    def _handle_order_failure(self, exc: OrderSubmissionError) -> None:
         if self._margin_failsafe_engaged:
-            return
-        lowered = (error_text or "").lower()
-        keywords = (
-            "not enough margin",
-            "insufficient margin",
-            "not enough collateral",
-            "insufficient collateral",
-        )
-        if not any(keyword in lowered for keyword in keywords):
-            return
+            logger.critical(
+                "Additional order failure for %s on %s while failsafe already engaged: %s",
+                exc.symbol,
+                exc.account_label,
+                exc,
+            )
+            raise MarginFailsafeTriggered(str(exc))
         self._margin_failsafe_engaged = True
         logger.critical(
-            "Margin error detected for %s on %s: %s; triggering failsafe flatten.",
-            symbol,
-            self._account_labels[account_idx],
-            error_text,
+            "Order submission failed for %s on %s: %s",
+            exc.symbol,
+            exc.account_label,
+            exc,
         )
-        self._trigger_margin_failsafe(symbol, account_idx, error_text)
+        self._trigger_margin_failsafe(exc.symbol, exc.account_idx, str(exc))
 
     def _trigger_margin_failsafe(self, symbol: str, account_idx: int, error_text: str) -> None:
         context = self._active_cycle_context or {}
