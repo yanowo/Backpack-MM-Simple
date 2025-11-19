@@ -691,7 +691,7 @@ class TriHedgeHoldStrategy:
             if signed_delta > epsilon:
                 filled += signed_delta
         if order_index:
-            cancel_result = client.cancel_order(order_index, symbol)
+            cancel_result = self._cancel_order_with_retry(client, order_index, symbol)
             if isinstance(cancel_result, dict) and cancel_result.get("error"):
                 logger.debug("Cancel %s for %s response: %s", order_index, symbol, cancel_result["error"])
         final_position = last_position
@@ -1270,6 +1270,13 @@ class TriHedgeHoldStrategy:
             lambda: self._get_market_limits(client, symbol),
             attempts=self._market_fetch_retries,
             description=f"fetch market metadata for {symbol}",
+        )
+
+    def _cancel_order_with_retry(self, client: LighterClient, order_index: str, symbol: str) -> Any:
+        return self._call_with_retry(
+            lambda: client.cancel_order(order_index, symbol),
+            attempts=self._order_submit_retries,
+            description=f"cancel order {order_index} on {symbol}",
         )
 
     def _get_market_limits(self, client: LighterClient, symbol: str) -> MarketConstraints:
