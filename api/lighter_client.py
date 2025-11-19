@@ -30,13 +30,17 @@ _DEFAULT_SIGNER_SEARCH_PATHS = [
     os.path.join(_MODULE_DIR, "signers"),
     os.path.join(os.path.dirname(_MODULE_DIR), "external", "lighter-python", "lighter", "signers"),
     os.path.join(os.path.dirname(_MODULE_DIR), "Signer", "Lighter"),
+    os.path.join(os.path.dirname(_MODULE_DIR), "Signer", "lighter"),
 ]
 _SIGNER_FILENAMES = {
-    ("windows", "amd64"): "signer-amd64.dll",
-    ("windows", "x86_64"): "signer-amd64.dll",
-    ("linux", "x86_64"): "signer-amd64.so",
-    ("linux", "amd64"): "signer-amd64.so",
-    ("darwin", "arm64"): "signer-arm64.dylib",
+    ("windows", "amd64"): ["lighter-signer-windows-amd64.dll"],
+    ("windows", "x86_64"): ["lighter-signer-windows-amd64.dll"],
+    ("linux", "x86_64"): ["lighter-signer-linux-amd64.so"],
+    ("linux", "amd64"): ["lighter-signer-linux-amd64.so"],
+    ("linux", "arm64"): ["lighter-signer-linux-arm64.so"],
+    ("linux", "aarch64"): ["lighter-signer-linux-arm64.so"],  # ARM64 on Linux uses aarch64
+    ("darwin", "arm64"): ["lighter-signer-darwin-arm64.dylib"],
+    ("darwin", "aarch64"): ["lighter-signer-darwin-arm64.dylib"],
 }
 
 
@@ -119,24 +123,35 @@ class SimpleSignerClient:
     def _load_library(self, signer_dir: Optional[str]) -> ctypes.CDLL:
         system = platform.system().lower()
         arch = platform.machine().lower()
-        filename = _SIGNER_FILENAMES.get((system, arch))
-        if not filename:
+        filenames = _SIGNER_FILENAMES.get((system, arch))
+        if not filenames:
             raise SimpleSignerError(f"Unsupported platform/architecture: {system}/{arch}")
+
+        # 確保 filenames 是列表格式
+        if isinstance(filenames, str):
+            filenames = [filenames]
 
         search_paths: List[str] = []
         if signer_dir:
             search_paths.append(signer_dir)
         search_paths.extend(_DEFAULT_SIGNER_SEARCH_PATHS)
 
+        # 嘗試所有搜索路徑和文件名組合
         for candidate_dir in search_paths:
             if not candidate_dir:
                 continue
-            candidate = os.path.join(candidate_dir, filename)
-            if os.path.isfile(candidate):
-                return ctypes.CDLL(candidate)
+            for filename in filenames:
+                candidate = os.path.join(candidate_dir, filename)
+                if os.path.isfile(candidate):
+                    logger.info(f"Found Lighter signer library: {candidate}")
+                    return ctypes.CDLL(candidate)
+
+        # 如果找不到任何文件，提供詳細的錯誤信息
+        filenames_str = "', '".join(filenames)
         raise SimpleSignerError(
-            f"Unable to locate signer library '{filename}'. "
-            "Set `signer_lib_dir` in config or place the library under api/signers/."
+            f"Unable to locate signer library. Tried filenames: '{filenames_str}'. "
+            f"Searched in: {search_paths}. "
+            "Set `signer_lib_dir` in config or place the library under api/signers/ or Signer/lighter/."
         )
 
     def _configure_library(self) -> None:
