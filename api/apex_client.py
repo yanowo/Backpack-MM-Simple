@@ -27,7 +27,8 @@ class ApexClient(BaseExchangeClient):
         self.api_key = config.get("api_key")
         self.secret_key = config.get("secret_key")
         self.passphrase = config.get("passphrase", "")
-        self.base_url = config.get("base_url", "https://omni.apex.exchange/api")
+        # APEX Omni base URL
+        self.base_url = config.get("base_url", "https://omni.apex.exchange")
         self.timeout = float(config.get("timeout", 10))
         self.max_retries = int(config.get("max_retries", 3))
         self.session = requests.Session()
@@ -54,9 +55,13 @@ class ApexClient(BaseExchangeClient):
     def _current_timestamp(self) -> int:
         return int(time.time() * 1000)
 
-    def _iso_timestamp(self) -> str:
-        """Generate ISO 8601 timestamp for APEX API."""
-        return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    def _generate_timestamp(self) -> str:
+        """Generate timestamp for APEX API.
+
+        Returns milliseconds timestamp as string (e.g., '1763723904275')
+        Official SDK uses: int(round(time.time() * 1000))
+        """
+        return str(int(round(time.time() * 1000)))
 
     def _normalize_order_fields(self, order: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize order fields to standard format."""
@@ -178,14 +183,14 @@ class ApexClient(BaseExchangeClient):
         Args:
             request_path: API endpoint path (e.g., /v3/account)
             method: HTTP method (GET, POST, DELETE)
-            timestamp: ISO 8601 timestamp
+            timestamp: Timestamp string (milliseconds)
             data: Request parameters
 
         Returns:
             Base64 encoded HMAC-SHA256 signature
         """
+        # Sort parameters alphabetically (for both GET and POST)
         if data:
-            # Sort parameters alphabetically
             sorted_items = sorted(data.items(), key=lambda x: x[0])
             data_string = '&'.join(
                 f'{key}={value}' for key, value in sorted_items if value is not None
@@ -193,21 +198,23 @@ class ApexClient(BaseExchangeClient):
         else:
             data_string = ''
 
-        # Build message: timestamp + method + path + data
-        if method.upper() == 'GET':
-            message = timestamp + method.upper() + request_path
-        else:
-            message = timestamp + method.upper() + request_path + data_string
+        # Build message: timestamp + method + path + data (same for all methods)
+        message = timestamp + method.upper() + request_path + data_string
 
-        # Create HMAC-SHA256 signature with base64 encoded secret
-        secret_bytes = base64.standard_b64encode(self.secret_key.encode('utf-8'))
+        # 調試信息
+        logger.info(f"APEX 簽名消息: {message}")
+
+        # Create HMAC-SHA256 signature
+        # 官方 SDK: base64.standard_b64encode(secret.encode('utf-8'))
         hashed = hmac.new(
-            secret_bytes,
+            base64.standard_b64encode(self.secret_key.encode('utf-8')),
             msg=message.encode('utf-8'),
             digestmod=hashlib.sha256
         )
 
-        return base64.standard_b64encode(hashed.digest()).decode()
+        signature = base64.standard_b64encode(hashed.digest()).decode()
+        logger.info(f"APEX 簽名: {signature[:20]}...")
+        return signature
 
     def make_request(
         self,
@@ -236,8 +243,11 @@ class ApexClient(BaseExchangeClient):
             if not self.api_key or not self.secret_key:
                 return {"error": "缺少 API Key 或 Secret Key"}
 
-            timestamp = self._iso_timestamp()
-            signature = self._sign_request(endpoint, method, timestamp, payload if method.upper() != 'GET' else None)
+            # 生成一次時間戳，用於簽名和 header（毫秒時間戳）
+            timestamp = self._generate_timestamp()
+
+            # GET 和 POST 請求都需要在簽名中包含參數
+            signature = self._sign_request(endpoint, method, timestamp, payload)
 
             headers.update({
                 'APEX-SIGNATURE': signature,
@@ -245,6 +255,11 @@ class ApexClient(BaseExchangeClient):
                 'APEX-API-KEY': self.api_key,
                 'APEX-PASSPHRASE': self.passphrase or ''
             })
+
+            # 調試信息
+            logger.info(f"APEX 請求 - 端點: {endpoint}, 方法: {method}")
+            logger.info(f"APEX 時間戳: {timestamp}")
+            logger.info(f"APEX API Key: {self.api_key[:10]}...")
 
         method_upper = method.upper()
         retry_total = retry_count or self.max_retries
@@ -305,10 +320,14 @@ class ApexClient(BaseExchangeClient):
     def get_balance(self) -> Dict[str, Any]:
         result = self.make_request(
             "GET",
-            "/v3/account-balance",
+            "/api/v3/account-balance",
             instruction=True,
             retry_count=self.max_retries,
         )
+
+        # 打印原始響應以便調試
+        logger.info(f"APEX get_balance 原始響應: {result}")
+
         if isinstance(result, dict) and "error" in result:
             return result
 
@@ -335,10 +354,14 @@ class ApexClient(BaseExchangeClient):
     def get_collateral(self, subaccount_id: Optional[str] = None) -> Dict[str, Any]:
         result = self.make_request(
             "GET",
-            "/v3/account",
+            "/api/v3/account",
             instruction=True,
             retry_count=self.max_retries,
         )
+
+        # 打印原始響應以便調試
+        logger.info(f"APEX get_collateral 原始響應: {result}")
+
         if isinstance(result, dict) and "error" in result:
             return result
 
@@ -427,7 +450,7 @@ class ApexClient(BaseExchangeClient):
 
         result = self.make_request(
             "POST",
-            "/v3/order",
+            "/api/v3/order",
             instruction=True,
             data=payload,
             retry_count=self.max_retries,
@@ -448,7 +471,7 @@ class ApexClient(BaseExchangeClient):
 
         result = self.make_request(
             "GET",
-            "/v3/open-orders",
+            "/api/v3/open-orders",
             instruction=True,
             params=params,
             retry_count=self.max_retries,
@@ -471,7 +494,7 @@ class ApexClient(BaseExchangeClient):
 
         result = self.make_request(
             "POST",
-            "/v3/delete-open-orders",
+            "/api/v3/delete-open-orders",
             instruction=True,
             data={"symbol": resolved_symbol},
             retry_count=self.max_retries,
@@ -485,7 +508,7 @@ class ApexClient(BaseExchangeClient):
 
         result = self.make_request(
             "POST",
-            "/v3/delete-order",
+            "/api/v3/delete-order",
             instruction=True,
             data={"id": order_id},
             retry_count=self.max_retries,
@@ -503,7 +526,7 @@ class ApexClient(BaseExchangeClient):
 
         result = self.make_request(
             "GET",
-            "/v3/ticker",
+            "/api/v2/ticker",
             params={"symbol": resolved_symbol},
             retry_count=self.max_retries,
         )
@@ -524,7 +547,15 @@ class ApexClient(BaseExchangeClient):
     def get_markets(self) -> Dict[str, Any]:
         return self.make_request(
             "GET",
-            "/v3/configs",
+            "/api/v2/symbols",
+            retry_count=self.max_retries,
+        )
+
+    def get_server_time(self) -> Dict[str, Any]:
+        """Get server time to check clock sync."""
+        return self.make_request(
+            "GET",
+            "/api/v2/time",
             retry_count=self.max_retries,
         )
 
@@ -535,7 +566,7 @@ class ApexClient(BaseExchangeClient):
 
         result = self.make_request(
             "GET",
-            "/v3/depth",
+            "/api/v2/depth",
             params={"symbol": resolved_symbol, "limit": limit},
             retry_count=self.max_retries,
         )
@@ -566,7 +597,7 @@ class ApexClient(BaseExchangeClient):
 
         return self.make_request(
             "GET",
-            "/v3/fills",
+            "/api/v3/fills",
             instruction=True,
             params=params,
             retry_count=self.max_retries,
@@ -597,7 +628,7 @@ class ApexClient(BaseExchangeClient):
 
         return self.make_request(
             "GET",
-            "/v3/klines",
+            "/api/v2/klines",
             params=params,
             retry_count=self.max_retries,
         )
@@ -634,7 +665,7 @@ class ApexClient(BaseExchangeClient):
     def get_positions(self, symbol: Optional[str] = None) -> Any:
         result = self.make_request(
             "GET",
-            "/v3/account",
+            "/api/v3/account",
             instruction=True,
             retry_count=self.max_retries,
         )
