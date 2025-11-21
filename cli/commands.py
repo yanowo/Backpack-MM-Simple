@@ -10,6 +10,7 @@ from api.bp_client import BPClient
 from api.aster_client import AsterClient
 from api.paradex_client import ParadexClient
 from api.lighter_client import LighterClient
+from api.apex_client import ApexClient
 from ws_client.client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -75,6 +76,13 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
 
         # 將account_index作為secret_candidates返回
         secret_candidates = [account_index_value] if account_index_value else []
+    elif exchange == "apex":
+        api_candidates = [
+            os.getenv("APEX_API_KEY"),
+        ]
+        secret_candidates = [
+            os.getenv("APEX_SECRET_KEY"),
+        ]
     else:
         api_candidates = [
             os.getenv("BACKPACK_KEY"),
@@ -94,7 +102,7 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
 def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_config=None):
     """獲取緩存的客户端實例，避免重複創建"""
     exchange = (exchange or 'backpack').lower()
-    if exchange not in ('backpack', 'aster', 'paradex', 'lighter'):
+    if exchange not in ('backpack', 'aster', 'paradex', 'lighter', 'apex'):
         raise ValueError(f"不支持的交易所: {exchange}")
 
     config = dict(exchange_config or {})
@@ -162,6 +170,13 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
             if config.get('account_address') or config.get('private_key')
             else 'public'
         )
+    elif exchange == 'apex':
+        # APEX使用api_key/secret_key
+        cache_suffix = (
+            f"{config.get('api_key', '')}_{config.get('secret_key', '')}"
+            if config.get('api_key') or config.get('secret_key')
+            else 'public'
+        )
     else:
         # 其他交易所使用api_key/secret_key
         cache_suffix = (
@@ -178,8 +193,10 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
             client_cls = AsterClient
         elif exchange == 'paradex':
             client_cls = ParadexClient
-        else:  # lighter
+        elif exchange == 'lighter':
             client_cls = LighterClient
+        else:  # apex
+            client_cls = ApexClient
         _client_cache[cache_key] = client_cls(config)
 
     return _client_cache[cache_key]
@@ -217,6 +234,11 @@ def get_balance_command(api_key, secret_key):
     if lighter_private and lighter_account_index:
         exchanges_to_check.append(('lighter', lighter_private, lighter_account_index))
 
+    # 檢查 APEX
+    apex_api, apex_secret = _resolve_api_credentials('apex', None, None)
+    if apex_api and apex_secret:
+        exchanges_to_check.append(('apex', apex_api, apex_secret))
+
     if not exchanges_to_check:
         print("未找到任何已配置的交易所 API 密鑰")
         return
@@ -249,6 +271,13 @@ def get_balance_command(api_key, secret_key):
                 verify_ssl_env = os.getenv('LIGHTER_VERIFY_SSL')
                 if verify_ssl_env is not None:
                     exchange_config['verify_ssl'] = verify_ssl_env.lower() not in ('0', 'false', 'no')
+            elif exchange == 'apex':
+                exchange_config = {
+                    'api_key': ex_api_key,
+                    'secret_key': ex_secret_key,
+                    'passphrase': os.getenv('APEX_PASSPHRASE', ''),
+                    'base_url': os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange/api'),
+                }
             else:
                 exchange_config['secret_key'] = ex_secret_key
             
@@ -317,6 +346,23 @@ def get_balance_command(api_key, secret_key):
 
                     # 顯示持倉信息（如果有）
                     assets = collateral.get('assets', [])
+            elif exchange == 'apex':
+                # APEX 的抵押品信息格式
+                if isinstance(collateral, dict) and "error" in collateral:
+                    print(f"獲取抵押品失敗: {collateral['error']}")
+                elif isinstance(collateral, dict):
+                    total_collateral = collateral.get('totalCollateral', 0)
+                    available_collateral = collateral.get('availableCollateral', 0)
+                    initial_margin = collateral.get('initialMargin', 0)
+                    maintenance_margin = collateral.get('maintenanceMargin', 0)
+
+                    print("\n賬户摘要:")
+                    print(f"總抵押品: {total_collateral} USDT")
+                    print(f"可用抵押品: {available_collateral} USDT")
+                    if initial_margin:
+                        print(f"初始保證金: {initial_margin} USDT")
+                    if maintenance_margin:
+                        print(f"維持保證金: {maintenance_margin} USDT")
                     if assets:
                         print("\n抵押品資產:")
                         for item in assets:
@@ -528,10 +574,10 @@ def configure_rebalance_settings():
 def run_market_maker_command(api_key, secret_key):
     """執行做市策略命令"""
     # [整合功能] 1. 增加交易所選擇
-    exchange_input = input("請選擇交易所 (backpack/aster/paradex/lighter，默認 backpack): ").strip().lower()
+    exchange_input = input("請選擇交易所 (backpack/aster/paradex/lighter/apex，默認 backpack): ").strip().lower()
 
     # 處理交易所選擇
-    if exchange_input in ('backpack', 'aster', 'paradex', 'lighter', ''):
+    if exchange_input in ('backpack', 'aster', 'paradex', 'lighter', 'apex', ''):
         exchange = exchange_input if exchange_input else 'backpack'
     else:
         print(f"警告: 不識別的交易所 '{exchange_input}'，使用默認 'backpack'")
@@ -583,6 +629,13 @@ def run_market_maker_command(api_key, secret_key):
         verify_ssl_env = os.getenv('LIGHTER_VERIFY_SSL')
         if verify_ssl_env is not None:
             exchange_config['verify_ssl'] = verify_ssl_env.lower() not in ('0', 'false', 'no')
+    elif exchange == 'apex':
+        exchange_config = {
+            'api_key': api_key,
+            'secret_key': secret_key,
+            'passphrase': os.getenv('APEX_PASSPHRASE', ''),
+            'base_url': os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange/api'),
+        }
     else:
         print("錯誤：不支持的交易所。")
         return
@@ -1305,6 +1358,7 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, enable_database=ENABLE_DATA
         'aster': 'Aster',
         'paradex': 'Paradex',
         'lighter': 'Lighter',
+        'apex': 'APEX',
     }.get(exchange.lower(), 'Backpack')
 
     while True:
