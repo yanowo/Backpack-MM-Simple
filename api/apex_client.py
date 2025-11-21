@@ -336,16 +336,19 @@ class ApexClient(BaseExchangeClient):
         balances: Dict[str, Dict[str, Any]] = {}
 
         # APEX uses totalEquityValue and availableBalance
+        # totalEquityValue = 總權益價值
+        # availableBalance = 可用於開倉的保證金
         total_equity = float(data.get("totalEquityValue", 0))
         available = float(data.get("availableBalance", 0))
-        locked = max(total_equity - available, 0.0)
+        # 使用中的保證金 = 總權益 - 可用保證金
+        in_use = max(total_equity - available, 0.0)
 
-        # Primary settlement currency
-        balances["USDT"] = {
+        # APEX Omni 使用 USDC 作為結算貨幣
+        balances["USDC"] = {
             "available": available,
-            "locked": locked,
+            "locked": in_use,  # 使用中的保證金（非凍結）
             "total": total_equity,
-            "asset": "USDT",
+            "asset": "USDC",
             "raw": data,
         }
 
@@ -367,11 +370,26 @@ class ApexClient(BaseExchangeClient):
 
         data = result.get("data", {})
 
+        # 從 contractWallets 獲取合約錢包餘額
+        contract_wallets = data.get("contractWallets", [])
+        total_balance = "0"
+        token = "USDC"
+        if contract_wallets:
+            wallet = contract_wallets[0]
+            total_balance = wallet.get("balance", "0")
+            token = wallet.get("token", "USDC")
+
+        # 從 contractAccount 獲取費率信息
+        contract_account = data.get("contractAccount", {})
+
         return {
-            "totalCollateral": data.get("totalEquityValue", "0"),
-            "availableCollateral": data.get("availableBalance", "0"),
-            "initialMargin": data.get("initialMargin", "0"),
-            "maintenanceMargin": data.get("maintenanceMargin", "0"),
+            "totalCollateral": total_balance,
+            "availableCollateral": total_balance,  # 合約錢包餘額
+            "initialMargin": "0",
+            "maintenanceMargin": "0",
+            "token": token,
+            "makerFeeRate": contract_account.get("makerFeeRate", "0"),
+            "takerFeeRate": contract_account.get("takerFeeRate", "0"),
             "raw": data
         }
 

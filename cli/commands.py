@@ -276,7 +276,7 @@ def get_balance_command(api_key, secret_key):
                     'api_key': ex_api_key,
                     'secret_key': ex_secret_key,
                     'passphrase': os.getenv('APEX_PASSPHRASE', ''),
-                    'base_url': os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange/api'),
+                    'base_url': os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange'),
                 }
             else:
                 exchange_config['secret_key'] = ex_secret_key
@@ -353,23 +353,15 @@ def get_balance_command(api_key, secret_key):
                 elif isinstance(collateral, dict):
                     total_collateral = collateral.get('totalCollateral', 0)
                     available_collateral = collateral.get('availableCollateral', 0)
-                    initial_margin = collateral.get('initialMargin', 0)
-                    maintenance_margin = collateral.get('maintenanceMargin', 0)
+                    token = collateral.get('token', 'USDC')
+                    maker_fee = collateral.get('makerFeeRate', '0')
+                    taker_fee = collateral.get('takerFeeRate', '0')
 
                     print("\n賬户摘要:")
-                    print(f"總抵押品: {total_collateral} USDT")
-                    print(f"可用抵押品: {available_collateral} USDT")
-                    if initial_margin:
-                        print(f"初始保證金: {initial_margin} USDT")
-                    if maintenance_margin:
-                        print(f"維持保證金: {maintenance_margin} USDT")
-                    if assets:
-                        print("\n抵押品資產:")
-                        for item in assets:
-                            symbol = item.get('symbol', '')
-                            total = item.get('totalQuantity', '')
-                            available = item.get('availableQuantity', '')
-                            print(f"{symbol}: 總量 {total}, 可用 {available}")
+                    print(f"合約錢包餘額: {total_collateral} {token}")
+                    if maker_fee != '0' or taker_fee != '0':
+                        print(f"Maker 費率: {float(maker_fee)*100:.2f}%")
+                        print(f"Taker 費率: {float(taker_fee)*100:.2f}%")
             else:
                 # 其他交易所的抵押品信息
                 if isinstance(collateral, dict) and "error" in collateral:
@@ -634,7 +626,7 @@ def run_market_maker_command(api_key, secret_key):
             'api_key': api_key,
             'secret_key': secret_key,
             'passphrase': os.getenv('APEX_PASSPHRASE', ''),
-            'base_url': os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange/api'),
+            'base_url': os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange'),
         }
     else:
         print("錯誤：不支持的交易所。")
