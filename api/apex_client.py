@@ -201,9 +201,6 @@ class ApexClient(BaseExchangeClient):
         # Build message: timestamp + method + path + data (same for all methods)
         message = timestamp + method.upper() + request_path + data_string
 
-        # 調試信息
-        logger.info(f"APEX 簽名消息: {message}")
-
         # Create HMAC-SHA256 signature
         # 官方 SDK: base64.standard_b64encode(secret.encode('utf-8'))
         hashed = hmac.new(
@@ -213,7 +210,6 @@ class ApexClient(BaseExchangeClient):
         )
 
         signature = base64.standard_b64encode(hashed.digest()).decode()
-        logger.info(f"APEX 簽名: {signature[:20]}...")
         return signature
 
     def make_request(
@@ -255,11 +251,6 @@ class ApexClient(BaseExchangeClient):
                 'APEX-API-KEY': self.api_key,
                 'APEX-PASSPHRASE': self.passphrase or ''
             })
-
-            # 調試信息
-            logger.info(f"APEX 請求 - 端點: {endpoint}, 方法: {method}")
-            logger.info(f"APEX 時間戳: {timestamp}")
-            logger.info(f"APEX API Key: {self.api_key[:10]}...")
 
         method_upper = method.upper()
         retry_total = retry_count or self.max_retries
@@ -318,39 +309,55 @@ class ApexClient(BaseExchangeClient):
         return {"error": "請使用 APEX 網頁界面獲取充值地址"}
 
     def get_balance(self) -> Dict[str, Any]:
-        result = self.make_request(
+        balances: Dict[str, Dict[str, Any]] = {}
+
+        # 獲取 account-balance 的 totalEquityValue（可用保證金）
+        balance_result = self.make_request(
             "GET",
             "/api/v3/account-balance",
             instruction=True,
             retry_count=self.max_retries,
         )
 
-        # 打印原始響應以便調試
-        logger.info(f"APEX get_balance 原始響應: {result}")
+        total_equity = 0.0
+        if isinstance(balance_result, dict) and "error" not in balance_result:
+            data = balance_result.get("data", {})
+            total_equity = float(data.get("totalEquityValue", 0))
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        # 獲取 account 的 contractWallets（錢包餘額）
+        account_result = self.make_request(
+            "GET",
+            "/api/v3/account",
+            instruction=True,
+            retry_count=self.max_retries,
+        )
 
-        # Parse APEX balance response
-        data = result.get("data", {})
-        balances: Dict[str, Dict[str, Any]] = {}
+        if isinstance(account_result, dict) and "error" in account_result:
+            return account_result
 
-        # APEX uses totalEquityValue and availableBalance
-        # totalEquityValue = 總權益價值
-        # availableBalance = 可用於開倉的保證金
-        total_equity = float(data.get("totalEquityValue", 0))
-        available = float(data.get("availableBalance", 0))
-        # 使用中的保證金 = 總權益 - 可用保證金
-        in_use = max(total_equity - available, 0.0)
+        data = account_result.get("data", {})
+        contract_wallets = data.get("contractWallets", [])
 
-        # APEX Omni 使用 USDC 作為結算貨幣
-        balances["USDC"] = {
-            "available": available,
-            "locked": in_use,  # 使用中的保證金（非凍結）
-            "total": total_equity,
-            "asset": "USDC",
-            "raw": data,
-        }
+        if contract_wallets:
+            wallet = contract_wallets[0]
+            wallet_balance = float(wallet.get("balance", 0))
+            token = wallet.get("token", "USDC")
+
+            balances[token] = {
+                "available": total_equity,  # totalEquityValue = 可用保證金
+                "locked": max(wallet_balance - total_equity, 0.0),  # 使用中
+                "total": wallet_balance,  # contractWallets.balance = 錢包餘額
+                "asset": token,
+                "raw": data,
+            }
+        else:
+            balances["USDC"] = {
+                "available": total_equity,
+                "locked": 0.0,
+                "total": total_equity,
+                "asset": "USDC",
+                "raw": data,
+            }
 
         return balances
 
@@ -361,9 +368,6 @@ class ApexClient(BaseExchangeClient):
             instruction=True,
             retry_count=self.max_retries,
         )
-
-        # 打印原始響應以便調試
-        logger.info(f"APEX get_collateral 原始響應: {result}")
 
         if isinstance(result, dict) and "error" in result:
             return result

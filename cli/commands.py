@@ -304,10 +304,14 @@ def get_balance_command(api_key, secret_key):
 
                             available = float(details.get('available', 0))
                             locked = float(details.get('locked', 0))
-                            if available > 0 or locked > 0:
-                                # 對於Lighter，顯示實際資產名稱（USDC）
+                            total = float(details.get('total', available + locked))
+                            if available > 0 or locked > 0 or total > 0:
                                 asset_name = details.get('asset', coin)
-                                print(f"{asset_name}: 可用 {details.get('available', 0)}, 凍結 {details.get('locked', 0)}")
+                                # APEX 顯示總權益和可用保證金
+                                if exchange == 'apex':
+                                    print(f"{asset_name}: 總權益 {total}, 可用保證金 {available}")
+                                else:
+                                    print(f"{asset_name}: 可用 {available}, 凍結 {locked}")
                                 has_balance = True
                     if not has_balance:
                         print("無餘額記錄")
