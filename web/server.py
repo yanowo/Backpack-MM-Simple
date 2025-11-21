@@ -168,7 +168,7 @@ def start_bot():
             api_key = os.getenv('APEX_API_KEY', '')
             secret_key = os.getenv('APEX_SECRET_KEY', '')
             passphrase = os.getenv('APEX_PASSPHRASE', '')
-            base_url = os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange/api')
+            base_url = os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange')
 
             exchange_config = {
                 'api_key': api_key,
