@@ -41,6 +41,7 @@ class ApexClient(BaseExchangeClient):
 
         self._symbol_cache: Dict[str, str] = {}
         self._market_info_cache: Dict[str, Dict[str, Any]] = {}
+        self._cross_symbol_cache: Dict[str, str] = {}  # symbol -> crossSymbolName
 
     def get_exchange_name(self) -> str:
         return "APEX"
@@ -89,7 +90,7 @@ class ApexClient(BaseExchangeClient):
 
     def _ensure_symbol_cache(self) -> None:
         """Lazy-load the symbol cache from exchange info."""
-        if self._symbol_cache and self._market_info_cache:
+        if self._symbol_cache and self._market_info_cache and self._cross_symbol_cache:
             return
 
         info = self.get_markets()
@@ -97,22 +98,47 @@ class ApexClient(BaseExchangeClient):
             logger.error("獲取交易對列表失敗: %s", info["error"])
             self._symbol_cache = {}
             self._market_info_cache = {}
+            self._cross_symbol_cache = {}
             return
 
-        # APEX returns perpetualContract array in configs
-        contracts = info.get("data", {}).get("perpetualContract", []) if isinstance(info, dict) else []
+        # APEX Omni returns contracts in usdcConfig and usdtConfig
+        data = info.get("data", {}) if isinstance(info, dict) else {}
+        contracts: List[Dict[str, Any]] = []
+
+        # Collect contracts from both USDC and USDT configs
+        for config_key in ["usdcConfig", "usdtConfig"]:
+            config_data = data.get(config_key, {})
+            if isinstance(config_data, dict):
+                perp_contracts = config_data.get("perpetualContract", [])
+                contracts.extend(perp_contracts)
+
         cache: Dict[str, str] = {}
         market_cache: Dict[str, Dict[str, Any]] = {}
+        cross_cache: Dict[str, str] = {}
 
         for item in contracts:
             actual_symbol = item.get("symbol")
             if not actual_symbol:
                 continue
+
+            # Primary lookup by symbol (e.g., BTC-USDC)
             cache[self._lookup_key(actual_symbol)] = actual_symbol
             market_cache[actual_symbol] = item
 
+            # Also add lookup by crossSymbolName (e.g., BTCUSDC)
+            cross_name = item.get("crossSymbolName")
+            if cross_name:
+                cache[cross_name.upper()] = actual_symbol
+                cross_cache[actual_symbol] = cross_name  # Reverse mapping
+
+            # Also add lookup by symbolDisplayName (e.g., BTCUSDC)
+            display_name = item.get("symbolDisplayName")
+            if display_name and display_name.upper() != cross_name:
+                cache[display_name.upper()] = actual_symbol
+
         self._symbol_cache = cache
         self._market_info_cache = market_cache
+        self._cross_symbol_cache = cross_cache
 
     def _resolve_symbol(self, symbol: Optional[str]) -> Optional[str]:
         """Resolve user provided symbol aliases to APEX native symbols."""
@@ -546,10 +572,14 @@ class ApexClient(BaseExchangeClient):
         if not resolved_symbol:
             return self._unknown_symbol_error(symbol)
 
+        # Ticker API requires crossSymbolName format (e.g., BTCUSDT instead of BTC-USDT)
+        self._ensure_symbol_cache()
+        api_symbol = self._cross_symbol_cache.get(resolved_symbol, resolved_symbol)
+
         result = self.make_request(
             "GET",
-            "/api/v2/ticker",
-            params={"symbol": resolved_symbol},
+            "/api/v3/ticker",
+            params={"symbol": api_symbol},
             retry_count=self.max_retries,
         )
 
@@ -557,8 +587,27 @@ class ApexClient(BaseExchangeClient):
             return result
 
         data = result.get("data", result)
-        if isinstance(data, list) and len(data) > 0:
-            data = data[0]
+
+        # Handle empty data - try to get price from orderbook as fallback
+        if isinstance(data, list):
+            if len(data) > 0:
+                data = data[0]
+            else:
+                # Fallback: get price from orderbook
+                orderbook = self.get_order_book(resolved_symbol, limit=1)
+                if not isinstance(orderbook, dict) or "error" in orderbook:
+                    return {"error": f"無法獲取 {resolved_symbol} 的價格數據，APEX API 返回空數據"}
+
+                bids = orderbook.get("bids", [])
+                asks = orderbook.get("asks", [])
+
+                if bids and asks:
+                    best_bid = float(bids[0][0])
+                    best_ask = float(asks[0][0])
+                    mid_price = (best_bid + best_ask) / 2
+                    return {"lastPrice": str(mid_price), "symbol": resolved_symbol}
+                else:
+                    return {"error": f"無法獲取 {resolved_symbol} 的價格數據，訂單簿為空"}
 
         # Normalize to standard format
         if "lastPrice" not in data and "price" in data:
@@ -588,7 +637,7 @@ class ApexClient(BaseExchangeClient):
 
         result = self.make_request(
             "GET",
-            "/api/v2/depth",
+            "/api/v3/depth",
             params={"symbol": resolved_symbol, "limit": limit},
             retry_count=self.max_retries,
         )
@@ -599,6 +648,16 @@ class ApexClient(BaseExchangeClient):
         data = result.get("data", result)
         bids = data.get("b", data.get("bids", []))
         asks = data.get("a", data.get("asks", []))
+
+        # Handle null data from API
+        if bids is None:
+            bids = []
+        if asks is None:
+            asks = []
+
+        # Check if orderbook is empty
+        if not bids and not asks:
+            return {"error": f"APEX API 返回空訂單簿數據 (symbol: {resolved_symbol})，請確認交易對是否有流動性", "bids": [], "asks": []}
 
         # Sort bids descending, asks ascending
         try:
@@ -650,7 +709,7 @@ class ApexClient(BaseExchangeClient):
 
         return self.make_request(
             "GET",
-            "/api/v2/klines",
+            "/api/v3/klines",
             params=params,
             retry_count=self.max_retries,
         )
@@ -672,6 +731,15 @@ class ApexClient(BaseExchangeClient):
         base_asset = parts[0] if len(parts) > 0 else resolved_symbol
         quote_asset = parts[1] if len(parts) > 1 else "USDT"
 
+        # Calculate precision from step size (e.g., "0.001" -> 3 decimal places)
+        def get_decimal_places(value_str: str) -> int:
+            if '.' in value_str:
+                return len(value_str.split('.')[1].rstrip('0')) or 1
+            return 0
+
+        step_size = str(symbol_info.get("stepSize", "0.001"))
+        tick_size = str(symbol_info.get("tickSize", "0.1"))
+
         return {
             "symbol": resolved_symbol,
             "base_asset": base_asset,
@@ -679,9 +747,9 @@ class ApexClient(BaseExchangeClient):
             "market_type": "PERP",
             "status": "TRADING",
             "min_order_size": symbol_info.get("minOrderSize", "0.001"),
-            "tick_size": symbol_info.get("tickSize", "0.1"),
-            "base_precision": int(symbol_info.get("stepSize", "0.001").count('0') if '.' in str(symbol_info.get("stepSize", "0.001")) else 3),
-            "quote_precision": int(symbol_info.get("tickSize", "0.1").count('0') if '.' in str(symbol_info.get("tickSize", "0.1")) else 1),
+            "tick_size": tick_size,
+            "base_precision": get_decimal_places(step_size),
+            "quote_precision": get_decimal_places(tick_size),
         }
 
     def get_positions(self, symbol: Optional[str] = None) -> Any:

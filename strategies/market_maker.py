@@ -68,6 +68,9 @@ class MarketMaker:
             self.client = ParadexClient(self.exchange_config)
         elif exchange == 'lighter':
             self.client = LighterClient(self.exchange_config)
+        elif exchange == 'apex':
+            from api.apex_client import ApexClient
+            self.client = ApexClient(self.exchange_config)
         else:
             raise ValueError(f"不支持的交易所: {exchange}")
             
