@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import requests
 
 from .base_client import BaseExchangeClient
+from .proxy_utils import get_proxy_config
 from logger import setup_logger
 
 logger = setup_logger("api.lighter_client")
@@ -29,13 +30,17 @@ _DEFAULT_SIGNER_SEARCH_PATHS = [
     os.path.join(_MODULE_DIR, "signers"),
     os.path.join(os.path.dirname(_MODULE_DIR), "external", "lighter-python", "lighter", "signers"),
     os.path.join(os.path.dirname(_MODULE_DIR), "Signer", "Lighter"),
+    os.path.join(os.path.dirname(_MODULE_DIR), "Signer", "lighter"),
 ]
 _SIGNER_FILENAMES = {
-    ("windows", "amd64"): "signer-amd64.dll",
-    ("windows", "x86_64"): "signer-amd64.dll",
-    ("linux", "x86_64"): "signer-amd64.so",
-    ("linux", "amd64"): "signer-amd64.so",
-    ("darwin", "arm64"): "signer-arm64.dylib",
+    ("windows", "amd64"): ["lighter-signer-windows-amd64.dll"],
+    ("windows", "x86_64"): ["lighter-signer-windows-amd64.dll"],
+    ("linux", "x86_64"): ["lighter-signer-linux-amd64.so"],
+    ("linux", "amd64"): ["lighter-signer-linux-amd64.so"],
+    ("linux", "arm64"): ["lighter-signer-linux-arm64.so"],
+    ("linux", "aarch64"): ["lighter-signer-linux-arm64.so"],  # ARM64 on Linux uses aarch64
+    ("darwin", "arm64"): ["lighter-signer-darwin-arm64.dylib"],
+    ("darwin", "aarch64"): ["lighter-signer-darwin-arm64.dylib"],
 }
 
 
@@ -119,24 +124,35 @@ class SimpleSignerClient:
     def _load_library(self, signer_dir: Optional[str]) -> ctypes.CDLL:
         system = platform.system().lower()
         arch = platform.machine().lower()
-        filename = _SIGNER_FILENAMES.get((system, arch))
-        if not filename:
+        filenames = _SIGNER_FILENAMES.get((system, arch))
+        if not filenames:
             raise SimpleSignerError(f"Unsupported platform/architecture: {system}/{arch}")
+
+        # 確保 filenames 是列表格式
+        if isinstance(filenames, str):
+            filenames = [filenames]
 
         search_paths: List[str] = []
         if signer_dir:
             search_paths.append(signer_dir)
         search_paths.extend(_DEFAULT_SIGNER_SEARCH_PATHS)
 
+        # 嘗試所有搜索路徑和文件名組合
         for candidate_dir in search_paths:
             if not candidate_dir:
                 continue
-            candidate = os.path.join(candidate_dir, filename)
-            if os.path.isfile(candidate):
-                return ctypes.CDLL(candidate)
+            for filename in filenames:
+                candidate = os.path.join(candidate_dir, filename)
+                if os.path.isfile(candidate):
+                    logger.info(f"Found Lighter signer library: {candidate}")
+                    return ctypes.CDLL(candidate)
+
+        # 如果找不到任何文件，提供詳細的錯誤信息
+        filenames_str = "', '".join(filenames)
         raise SimpleSignerError(
-            f"Unable to locate signer library '{filename}'. "
-            "Set `signer_lib_dir` in config or place the library under api/signers/."
+            f"Unable to locate signer library. Tried filenames: '{filenames_str}'. "
+            f"Searched in: {search_paths}. "
+            "Set `signer_lib_dir` in config or place the library under api/signers/ or Signer/lighter/."
         )
 
     def _configure_library(self) -> None:
@@ -152,10 +168,11 @@ class SimpleSignerClient:
         self.signer.CheckClient.argtypes = [ctypes.c_int, ctypes.c_longlong]
         self.signer.CheckClient.restype = ctypes.c_char_p
 
-        self.signer.SwitchAPIKey.argtypes = [ctypes.c_int]
-        self.signer.SwitchAPIKey.restype = ctypes.c_char_p
-
-        self.signer.CreateAuthToken.argtypes = [ctypes.c_longlong]
+        self.signer.CreateAuthToken.argtypes = [
+            ctypes.c_longlong,
+            ctypes.c_int,
+            ctypes.c_longlong,
+        ]
         self.signer.CreateAuthToken.restype = StrOrErr
 
         self.signer.SignCreateOrder.argtypes = [
@@ -170,12 +187,16 @@ class SimpleSignerClient:
             ctypes.c_int,
             ctypes.c_longlong,
             ctypes.c_longlong,
+            ctypes.c_int,
+            ctypes.c_longlong,
         ]
         self.signer.SignCreateOrder.restype = StrOrErr
 
         self.signer.SignCancelOrder.argtypes = [
             ctypes.c_int,
             ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_int,
             ctypes.c_longlong,
         ]
         self.signer.SignCancelOrder.restype = StrOrErr
@@ -311,7 +332,13 @@ class SimpleSignerClient:
         actual_deadline = deadline
         if deadline == self.DEFAULT_10_MIN_AUTH_EXPIRY:
             actual_deadline = int(time.time() + 10 * self.MINUTE)
-        payload, error = self._decode_str_or_err(self.signer.CreateAuthToken(ctypes.c_longlong(actual_deadline)))
+        payload, error = self._decode_str_or_err(
+            self.signer.CreateAuthToken(
+                ctypes.c_longlong(actual_deadline),
+                ctypes.c_int(self.api_key_index),
+                ctypes.c_longlong(self.account_index)
+            )
+        )
         return payload, error
 
     def create_order(
@@ -328,7 +355,7 @@ class SimpleSignerClient:
         trigger_price: int = NIL_TRIGGER_PRICE,
         order_expiry: int = DEFAULT_28_DAY_ORDER_EXPIRY,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        # 支持 nonce 错误重试，最多重试 2 次
+        # 支持 nonce 錯誤重試，最多重試 2 次
         for attempt in range(2):
             nonce = self._next_nonce()
             payload, error = self._decode_str_or_err(
@@ -344,6 +371,8 @@ class SimpleSignerClient:
                     ctypes.c_int(trigger_price),
                     ctypes.c_longlong(order_expiry),
                     ctypes.c_longlong(nonce),
+                    ctypes.c_int(self.api_key_index),
+                    ctypes.c_longlong(self.account_index),
                 )
             )
             if error:
@@ -358,7 +387,7 @@ class SimpleSignerClient:
                 return parsed_payload, response, None
             except SimpleSignerError as exc:
                 error_msg = str(exc)
-                # 如果是 nonce 错误且还有重试机会，则重新获取 nonce 并重试
+                # 如果是 nonce 錯誤且還有重試機會，則重新獲取 nonce 並重試
                 if "invalid nonce" in error_msg.lower() and attempt == 0:
                     with self._nonce_lock:
                         self._fetch_nonce()
@@ -374,7 +403,7 @@ class SimpleSignerClient:
         market_index: int,
         order_index: int,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        # 支持 nonce 错误重试，最多重试 2 次
+        # 支持 nonce 錯誤重試，最多重試 2 次
         for attempt in range(2):
             nonce = self._next_nonce()
             payload, error = self._decode_str_or_err(
@@ -382,6 +411,8 @@ class SimpleSignerClient:
                     ctypes.c_int(market_index),
                     ctypes.c_longlong(order_index),
                     ctypes.c_longlong(nonce),
+                    ctypes.c_int(self.api_key_index),
+                    ctypes.c_longlong(self.account_index),
                 )
             )
             if error:
@@ -396,7 +427,7 @@ class SimpleSignerClient:
                 return parsed_payload, response, None
             except SimpleSignerError as exc:
                 error_msg = str(exc)
-                # 如果是 nonce 错误且还有重试机会，则重新获取 nonce 并重试
+                # 如果是 nonce 錯誤且還有重試機會，則重新獲取 nonce 並重試
                 if "invalid nonce" in error_msg.lower() and attempt == 0:
                     with self._nonce_lock:
                         self._fetch_nonce()
@@ -468,6 +499,8 @@ class SimpleSignerClient:
                         ctypes.c_int(trigger_price),
                         ctypes.c_longlong(order_expiry),
                         ctypes.c_longlong(nonce),
+                        ctypes.c_int(self.api_key_index),
+                        ctypes.c_longlong(self.account_index),
                     )
                 )
 
@@ -489,7 +522,7 @@ class SimpleSignerClient:
             except SimpleSignerError as exc:
                 message = str(exc)
                 if "invalid nonce" in message.lower() and attempt == 0:
-                    # 使用锁保护重新获取 nonce
+                    # 使用鎖保護重新獲取 nonce
                     with self._nonce_lock:
                         self._fetch_nonce()
                     time.sleep(0.1)
@@ -537,6 +570,12 @@ class LighterClient(BaseExchangeClient):
                 "Accept": "application/json",
             }
         )
+
+        # 從環境變量讀取代理配置
+        proxies = get_proxy_config()
+        if proxies:
+            self.session.proxies.update(proxies)
+            logger.info(f"Lighter 客户端已配置代理: {proxies}")
 
         overrides = dict(DEFAULT_SYMBOL_OVERRIDES)
         overrides.update(config.get("symbol_overrides", {}) or {})
@@ -1442,7 +1481,7 @@ class LighterClient(BaseExchangeClient):
             return {"error": "Invalid price or quantity format"}
         min_quote_value = float(market.get("min_quote_value") or 0.0)
         quantity_float = float(quantity_value)
-        # 最小下单金额 10u
+        # 最小下單金額 10u
         price_float = float(price_value)
         min_quote_value = 10.0
         required_base = min_quote_value / price_float

@@ -4,6 +4,7 @@ WebSocket客户端模塊
 import json
 import time
 import threading
+import os
 from collections import deque
 from typing import Dict, Any, Optional, Callable
 import websocket as ws
@@ -20,7 +21,7 @@ class BackpackWebSocket:
     def __init__(self, api_key, secret_key, symbol, on_message_callback=None, auto_reconnect=True, proxy=None):
         """
         初始化WebSocket客户端
-        
+
         Args:
             api_key: API密鑰
             secret_key: API密鑰
@@ -28,6 +29,7 @@ class BackpackWebSocket:
             on_message_callback: 消息回調函數
             auto_reconnect: 是否自動重連
             proxy:  wss代理 支持格式為 http://user:pass@host:port/ 或者 http://host:port
+                   如果未提供，將自動從環境變量 HTTP_PROXY/HTTPS_PROXY 讀取
 
         """
         self.api_key = api_key
@@ -43,7 +45,7 @@ class BackpackWebSocket:
         self.order_updates = []
         self.historical_prices = []  # 儲存歷史價格用於計算波動率
         self.max_price_history = 100  # 最多儲存的價格數量
-        
+
         # 重連相關參數
         self.auto_reconnect = auto_reconnect
         self.reconnect_delay = 1
@@ -53,19 +55,23 @@ class BackpackWebSocket:
         self.reconnect_cooldown_until = 0.0
         self.running = False
         self.ws_thread = None
-        
+
         # 記錄已訂閲的頻道
         self.subscriptions = []
-        
+
         # 添加WebSocket執行緒鎖
         self.ws_lock = threading.Lock()
-        
+
         # 添加心跳檢測
         self.last_heartbeat = time.time()
         self.heartbeat_interval = 30
         self.heartbeat_thread = None
 
-        # 添加代理參數
+        # 添加代理參數 - 如果未提供，從環境變量讀取
+        if proxy is None:
+            proxy = os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY')
+            if proxy:
+                logger.info(f"WebSocket 使用全局代理: {proxy}")
         self.proxy = proxy
         
         # 客户端緩存，避免重複創建實例

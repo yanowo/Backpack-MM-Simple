@@ -39,7 +39,8 @@ class GridStrategy(MarketMaker):
         auto_price_range: bool = False,            # 自動設置價格範圍
         price_range_percent: float = 5.0,          # 自動模式下的價格範圍百分比
         grid_mode: str = "arithmetic",             # 網格模式: arithmetic(等差) 或 geometric(等比)
-        ws_proxy: Optional[str] = None,
+        auto_borrow: bool = True,                  # 自動借貸
+        auto_borrow_repay: bool = True,            # 自動還款
         exchange: str = 'backpack',
         exchange_config: Optional[Dict[str, Any]] = None,
         enable_database: bool = True,
@@ -59,7 +60,8 @@ class GridStrategy(MarketMaker):
             auto_price_range: 是否自動設置價格範圍
             price_range_percent: 自動模式下的價格範圍百分比
             grid_mode: 網格模式（arithmetic或geometric）
-            ws_proxy: WebSocket代理地址
+            auto_borrow: 是否自動借貸（允許自動借入資產進行交易）
+            auto_borrow_repay: 是否自動還款（訂單成交後自動償還借貸）
             exchange: 交易所名稱
             exchange_config: 交易所配置
             enable_database: 是否啓用數據庫
@@ -74,7 +76,6 @@ class GridStrategy(MarketMaker):
             base_spread_percentage=0.1,  # 網格策略不使用spread，設置一個默認值
             order_quantity=order_quantity,
             max_orders=1,  # 網格策略不使用max_orders
-            ws_proxy=ws_proxy,
             exchange=exchange,
             exchange_config=exchange_config,
             enable_database=enable_database,
@@ -89,6 +90,8 @@ class GridStrategy(MarketMaker):
         self.auto_price_range = auto_price_range
         self.price_range_percent = price_range_percent
         self.grid_mode = grid_mode
+        self.auto_borrow = auto_borrow
+        self.auto_borrow_repay = auto_borrow_repay
 
         # 網格狀態
         self.grid_initialized = False
@@ -112,6 +115,27 @@ class GridStrategy(MarketMaker):
 
         logger.info("初始化網格交易策略: %s", symbol)
         logger.info("網格數量: %d | 模式: %s", self.grid_num, self.grid_mode)
+        logger.info("自動借貸: %s | 自動還款: %s",
+                   "啟用" if self.auto_borrow else "禁用",
+                   "啟用" if self.auto_borrow_repay else "禁用")
+
+    def get_balance(self) -> Optional[Dict[str, float]]:
+        """獲取基礎資產和報價資產的可用餘額"""
+        try:
+            base_available, _ = self.get_asset_balance(self.base_asset)
+            quote_available, _ = self.get_asset_balance(self.quote_asset)
+
+            logger.info(f"網格策略獲取餘額: {self.base_asset}={base_available:.4f}, {self.quote_asset}={quote_available:.4f}")
+
+            return {
+                'base_available': base_available,
+                'quote_available': quote_available
+            }
+        except Exception as e:
+            logger.error(f"獲取賬户餘額失敗: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _reset_grid_state(self) -> None:
         """清理當前追蹤的網格訂單狀態。"""
@@ -252,8 +276,9 @@ class GridStrategy(MarketMaker):
         for price in self.grid_levels:
             if price < current_price:
                 # 在當前價格下方掛買單
-                if quote_balance >= price * self.order_quantity:
-                    orders_to_place.append({
+                # 如果啟用自動借貸，即使餘額不足也可以下單
+                if self.auto_borrow or quote_balance >= price * self.order_quantity:
+                    order = {
                         "orderType": "Limit",
                         "price": str(price),
                         "quantity": str(self.order_quantity),
@@ -261,15 +286,22 @@ class GridStrategy(MarketMaker):
                         "symbol": self.symbol,
                         "timeInForce": "GTC",
                         "postOnly": True
-                    })
+                    }
+                    # 添加自動借貸參數
+                    if self.auto_borrow:
+                        order["autoBorrow"] = True
+                    if self.auto_borrow_repay:
+                        order["autoBorrowRepay"] = True
+                    orders_to_place.append(order)
                     quote_balance -= price * self.order_quantity
                 else:
                     logger.warning("報價資產餘額不足，無法在價格 %.4f 掛買單", price)
 
             elif price > current_price:
                 # 在當前價格上方掛賣單
-                if base_balance >= self.order_quantity:
-                    orders_to_place.append({
+                # 如果啟用自動借貸，即使餘額不足也可以下單
+                if self.auto_borrow or base_balance >= self.order_quantity:
+                    order = {
                         "orderType": "Limit",
                         "price": str(price),
                         "quantity": str(self.order_quantity),
@@ -277,7 +309,13 @@ class GridStrategy(MarketMaker):
                         "symbol": self.symbol,
                         "timeInForce": "GTC",
                         "postOnly": True
-                    })
+                    }
+                    # 添加自動借貸參數
+                    if self.auto_borrow:
+                        order["autoBorrow"] = True
+                    if self.auto_borrow_repay:
+                        order["autoBorrowRepay"] = True
+                    orders_to_place.append(order)
                     base_balance -= self.order_quantity
                 else:
                     logger.warning("基礎資產餘額不足，無法在價格 %.4f 掛賣單", price)
@@ -285,7 +323,7 @@ class GridStrategy(MarketMaker):
         # 批量下單
         placed_orders = 0
         if orders_to_place:
-            # 檢查客戶端是否支持批量下單
+            # 檢查客户端是否支持批量下單
             has_batch_method = hasattr(self.client, 'execute_order_batch') and callable(getattr(self.client, 'execute_order_batch'))
 
             if has_batch_method:
@@ -343,7 +381,7 @@ class GridStrategy(MarketMaker):
                                     placed_orders += 1
                         logger.info("批量下單成功: %d 個訂單", placed_orders)
             else:
-                # 客戶端不支持批量下單，直接逐個下單
+                # 客户端不支持批量下單，直接逐個下單
                 logger.info("該交易所不支持批量下單，使用逐個下單模式: %d 個訂單", len(orders_to_place))
                 for i, order in enumerate(orders_to_place):
                     price = float(order['price'])
@@ -403,6 +441,12 @@ class GridStrategy(MarketMaker):
             "postOnly": True
         }
 
+        # 添加自動借貸參數
+        if self.auto_borrow:
+            order_details["autoBorrow"] = True
+        if self.auto_borrow_repay:
+            order_details["autoBorrowRepay"] = True
+
         result = self.client.execute_order(order_details)
 
         if isinstance(result, dict) and "error" in result:
@@ -446,6 +490,12 @@ class GridStrategy(MarketMaker):
             "timeInForce": "GTC",
             "postOnly": True
         }
+
+        # 添加自動借貸參數
+        if self.auto_borrow:
+            order_details["autoBorrow"] = True
+        if self.auto_borrow_repay:
+            order_details["autoBorrowRepay"] = True
 
         result = self.client.execute_order(order_details)
 
@@ -731,7 +781,7 @@ class GridStrategy(MarketMaker):
         
         Args:
             current_price: 當前價格（如果未提供則會請求一次）
-            balances: 賬戶餘額（如果未提供則會請求一次）
+            balances: 賬户餘額（如果未提供則會請求一次）
             open_orders: 現有訂單列表（如果未提供則會請求一次）
         """
         # 只在未提供數據時才請求

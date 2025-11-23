@@ -48,7 +48,6 @@ class PerpGridStrategy(PerpetualMarketMaker):
         inventory_skew: float = 0.0,               # 庫存偏移係數
         stop_loss: Optional[float] = None,         # 止損
         take_profit: Optional[float] = None,       # 止盈
-        ws_proxy: Optional[str] = None,
         exchange: str = 'backpack',
         exchange_config: Optional[Dict[str, Any]] = None,
         enable_database: bool = True,
@@ -75,7 +74,6 @@ class PerpGridStrategy(PerpetualMarketMaker):
             inventory_skew: 庫存偏移係數
             stop_loss: 止損
             take_profit: 止盈
-            ws_proxy: WebSocket代理地址
             exchange: 交易所名稱
             exchange_config: 交易所配置
             enable_database: 是否啓用數據庫
@@ -93,7 +91,6 @@ class PerpGridStrategy(PerpetualMarketMaker):
             inventory_skew=inventory_skew,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            ws_proxy=ws_proxy,
             exchange=exchange,
             exchange_config=exchange_config,
             enable_database=enable_database,
