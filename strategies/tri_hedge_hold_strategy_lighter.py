@@ -47,6 +47,7 @@ class AccountCredentials:
     base_url: Optional[str] = None
     chain_id: Optional[int] = None
     signer_lib_dir: Optional[str] = None
+    proxy: Optional[str] = None
 
     def as_client_config(self, defaults: "TriHedgeHoldStrategyConfig") -> Dict[str, Any]:
         base_url = self.base_url or defaults.base_url
@@ -63,6 +64,8 @@ class AccountCredentials:
         signer_dir = self.signer_lib_dir or defaults.signer_lib_dir
         if signer_dir:
             config["signer_lib_dir"] = signer_dir
+        if self.proxy:
+            config["proxy"] = self.proxy
         return config
 
 
@@ -158,6 +161,7 @@ class TriHedgeHoldStrategyConfig:
                 if entry.get("chain_id") or chain_id
                 else None,
                 signer_lib_dir=entry.get("signer_lib_dir") or signer_lib_dir,
+                proxy=entry.get("proxy"),
             )
             accounts.append(cred)
 

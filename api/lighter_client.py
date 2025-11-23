@@ -571,8 +571,15 @@ class LighterClient(BaseExchangeClient):
             }
         )
 
-        # 從環境變量讀取代理配置
-        proxies = get_proxy_config()
+        configured_proxy = config.get("proxy")
+        proxies: Dict[str, str] = {}
+        if isinstance(configured_proxy, dict):
+            proxies = {k: v for k, v in configured_proxy.items() if v}
+        elif configured_proxy:
+            proxies = {"http": configured_proxy, "https": configured_proxy}
+        else:
+            # 從環境變量讀取代理配置
+            proxies = get_proxy_config()
         if proxies:
             self.session.proxies.update(proxies)
             logger.info(f"Lighter 客户端已配置代理: {proxies}")
