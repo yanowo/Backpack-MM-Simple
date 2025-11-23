@@ -32,19 +32,22 @@
             "label": "Acct-primary",
             "api_private_key": "private key",
             "account_address": "<wallet address>",
-            "api_key_index": 3
+            "api_key_index": 3,
+            "proxy": null
         },
         {
             "label": "Acct-hedge1",
             "api_private_key": "",
             "account_address": "",
-            "api_key_index": 2
+            "api_key_index": 2,
+            "proxy": null
         },
         {
             "label": "Acct-hedge2",
             "api_private_key": "",
             "account_address": "",
-            "api_key_index": 4
+            "api_key_index": 4,
+            "proxy": null
         }
     ]
 }

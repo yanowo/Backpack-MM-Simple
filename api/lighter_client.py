@@ -144,7 +144,7 @@ class SimpleSignerClient:
             for filename in filenames:
                 candidate = os.path.join(candidate_dir, filename)
                 if os.path.isfile(candidate):
-                    logger.info(f"Found Lighter signer library: {candidate}")
+                    # logger.info(f"Found Lighter signer library: {candidate}")
                     return ctypes.CDLL(candidate)
 
         # 如果找不到任何文件，提供詳細的錯誤信息

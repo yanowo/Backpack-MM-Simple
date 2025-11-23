@@ -9,3 +9,4 @@ Flask
 flask-socketio
 python-socketio
 werkzeug
+pysocks
