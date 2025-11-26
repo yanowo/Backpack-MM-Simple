@@ -17,8 +17,7 @@ import requests
 
 # Import zklink_sdk for order signing
 try:
-    sys.path.insert(0, r'C:\Users\Yan\AppData\Local\Programs\Python\Python312\Lib\site-packages\apexomni\pc')
-    import zklink_sdk as zk_sdk
+    from apexomni.pc import zklink_sdk as zk_sdk
     HAS_ZKLINK = True
 except ImportError:
     HAS_ZKLINK = False
