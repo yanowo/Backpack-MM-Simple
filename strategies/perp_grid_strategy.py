@@ -1613,9 +1613,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
         buy_fill_count = len(self.session_buy_trades)
         sell_fill_count = len(self.session_sell_trades)
 
-        # 使用新的數據結構統計活躍訂單數
-        active_long_count = sum(len(orders) for orders in self.open_long_orders.values())
-        active_short_count = sum(len(orders) for orders in self.open_short_orders.values())
+        # 統計所有掛單數量（開倉單 + 平倉單）
+        # 開多單 + 平空單 = 買單總數
+        # 開空單 + 平多單 = 賣單總數
+        total_buy_orders = len(self.active_buy_orders) if hasattr(self, 'active_buy_orders') else 0
+        total_sell_orders = len(self.active_sell_orders) if hasattr(self, 'active_sell_orders') else 0
         locked_levels = sum(1 for state in self.grid_level_states.values() if state.get('locked', False))
 
         sections.append((
@@ -1628,8 +1630,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 ("買入次數", f"{buy_fill_count}"),
                 ("賣出次數", f"{sell_fill_count}"),
                 ("網格利潤", f"{self.grid_profit:.4f} {self.quote_asset}"),
-                ("活躍開多單數", f"{active_long_count}"),
-                ("活躍開空單數", f"{active_short_count}"),
+                ("多單數量", f"{total_buy_orders}"),
+                ("空單數量", f"{total_sell_orders}"),
                 ("鎖定網格數", f"{locked_levels}"),
             ],
         ))
