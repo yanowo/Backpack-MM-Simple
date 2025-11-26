@@ -11,14 +11,15 @@
 | **Backpack** | ✅ | ✅ | ✅ | ✅ | ✅ | [註冊連結](https://backpack.exchange/refer/yan) |
 | **Aster** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://www.asterdex.com/referral/1a7b6E) |
 | **Paradex** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.paradex.trade/r/yanowo) |
-| **Ligher** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
+| **Lighter** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
+| **APEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://omni.apex.exchange/referral?code=yanowo) |
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 ## 功能特點
 
 - **Web 控制枱**：直觀的圖形化界面，實時監控交易狀態和策略表現
-- **多交易所架構**：支援 Backpack、Aster、Paradex、Lighter，可擴展至其他交易所
+- **多交易所架構**：支援 Backpack、Aster、Paradex、Lighter、APEX，可擴展至其他交易所
 - **四種策略模式**：
   - [現貨做市](docs/SPOT_MARKET_MAKING.md)：多層訂單 + 智能重平衡
   - [永續做市](docs/PERP_MARKET_MAKING.md)：倉位管理 + 風險中性
@@ -40,7 +41,8 @@ lemon_trader/
 │   ├── bp_client.py      # Backpack Exchange 客户端
 │   ├── aster_client.py   # Aster Exchange 客户端
 │   ├── paradex_client.py # Paradex Exchange 客户端 (含 JWT 認證)
-│   └── lighter_client.py # Lighter Exchange 客户端
+│   ├── lighter_client.py # Lighter Exchange 客户端
+│   └── apex_client.py    # APEX Omni Exchange 客户端 (zkLink 簽名)
 │
 ├── ws_client/            # WebSocket模塊
 │   ├── __init__.py
@@ -121,7 +123,7 @@ pip install -r requirements.txt
 
 ```
 # ==================== 全局代理配置 ====================
-# HTTP/HTTPS 代理（支持所有交易所：Backpack、Aster、Paradex、Lighter）
+# HTTP/HTTPS 代理（支持所有交易所：Backpack、Aster、Paradex、Lighter、APEX）
 # 格式: http://USER:PASS@HOST:PORT 或 https://USER:PASS@HOST:PORT
 # 若不需要代理，留空即可
 HTTP_PROXY=
@@ -154,6 +156,14 @@ LIGHTER_ADDRESS=<your_wallet_address (ignored if LIGHTER_ACCOUNT_INDEX is set)>
 # 在返回結果中搜索 "account_index"手動查找並填寫對應的 account_index
 LIGHTER_ACCOUNT_INDEX=
 LIGHTER_BASE_URL=https://mainnet.zklighter.elliot.ai
+
+# APEX Omni Exchange
+# 需先登入 APEX 並在 Key Management 頁面獲取 API 密鑰和 zkKey Seeds
+# https://omni.apex.exchange/keyManagement
+APEX_API_KEY=your_apex_api_key
+APEX_SECRET_KEY=your_apex_secret_key
+APEX_PASSPHRASE=your_apex_passphrase
+APEX_ZK_SEEDS=your_apex_zk_seeds
 
 # Optional Features
 # ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
@@ -208,7 +218,7 @@ http://localhost:5000
 - **實時監控**：查看交易統計、餘額、盈虧等實時數據（每5秒更新）
 - **策略管理**：啟動/停止做市策略，支持多種策略類型
 - **參數配置**：
-  - 交易所選擇（Backpack、Aster、Paradex）
+  - 交易所選擇（Backpack、Aster、Paradex、Lighter、APEX）
   - 市場類型（現貨 / 永續合約）
   - 策略類型（標準做市 / Maker-Taker 對沖）
   - 交易對、價差、訂單數量等
@@ -303,6 +313,12 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 # Lighter Maker-Taker 對沖
 python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 
+# APEX 永續做市
+python run.py --exchange apex --market-type perp --symbol BTCUSDT --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
+
+# APEX Maker-Taker 對沖
+python run.py --exchange apex --market-type perp --symbol BTCUSDT --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
+
 # BackPack 現貨網格交易（自動價格範圍）
 python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --grid-num 10 --quantity 0.1 --duration 3600 --interval 60
 
@@ -317,6 +333,9 @@ python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --stra
 
 # Lighter 永續合約網格交易（自動價格範圍）
 python run.py --exchange lighter --market-type perp --symbol BTC --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
+
+# APEX 永續合約網格交易（自動價格範圍）
+python run.py --exchange apex --market-type perp --symbol BTCUSDT --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
 ```
 
 > **適合場景**：自動化部署、定時任務、批量運行  
@@ -339,7 +358,7 @@ python run.py --exchange lighter --market-type perp --symbol BTC --strategy perp
 #### 基本參數
 - `--api-key`: API 密鑰 (可選，默認使用環境變數)
 - `--secret-key`: API 密鑰 (可選，默認使用環境變數)
-- `--exchange`: 交易所選擇 (`backpack`, `aster`, `paradex`)
+- `--exchange`: 交易所選擇 (`backpack`, `aster`, `paradex`, `lighter`, `apex`)
 - `--symbol`: 交易對 (例如: SOL_USDC)
 - `--spread`: 價差百分比 (例如: 0.5)
 - `--quantity`: 訂單數量 (可選)
