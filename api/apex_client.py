@@ -116,16 +116,25 @@ class ApexClient(BaseExchangeClient):
             self._cross_symbol_cache = {}
             return
 
-        # APEX Omni returns contracts in usdcConfig and usdtConfig
+        # APEX Omni v3 API returns contracts in different structures
         data = info.get("data", {}) if isinstance(info, dict) else {}
         contracts: List[Dict[str, Any]] = []
 
-        # Collect contracts from both USDC and USDT configs
-        for config_key in ["usdcConfig", "usdtConfig"]:
-            config_data = data.get(config_key, {})
-            if isinstance(config_data, dict):
-                perp_contracts = config_data.get("perpetualContract", [])
+        # Try v3 structure first: data.contractConfig.perpetualContract
+        contract_config = data.get("contractConfig", {})
+        if contract_config:
+            perp_contracts = contract_config.get("perpetualContract", [])
+            if perp_contracts:
                 contracts.extend(perp_contracts)
+                logger.debug(f"從 contractConfig 讀取 {len(perp_contracts)} 個合約")
+
+        # Fallback to v2 structure: data.usdcConfig/usdtConfig.perpetualContract
+        if not contracts:
+            for config_key in ["usdcConfig", "usdtConfig"]:
+                config_data = data.get(config_key, {})
+                if isinstance(config_data, dict):
+                    perp_contracts = config_data.get("perpetualContract", [])
+                    contracts.extend(perp_contracts)
 
         cache: Dict[str, str] = {}
         market_cache: Dict[str, Dict[str, Any]] = {}
@@ -136,17 +145,17 @@ class ApexClient(BaseExchangeClient):
             if not actual_symbol:
                 continue
 
-            # Primary lookup by symbol (e.g., BTC-USDC)
+            # Primary lookup by symbol (e.g., BTC-USDT)
             cache[self._lookup_key(actual_symbol)] = actual_symbol
             market_cache[actual_symbol] = item
 
-            # Also add lookup by crossSymbolName (e.g., BTCUSDC)
+            # Also add lookup by crossSymbolName (e.g., BTCUSDT)
             cross_name = item.get("crossSymbolName")
             if cross_name:
                 cache[cross_name.upper()] = actual_symbol
                 cross_cache[actual_symbol] = cross_name  # Reverse mapping
 
-            # Also add lookup by symbolDisplayName (e.g., BTCUSDC)
+            # Also add lookup by symbolDisplayName (e.g., BTCUSDT)
             display_name = item.get("symbolDisplayName")
             if display_name and display_name.upper() != cross_name:
                 cache[display_name.upper()] = actual_symbol
@@ -242,6 +251,7 @@ class ApexClient(BaseExchangeClient):
             return
 
         # Try multiple config endpoints - APEX Omni uses different paths
+        result = None
         for endpoint in ["/api/v3/configs", "/omni/v3/configs"]:
             result = self.make_request(
                 "GET",
@@ -255,48 +265,61 @@ class ApexClient(BaseExchangeClient):
         if isinstance(result, dict) and "error" not in result:
             self._config_data = result.get("data", {})
         else:
-            logger.warning("獲取 v3 配置失敗: %s，嘗試使用 v2 symbols", result.get("error", "unknown"))
+            logger.warning("獲取 v3 配置失敗: %s，嘗試使用 v3 symbols", result.get("error", "unknown") if result else "unknown")
 
-            # Fallback to /api/v2/symbols
+            # Fallback to /api/v3/symbols
             result = self.get_markets()
             if isinstance(result, dict) and "error" not in result:
                 data = result.get("data", {})
 
-                # Build contractConfig from usdcConfig and usdtConfig
+                # Build contractConfig - try v3 structure first (contractConfig), then v2 (usdcConfig/usdtConfig)
                 perpetual_contracts = []
                 assets = []
 
-                for config_key in ["usdcConfig", "usdtConfig"]:
-                    config_data = data.get(config_key, {})
-                    if isinstance(config_data, dict):
-                        perp_contracts = config_data.get("perpetualContract", [])
-                        # Map crossSymbolId to l2PairId for zkLink compatibility
-                        # USDC contracts use crossSymbolId directly
-                        # USDT contracts use 50000 + index (1-based)
-                        for idx, contract in enumerate(perp_contracts):
-                            if 'l2PairId' not in contract or contract.get('l2PairId') is None:
-                                if config_key == "usdtConfig":
-                                    # USDT contracts: l2PairId = 50000 + index
-                                    contract['l2PairId'] = 50000 + idx + 1
-                                else:
-                                    # USDC contracts: use crossSymbolId
-                                    contract['l2PairId'] = contract.get('crossSymbolId')
+                # v3 structure: data.contractConfig.perpetualContract
+                contract_config = data.get("contractConfig", {})
+                if contract_config:
+                    perp_contracts = contract_config.get("perpetualContract", [])
+                    if perp_contracts:
                         perpetual_contracts.extend(perp_contracts)
-                        config_assets = config_data.get("currency", [])
-                        # Map currency fields to asset format
-                        for asset in config_assets:
-                            if 'token' not in asset:
-                                asset['token'] = asset.get('id')
-                            if 'decimals' not in asset:
-                                # Get decimals from starkExResolution (e.g., 1000000 = 6 decimals)
-                                resolution = asset.get('starkExResolution', 1000000)
-                                try:
-                                    import math
-                                    resolution_int = int(resolution) if resolution else 1000000
-                                    asset['decimals'] = int(math.log10(resolution_int)) if resolution_int > 0 else 6
-                                except (ValueError, TypeError):
-                                    asset['decimals'] = 6
+                        logger.debug(f"從 contractConfig 讀取 {len(perp_contracts)} 個合約配置")
+                    config_assets = contract_config.get("assets", [])
+                    if config_assets:
                         assets.extend(config_assets)
+
+                # Fallback to v2 structure: data.usdcConfig/usdtConfig.perpetualContract
+                if not perpetual_contracts:
+                    for config_key in ["usdcConfig", "usdtConfig"]:
+                        config_data = data.get(config_key, {})
+                        if isinstance(config_data, dict):
+                            perp_contracts = config_data.get("perpetualContract", [])
+                            # Map crossSymbolId to l2PairId for zkLink compatibility
+                            # USDC contracts use crossSymbolId directly
+                            # USDT contracts use 50000 + index (1-based)
+                            for idx, contract in enumerate(perp_contracts):
+                                if 'l2PairId' not in contract or contract.get('l2PairId') is None:
+                                    if config_key == "usdtConfig":
+                                        # USDT contracts: l2PairId = 50000 + index
+                                        contract['l2PairId'] = 50000 + idx + 1
+                                    else:
+                                        # USDC contracts: use crossSymbolId
+                                        contract['l2PairId'] = contract.get('crossSymbolId')
+                            perpetual_contracts.extend(perp_contracts)
+                            config_assets = config_data.get("currency", [])
+                            # Map currency fields to asset format
+                            for asset in config_assets:
+                                if 'token' not in asset:
+                                    asset['token'] = asset.get('id')
+                                if 'decimals' not in asset:
+                                    # Get decimals from starkExResolution (e.g., 1000000 = 6 decimals)
+                                    resolution = asset.get('starkExResolution', 1000000)
+                                    try:
+                                        import math
+                                        resolution_int = int(resolution) if resolution else 1000000
+                                        asset['decimals'] = int(math.log10(resolution_int)) if resolution_int > 0 else 6
+                                    except (ValueError, TypeError):
+                                        asset['decimals'] = 6
+                            assets.extend(config_assets)
 
                 self._config_data = {
                     "contractConfig": {
@@ -305,8 +328,9 @@ class ApexClient(BaseExchangeClient):
                     },
                     "raw": data
                 }
+                logger.debug(f"配置數據已緩存: {len(perpetual_contracts)} 個合約, {len(assets)} 個資產")
             else:
-                logger.error("獲取配置資料失敗: %s", result.get("error", "unknown"))
+                logger.error("獲取配置資料失敗: %s", result.get("error", "unknown") if result else "unknown")
                 self._config_data = {}
 
     def _sign_order(self, symbol: str, side: str, size: str, price: str, client_id: str) -> Optional[str]:
@@ -771,20 +795,22 @@ class ApexClient(BaseExchangeClient):
         return self._normalize_order_fields(result.get("data", result))
 
     def get_open_orders(self, symbol: Optional[str] = None) -> Any:
-        params: Dict[str, Any] = {}
+        """Get all open orders.
+        
+        Note: APEX API v3/open-orders returns all open orders without symbol filter.
+        Client-side filtering is applied if symbol is specified.
+        """
+        # Resolve symbol for client-side filtering if provided
+        filter_symbol = None
         if symbol:
-            resolved_symbol = self._resolve_symbol(symbol)
-            if not resolved_symbol:
+            filter_symbol = self._resolve_symbol(symbol)
+            if not filter_symbol:
                 return self._unknown_symbol_error(symbol)
-            self._ensure_symbol_cache()
-            api_symbol = self._cross_symbol_cache.get(resolved_symbol, resolved_symbol)
-            params["symbol"] = api_symbol
 
         result = self.make_request(
             "GET",
             "/api/v3/open-orders",
             instruction=True,
-            params=params,
             retry_count=self.max_retries,
         )
 
@@ -792,6 +818,7 @@ class ApexClient(BaseExchangeClient):
             return result
 
         # Handle different response formats
+        # API returns: {"data": [{order1}, {order2}, ...]}
         if isinstance(result, list):
             orders = result
         else:
@@ -803,32 +830,59 @@ class ApexClient(BaseExchangeClient):
 
         normalized: List[Dict[str, Any]] = []
         for item in orders:
+            # Client-side filtering by symbol if specified
+            if filter_symbol:
+                order_symbol = item.get("symbol", "")
+                if order_symbol != filter_symbol:
+                    continue
             normalized.append(self._normalize_order_fields(dict(item)))
         return normalized
 
-    def cancel_all_orders(self, symbol: str) -> Dict[str, Any]:
-        """Cancel all open orders for a symbol."""
-        resolved_symbol = self._resolve_symbol(symbol)
-        if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
-
-        self._ensure_symbol_cache()
-        api_symbol = self._cross_symbol_cache.get(resolved_symbol, resolved_symbol)
+    def cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Cancel all open orders for a symbol or all symbols.
+        
+        Args:
+            symbol: Optional symbol to cancel orders for (e.g., "BTC-USDC").
+                   If None, cancels all open orders.
+                   Can also be comma-separated for multiple symbols (e.g., "BTC-USDC,ETH-USDC").
+        """
+        data: Dict[str, Any] = {}
+        
+        if symbol:
+            # Handle comma-separated symbols
+            if "," in symbol:
+                symbols = [s.strip() for s in symbol.split(",")]
+                resolved_symbols = []
+                for s in symbols:
+                    resolved = self._resolve_symbol(s)
+                    if not resolved:
+                        return self._unknown_symbol_error(s)
+                    resolved_symbols.append(resolved)
+                # API expects format: "BTC-USDC,ETH-USDC"
+                data["symbol"] = ",".join(resolved_symbols)
+            else:
+                resolved_symbol = self._resolve_symbol(symbol)
+                if not resolved_symbol:
+                    return self._unknown_symbol_error(symbol)
+                # Use original symbol format (e.g., BTC-USDC), NOT crossSymbolName
+                data["symbol"] = resolved_symbol
 
         result = self.make_request(
             "POST",
             "/api/v3/delete-open-orders",
             instruction=True,
-            data={"symbol": api_symbol},
+            data=data if data else None,
             retry_count=self.max_retries,
         )
         return result
 
-    def cancel_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
-        resolved_symbol = self._resolve_symbol(symbol)
-        if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
-
+    def cancel_order(self, order_id: str, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Cancel a single order by order ID.
+        
+        Args:
+            order_id: The order ID to cancel.
+            symbol: Optional symbol (not required by API, kept for compatibility).
+        """
         result = self.make_request(
             "POST",
             "/api/v3/delete-order",
@@ -842,7 +896,10 @@ class ApexClient(BaseExchangeClient):
                 return result
             if result.get("code") and result.get("code") != 0:
                 return {"error": result.get("msg", f"Cancel failed with code {result.get('code')}"), "details": result}
+            # API returns: {"data": "123456"} where data is the order ID
             data = result.get("data", result)
+            if isinstance(data, str):
+                return {"success": True, "orderId": data}
             if isinstance(data, dict):
                 return self._normalize_order_fields(data)
             return {"success": True, "data": data}
@@ -900,7 +957,7 @@ class ApexClient(BaseExchangeClient):
     def get_markets(self) -> Dict[str, Any]:
         return self.make_request(
             "GET",
-            "/api/v2/symbols",
+            "/api/v3/symbols",
             retry_count=self.max_retries,
         )
 
@@ -908,7 +965,7 @@ class ApexClient(BaseExchangeClient):
         """Get server time to check clock sync."""
         return self.make_request(
             "GET",
-            "/api/v2/time",
+            "/api/v3/time",
             retry_count=self.max_retries,
         )
 
