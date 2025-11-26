@@ -116,25 +116,17 @@ class ApexClient(BaseExchangeClient):
             self._cross_symbol_cache = {}
             return
 
-        # APEX Omni v3 API returns contracts in different structures
+        # APEX Omni v3 API returns contracts in contractConfig.perpetualContract
         data = info.get("data", {}) if isinstance(info, dict) else {}
         contracts: List[Dict[str, Any]] = []
 
-        # Try v3 structure first: data.contractConfig.perpetualContract
+        # v3 structure: data.contractConfig.perpetualContract
         contract_config = data.get("contractConfig", {})
         if contract_config:
             perp_contracts = contract_config.get("perpetualContract", [])
             if perp_contracts:
                 contracts.extend(perp_contracts)
                 logger.debug(f"從 contractConfig 讀取 {len(perp_contracts)} 個合約")
-
-        # Fallback to v2 structure: data.usdcConfig/usdtConfig.perpetualContract
-        if not contracts:
-            for config_key in ["usdcConfig", "usdtConfig"]:
-                config_data = data.get(config_key, {})
-                if isinstance(config_data, dict):
-                    perp_contracts = config_data.get("perpetualContract", [])
-                    contracts.extend(perp_contracts)
 
         cache: Dict[str, str] = {}
         market_cache: Dict[str, Dict[str, Any]] = {}
@@ -250,88 +242,36 @@ class ApexClient(BaseExchangeClient):
         if self._config_data:
             return
 
-        # Try multiple config endpoints - APEX Omni uses different paths
-        result = None
-        for endpoint in ["/api/v3/configs", "/omni/v3/configs"]:
-            result = self.make_request(
-                "GET",
-                endpoint,
-                instruction=True,  # This endpoint requires authentication
-                retry_count=self.max_retries,
-            )
-            if isinstance(result, dict) and "error" not in result:
-                break
-
+        # Use /api/v3/symbols endpoint for config data (most reliable)
+        result = self.get_markets()
         if isinstance(result, dict) and "error" not in result:
-            self._config_data = result.get("data", {})
+            data = result.get("data", {})
+
+            # v3 structure: data.contractConfig.perpetualContract
+            perpetual_contracts = []
+            assets = []
+
+            contract_config = data.get("contractConfig", {})
+            if contract_config:
+                perp_contracts = contract_config.get("perpetualContract", [])
+                if perp_contracts:
+                    perpetual_contracts.extend(perp_contracts)
+                    logger.debug(f"從 contractConfig 讀取 {len(perp_contracts)} 個合約配置")
+                config_assets = contract_config.get("assets", [])
+                if config_assets:
+                    assets.extend(config_assets)
+
+            self._config_data = {
+                "contractConfig": {
+                    "perpetualContract": perpetual_contracts,
+                    "assets": assets,
+                },
+                "raw": data
+            }
+            logger.debug(f"配置數據已緩存: {len(perpetual_contracts)} 個合約, {len(assets)} 個資產")
         else:
-            logger.warning("獲取 v3 配置失敗: %s，嘗試使用 v3 symbols", result.get("error", "unknown") if result else "unknown")
-
-            # Fallback to /api/v3/symbols
-            result = self.get_markets()
-            if isinstance(result, dict) and "error" not in result:
-                data = result.get("data", {})
-
-                # Build contractConfig - try v3 structure first (contractConfig), then v2 (usdcConfig/usdtConfig)
-                perpetual_contracts = []
-                assets = []
-
-                # v3 structure: data.contractConfig.perpetualContract
-                contract_config = data.get("contractConfig", {})
-                if contract_config:
-                    perp_contracts = contract_config.get("perpetualContract", [])
-                    if perp_contracts:
-                        perpetual_contracts.extend(perp_contracts)
-                        logger.debug(f"從 contractConfig 讀取 {len(perp_contracts)} 個合約配置")
-                    config_assets = contract_config.get("assets", [])
-                    if config_assets:
-                        assets.extend(config_assets)
-
-                # Fallback to v2 structure: data.usdcConfig/usdtConfig.perpetualContract
-                if not perpetual_contracts:
-                    for config_key in ["usdcConfig", "usdtConfig"]:
-                        config_data = data.get(config_key, {})
-                        if isinstance(config_data, dict):
-                            perp_contracts = config_data.get("perpetualContract", [])
-                            # Map crossSymbolId to l2PairId for zkLink compatibility
-                            # USDC contracts use crossSymbolId directly
-                            # USDT contracts use 50000 + index (1-based)
-                            for idx, contract in enumerate(perp_contracts):
-                                if 'l2PairId' not in contract or contract.get('l2PairId') is None:
-                                    if config_key == "usdtConfig":
-                                        # USDT contracts: l2PairId = 50000 + index
-                                        contract['l2PairId'] = 50000 + idx + 1
-                                    else:
-                                        # USDC contracts: use crossSymbolId
-                                        contract['l2PairId'] = contract.get('crossSymbolId')
-                            perpetual_contracts.extend(perp_contracts)
-                            config_assets = config_data.get("currency", [])
-                            # Map currency fields to asset format
-                            for asset in config_assets:
-                                if 'token' not in asset:
-                                    asset['token'] = asset.get('id')
-                                if 'decimals' not in asset:
-                                    # Get decimals from starkExResolution (e.g., 1000000 = 6 decimals)
-                                    resolution = asset.get('starkExResolution', 1000000)
-                                    try:
-                                        import math
-                                        resolution_int = int(resolution) if resolution else 1000000
-                                        asset['decimals'] = int(math.log10(resolution_int)) if resolution_int > 0 else 6
-                                    except (ValueError, TypeError):
-                                        asset['decimals'] = 6
-                            assets.extend(config_assets)
-
-                self._config_data = {
-                    "contractConfig": {
-                        "perpetualContract": perpetual_contracts,
-                        "assets": assets,
-                    },
-                    "raw": data
-                }
-                logger.debug(f"配置數據已緩存: {len(perpetual_contracts)} 個合約, {len(assets)} 個資產")
-            else:
-                logger.error("獲取配置資料失敗: %s", result.get("error", "unknown") if result else "unknown")
-                self._config_data = {}
+            logger.error("獲取配置資料失敗: %s", result.get("error", "unknown") if result else "unknown")
+            self._config_data = {}
 
     def _sign_order(self, symbol: str, side: str, size: str, price: str, client_id: str) -> Optional[str]:
         """Sign order using zkLink SDK.
