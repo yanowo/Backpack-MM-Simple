@@ -702,10 +702,40 @@ class ApexClient(BaseExchangeClient):
         if quantity is not None:
             payload["size"] = str(quantity)
 
-        # Price
+        # Price - 市價單需要特殊處理
         price = order_details.get("price")
+        
+        # APEX 的市價單實際上也需要價格參數（用於計算 limitFee 和簽名）
+        # 如果是市價單且沒有提供價格，則獲取當前市場價格
+        if normalized_type == "MARKET" and price is None:
+            ticker = self.get_ticker(symbol)
+            if isinstance(ticker, dict) and "lastPrice" in ticker:
+                market_price = float(ticker["lastPrice"])
+                # 市價買單用較高價格，市價賣單用較低價格（確保能成交）
+                slippage = 0.01  # 1% 滑點容忍
+                if normalized_side == "BUY":
+                    price = market_price * (1 + slippage)
+                else:
+                    price = market_price * (1 - slippage)
+                logger.debug("市價單使用參考價格: %.4f (市場價: %.4f)", price, market_price)
+            else:
+                return {"error": "無法獲取市場價格，市價單需要價格參考"}
+        
+        # 確保價格符合 tickSize 精度要求
         if price is not None:
-            payload["price"] = str(price)
+            self._ensure_symbol_cache()
+            symbol_info = self._market_info_cache.get(resolved_symbol, {})
+            tick_size = Decimal(str(symbol_info.get("tickSize", "0.1")))
+            price_dec = Decimal(str(price))
+            # 根據買賣方向進行四捨五入：買單向上取整，賣單向下取整
+            if normalized_side == "BUY":
+                # 買單向上取整以確保能成交
+                price_dec = (price_dec / tick_size).quantize(Decimal("1"), rounding=ROUND_UP) * tick_size
+            else:
+                # 賣單向下取整以確保能成交
+                price_dec = (price_dec / tick_size).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick_size
+            price = float(price_dec)
+            payload["price"] = str(price_dec)
 
         # Client order ID - generate if not provided
         client_id = order_details.get("clientId") or str(uuid.uuid4())
@@ -1118,12 +1148,19 @@ class ApexClient(BaseExchangeClient):
             except (InvalidOperation, TypeError):
                 pos_dec = Decimal("0")
 
+            # 跳過 size 為 0 的無效倉位（已平倉的歷史記錄）
+            if pos_dec == 0:
+                continue
+
+            # APEX 的 side 欄位明確表示方向，size 永遠是正數
+            # 必須以 side 欄位為準來判斷多空方向
             side_str = item.get("side", "").upper()
-            if side_str == "LONG" or pos_dec > 0:
+            if side_str == "LONG":
                 mapped_side = "LONG"
-            elif side_str == "SHORT" or pos_dec < 0:
+            elif side_str == "SHORT":
                 mapped_side = "SHORT"
             else:
+                # 如果 side 欄位為空，則根據 size 正負判斷（通常不會發生）
                 mapped_side = "FLAT"
 
             long_dec = abs(pos_dec) if mapped_side == "LONG" else Decimal("0")
@@ -1132,11 +1169,14 @@ class ApexClient(BaseExchangeClient):
             entry_price = item.get("entryPrice")
             unrealized = item.get("unrealizedPnl", item.get("unrealizedProfit"))
 
+            # netQuantity: 多頭為正，空頭為負
+            net_qty = abs(pos_dec) if mapped_side == "LONG" else -abs(pos_dec)
+
             normalized.append({
                 "symbol": item_symbol,
                 "side": mapped_side,
                 "positionSide": mapped_side,
-                "netQuantity": self._decimal_to_str(pos_dec if mapped_side == "LONG" else -abs(pos_dec)),
+                "netQuantity": self._decimal_to_str(net_qty),
                 "longQuantity": self._decimal_to_str(long_dec),
                 "shortQuantity": self._decimal_to_str(short_dec),
                 "size": self._decimal_to_str(abs(pos_dec)),
