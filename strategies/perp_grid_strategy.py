@@ -343,10 +343,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
         
         if side == 'Bid':
             self.open_long_orders[price][normalized_id] = order_info
-            logger.debug("記錄開多單: 價格=%.4f, ID=%s", price, normalized_id)
+            logger.info("記錄開多單: 價格=%.4f, ID=%s, 別名=%s", price, normalized_id, alias_list)
         else:
             self.open_short_orders[price][normalized_id] = order_info
-            logger.debug("記錄開空單: 價格=%.4f, ID=%s", price, normalized_id)
+            logger.info("記錄開空單: 價格=%.4f, ID=%s, 別名=%s", price, normalized_id, alias_list)
         
         # 同時維護舊的數據結構
         self.grid_orders_by_id[normalized_id] = {
@@ -492,28 +492,52 @@ class PerpGridStrategy(PerpetualMarketMaker):
             logger.warning("無法解析開倉單ID: %s", order_id)
             return
 
+        logger.debug("處理開倉單成交: tracking_id=%s, side=%s", tracking_id, side)
+        
         # 從開倉單記錄中查找訂單信息
         order_info = None
         grid_price = None
 
+        # 先在對應方向的列表中查找
         if side == 'Bid':
             for p, orders in self.open_long_orders.items():
                 if tracking_id in orders:
                     order_info = orders[tracking_id]
                     grid_price = p
+                    logger.debug("在開多單列表中找到: price=%s", p)
                     break
         else:
             for p, orders in self.open_short_orders.items():
                 if tracking_id in orders:
                     order_info = orders[tracking_id]
                     grid_price = p
+                    logger.debug("在開空單列表中找到: price=%s", p)
+                    break
+        
+        # 如果在對應方向找不到，嘗試在另一個方向查找（可能是 side 標準化問題）
+        if not order_info:
+            logger.debug("在 %s 方向找不到訂單，嘗試另一方向", side)
+            other_orders = self.open_short_orders if side == 'Bid' else self.open_long_orders
+            for p, orders in other_orders.items():
+                if tracking_id in orders:
+                    order_info = orders[tracking_id]
+                    grid_price = p
+                    # 修正 side
+                    side = 'Ask' if side == 'Bid' else 'Bid'
+                    logger.warning("訂單 %s 在 %s 方向找到（side 可能不匹配）", tracking_id, side)
                     break
         
         if not order_info or grid_price is None:
             log_id = normalized_input_id or tracking_id
             if normalized_input_id and normalized_input_id != tracking_id:
                 log_id = f"{normalized_input_id}->{tracking_id}"
-            logger.warning("開倉單 %s 不在追蹤列表中，可能已經處理過", log_id)
+            # 輸出當前追蹤的所有訂單 ID 以便調試
+            all_long_ids = [oid for orders in self.open_long_orders.values() for oid in orders.keys()]
+            all_short_ids = [oid for orders in self.open_short_orders.values() for oid in orders.keys()]
+            logger.warning(
+                "開倉單 %s 不在追蹤列表中，可能已處理過。當前追蹤: 開多=%s, 開空=%s",
+                log_id, all_long_ids[:5], all_short_ids[:5]
+            )
             return
         
         display_id = tracking_id
@@ -1046,6 +1070,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
             elif side_upper in ('SELL', 'ASK', 'SHORT'):
                 normalized_side = 'Ask'
         
+        # 調試：輸出當前追蹤的訂單
+        logger.debug("成交處理: order_id=%s, client_id=%s, side=%s", order_id, client_id, normalized_side)
+        logger.debug("當前追蹤的開多單數量: %d", sum(len(orders) for orders in self.open_long_orders.values()))
+        logger.debug("當前追蹤的開空單數量: %d", sum(len(orders) for orders in self.open_short_orders.values()))
+        
         # 嘗試用 client_id 或 order_id 解析追蹤 ID
         # APEX 下單時用 clientId (UUID) 追蹤，成交歷史返回 clientId 和 orderId
         tracking_id = None
@@ -1055,6 +1084,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
             resolved = self._resolve_order_id(client_id)
             if resolved:
                 tracking_id = resolved
+                logger.debug("通過 client_id 解析到 tracking_id: %s", tracking_id)
             else:
                 # 直接檢查是否在追蹤列表中
                 normalized_client = self._normalize_order_id(client_id)
@@ -1063,6 +1093,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     for orders in self.open_long_orders.values():
                         if normalized_client in orders:
                             tracking_id = normalized_client
+                            logger.debug("在開多單列表中找到 client_id: %s", normalized_client)
                             break
                     if not tracking_id:
                         for orders in self.open_short_orders.values():

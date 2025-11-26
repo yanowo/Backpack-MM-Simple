@@ -2393,7 +2393,7 @@ class MarketMaker:
                 self.check_order_fills()
 
                 # 透過 REST API 同步最新成交
-                if self.exchange in ('aster', 'lighter'):
+                if self.exchange in ('aster', 'lighter', 'apex'):
                     self._sync_fill_history()
 
                 # 檢查是否需要重平衡倉位
