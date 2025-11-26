@@ -323,7 +323,7 @@ class ApexClient(BaseExchangeClient):
         # This is different from the settlement currency decimals (6 for USDT/USDC)
         decimals = 18
 
-        logger.info(f"簽名參數: symbol={symbol}, l2PairId={symbol_data.get('l2PairId')}, settle={settle_asset}, decimals={decimals}")
+        logger.debug(f"簽名參數: symbol={symbol}, l2PairId={symbol_data.get('l2PairId')}, settle={settle_asset}, decimals={decimals}")
 
         # Get account info
         account_id = self._account_data.get("id")
