@@ -1013,12 +1013,17 @@ class PerpGridStrategy(PerpetualMarketMaker):
         if primary_id and alias_ids:
             self._register_order_aliases(primary_id, alias_ids)
 
+        # APEX 成交歷史返回: orderId (交易所ID), clientId (下單時的UUID)
+        # 我們下單時用 clientId 追蹤，所以優先用 client_id 匹配
         order_id = (
             fill_info.get('order_id')
             or fill_info.get('id')
             or fill_info.get('orderId')
             or primary_id
         )
+        # APEX: client_id 是下單時生成的 UUID，用於追蹤
+        client_id = fill_info.get('client_id') or fill_info.get('clientId') or fill_info.get('clientOrderId')
+        
         side = fill_info.get('side')
         quantity_raw = fill_info.get('quantity')
         price_raw = fill_info.get('price')
@@ -1029,7 +1034,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         except (TypeError, ValueError):
             return
         
-        if not order_id:
+        if not order_id and not client_id:
             return
         
         # 標準化方向
@@ -1041,16 +1046,53 @@ class PerpGridStrategy(PerpetualMarketMaker):
             elif side_upper in ('SELL', 'ASK', 'SHORT'):
                 normalized_side = 'Ask'
         
+        # 嘗試用 client_id 或 order_id 解析追蹤 ID
+        # APEX 下單時用 clientId (UUID) 追蹤，成交歷史返回 clientId 和 orderId
+        tracking_id = None
+        
+        # 優先用 client_id 查找（因為我們下單時用的是 clientId）
+        if client_id:
+            resolved = self._resolve_order_id(client_id)
+            if resolved:
+                tracking_id = resolved
+            else:
+                # 直接檢查是否在追蹤列表中
+                normalized_client = self._normalize_order_id(client_id)
+                if normalized_client:
+                    # 檢查開倉單
+                    for orders in self.open_long_orders.values():
+                        if normalized_client in orders:
+                            tracking_id = normalized_client
+                            break
+                    if not tracking_id:
+                        for orders in self.open_short_orders.values():
+                            if normalized_client in orders:
+                                tracking_id = normalized_client
+                                break
+                    # 檢查平倉單
+                    if not tracking_id and normalized_client in self.close_orders:
+                        tracking_id = normalized_client
+        
+        # 如果 client_id 沒找到，嘗試用 order_id
+        if not tracking_id and order_id:
+            resolved = self._resolve_order_id(order_id)
+            if resolved:
+                tracking_id = resolved
+            else:
+                tracking_id = self._normalize_order_id(order_id)
+        
+        if not tracking_id:
+            logger.debug("無法解析訂單 ID: order_id=%s, client_id=%s", order_id, client_id)
+            return
+        
         # 判斷是開倉單還是平倉單
-        resolved_id = self._resolve_order_id(order_id)
-        tracking_id = resolved_id or self._normalize_order_id(order_id)
         if tracking_id in self.close_orders:
             # 處理平倉單成交
             self._handle_close_order_filled(tracking_id, price, normalized_side, quantity)
         else:
             # 處理開倉單成交
             self._handle_open_order_filled(
-                tracking_id or order_id,
+                tracking_id,
                 price,
                 normalized_side,
                 quantity,
@@ -1160,24 +1202,29 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         logger.info("開多成交後在價格 %.4f 掛平多單 (開倉價格: %.4f)", next_price, open_price)
 
-        # 延遲一下，等待持倉更新（解決 reduce-only 時序問題）
-        time.sleep(0.5)
-
-        # 查詢持倉確認
-        net_position = self.get_net_position()
-        logger.debug("當前淨持倉: %.4f, 檢查是否可以掛平多單", net_position)
-
-        # 檢查是否有足夠的多頭持倉可以平倉
-        if net_position < quantity * 0.9:  # 允許 10% 的誤差
-            logger.warning(
-                "多頭持倉不足 (當前: %.4f, 需要: %.4f)，改為不使用 reduce_only",
-                net_position, quantity
-            )
-            # 不使用 reduce_only，讓訂單可以開反向倉位
-            reduce_only = False
-        else:
-            reduce_only = True
-            logger.debug("持倉足夠，使用 reduce_only 掛平倉單")
+        # APEX 是 zkLink L2 架構，持倉更新有延遲
+        # 對於網格策略，我們知道剛才開多成交了，所以直接掛平倉單
+        # 不需要查詢 API 持倉（因為可能還沒更新）
+        
+        # 對於 APEX，由於 L2 結算延遲，我們信任本地狀態而不是 API
+        # 開多成交後立即掛平多單，使用 reduce_only=False 避免因 API 延遲導致失敗
+        reduce_only = False
+        
+        # 對於其他交易所，可以嘗試使用 reduce_only
+        if self.exchange not in ('apex',):
+            # 延遲一下，等待持倉更新
+            time.sleep(0.5)
+            net_position = self.get_net_position()
+            logger.debug("當前淨持倉: %.4f, 檢查是否可以掛平多單", net_position)
+            
+            if net_position >= quantity * 0.9:
+                reduce_only = True
+                logger.debug("持倉足夠，使用 reduce_only 掛平倉單")
+            else:
+                logger.warning(
+                    "多頭持倉不足 (當前: %.4f, 需要: %.4f)，改為不使用 reduce_only",
+                    net_position, quantity
+                )
 
         # 掛平倉單（使用 post_only 確保只能作為 Maker 成交）
         result = self.open_short(
@@ -1240,24 +1287,28 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         logger.info("開空成交後在價格 %.4f 掛平空單 (開倉價格: %.4f)", next_price, open_price)
 
-        # 延遲一下，等待持倉更新（解決 reduce-only 時序問題）
-        time.sleep(0.5)
-
-        # 查詢持倉確認
-        net_position = self.get_net_position()
-        logger.debug("當前淨持倉: %.4f, 檢查是否可以掛平空單", net_position)
-
-        # 檢查是否有足夠的空頭持倉可以平倉（空頭持倉為負數）
-        if net_position > -quantity * 0.9:  # 允許 10% 的誤差
-            logger.warning(
-                "空頭持倉不足 (當前: %.4f, 需要: %.4f)，改為不使用 reduce_only",
-                net_position, -quantity
-            )
-            # 不使用 reduce_only，讓訂單可以開反向倉位
-            reduce_only = False
-        else:
-            reduce_only = True
-            logger.debug("持倉足夠，使用 reduce_only 掛平倉單")
+        # APEX 是 zkLink L2 架構，持倉更新有延遲
+        # 對於網格策略，我們知道剛才開空成交了，所以直接掛平倉單
+        # 不需要查詢 API 持倉（因為可能還沒更新）
+        
+        # 對於 APEX，由於 L2 結算延遲，我們信任本地狀態而不是 API
+        reduce_only = False
+        
+        # 對於其他交易所，可以嘗試使用 reduce_only
+        if self.exchange not in ('apex',):
+            # 延遲一下，等待持倉更新
+            time.sleep(0.5)
+            net_position = self.get_net_position()
+            logger.debug("當前淨持倉: %.4f, 檢查是否可以掛平空單", net_position)
+            
+            if net_position <= -quantity * 0.9:
+                reduce_only = True
+                logger.debug("持倉足夠，使用 reduce_only 掛平倉單")
+            else:
+                logger.warning(
+                    "空頭持倉不足 (當前: %.4f, 需要: %.4f)，改為不使用 reduce_only",
+                    net_position, -quantity
+                )
 
         # 掛平倉單（使用 post_only 確保只能作為 Maker 成交）
         result = self.open_long(
@@ -1562,6 +1613,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
         buy_fill_count = len(self.session_buy_trades)
         sell_fill_count = len(self.session_sell_trades)
 
+        # 使用新的數據結構統計活躍訂單數
+        active_long_count = sum(len(orders) for orders in self.open_long_orders.values())
+        active_short_count = sum(len(orders) for orders in self.open_short_orders.values())
+        locked_levels = sum(1 for state in self.grid_level_states.values() if state.get('locked', False))
+
         sections.append((
             "永續合約網格統計",
             [
@@ -1572,9 +1628,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 ("買入次數", f"{buy_fill_count}"),
                 ("賣出次數", f"{sell_fill_count}"),
                 ("網格利潤", f"{self.grid_profit:.4f} {self.quote_asset}"),
-                ("活躍開多單數", f"{sum(len(orders) for orders in self.grid_long_orders_by_price.values())}"),
-                ("活躍開空單數", f"{sum(len(orders) for orders in self.grid_short_orders_by_price.values())}"),
-                ("鎖定網格數", f"{len(self.grid_level_locks)}"),
+                ("活躍開多單數", f"{active_long_count}"),
+                ("活躍開空單數", f"{active_short_count}"),
+                ("鎖定網格數", f"{locked_levels}"),
             ],
         ))
 

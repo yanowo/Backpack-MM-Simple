@@ -554,6 +554,7 @@ class MarketMaker:
                 source='rest',
                 timestamp=timestamp,
                 register_processed=False,
+                client_id=fill.get('client_id'),  # APEX 使用 clientId
             )
 
     def _normalize_fill_history_response(self, response) -> List[Dict[str, Any]]:
@@ -673,9 +674,19 @@ class MarketMaker:
             except (TypeError, ValueError):
                 timestamp_value = 0
 
+            # APEX: 提取 clientId/clientOrderId 作為備用 ID（下單時使用的是 clientId）
+            client_id = _extract(
+                entry,
+                "clientId",
+                "client_id",
+                "clientOrderId",
+                "client_order_id",
+            )
+
             fills.append({
                 'fill_id': str(fill_id) if fill_id is not None else None,
                 'order_id': str(order_id) if order_id is not None else None,
+                'client_id': str(client_id) if client_id is not None else None,  # APEX 用 clientId 追蹤訂單
                 'side': side,
                 'price': price,
                 'quantity': quantity,
@@ -722,6 +733,7 @@ class MarketMaker:
         source: str = 'ws',
         timestamp: Optional[int] = None,
         register_processed: bool = True,
+        client_id: Optional[str] = None,  # APEX 使用 clientId 追蹤訂單
     ) -> None:
         """統一處理成交事件來源 (WebSocket/REST)"""
 
@@ -840,6 +852,7 @@ class MarketMaker:
             'quantity': quantity,
             'price': price,
             'order_id': order_id,
+            'client_id': client_id,  # APEX 使用 clientId 追蹤訂單
             'maker': maker,
             'fee': fee,
             'fee_asset': fee_asset,
@@ -1906,6 +1919,7 @@ class MarketMaker:
                                 'price': price,
                                 'maker': is_maker,
                                 'order_id': fill.get('order_id'),
+                                'client_id': fill.get('client_id'),  # APEX 使用 clientId
                                 'trade_id': fill.get('id'),
                                 'realized_pnl': realized_pnl,
                                 'fee': fee,
@@ -1928,7 +1942,8 @@ class MarketMaker:
                                 fee_asset=fee_currency,
                                 trade_id=fill_info['trade_id'],
                                 source='rest',
-                                timestamp=int(time.time() * 1000)
+                                timestamp=int(time.time() * 1000),
+                                client_id=fill_info.get('client_id'),  # APEX 使用 clientId
                             )
             except Exception as e:
                 logger.error(f"獲取成交記錄失敗: {e}")

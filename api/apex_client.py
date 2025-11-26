@@ -1099,7 +1099,8 @@ class ApexClient(BaseExchangeClient):
             return result
 
         data = result.get("data", {})
-        positions_raw = data.get("openPositions", [])
+        # APEX 使用 "positions" 而不是 "openPositions"
+        positions_raw = data.get("positions", data.get("openPositions", []))
 
         normalized: List[Dict[str, Any]] = []
         for item in positions_raw:
