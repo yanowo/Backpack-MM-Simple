@@ -186,7 +186,7 @@ class MarketMaker:
         self._load_recent_trades()
 
         # 針對無 WebSocket 的交易所使用 REST 成交同步
-        if self.exchange in ('aster', 'lighter'):
+        if self.exchange in ('aster', 'lighter', 'apex'):
             self._bootstrap_fill_history()
         
         logger.info(f"初始化做市商: {symbol}")
@@ -486,13 +486,15 @@ class MarketMaker:
 
     def _sync_fill_history(self, bootstrap: bool = False) -> None:
         """透過 REST API 同步最新成交"""
-        if self.exchange not in ('aster', 'lighter'):
+        if self.exchange not in ('aster', 'lighter', 'apex'):
             return
 
         exchange_label = self.exchange.capitalize()
 
         try:
-            response = self.client.get_fill_history(self.symbol, limit=200)
+            # APEX API 限制 limit 最大為 100
+            limit = 100 if self.exchange == 'apex' else 200
+            response = self.client.get_fill_history(self.symbol, limit=limit)
         except Exception as e:
             logger.error(f"獲取 {exchange_label} 成交歷史時出錯: {e}")
             return
@@ -562,7 +564,13 @@ class MarketMaker:
 
         data = response
         if isinstance(response, dict):
-            data = response.get('data', response)
+            # APEX 格式: {"data": {"orders": [...]}}
+            inner_data = response.get('data', response)
+            if isinstance(inner_data, dict):
+                # APEX 成交在 orders 字段中
+                data = inner_data.get('orders', inner_data.get('fills', inner_data))
+            else:
+                data = inner_data
 
         if not isinstance(data, list):
             logger.warning(f"成交歷史返回格式異常: {type(data)}")
@@ -597,6 +605,7 @@ class MarketMaker:
                 "trade_id",
                 "executionId",
                 "execution_id",
+                "matchFillId",  # APEX
                 "t",
             )
             order_id = _extract(
@@ -621,8 +630,9 @@ class MarketMaker:
                 "fee_currency",
                 "feeCurrency",
             )
-            maker_flag = _extract(entry, "maker", "isMaker", "m", "is_maker")
-            timestamp_raw = _extract(entry, "time", "timestamp", "T", "ts")
+            # APEX 使用 direction: MAKER/TAKER
+            maker_flag = _extract(entry, "maker", "isMaker", "m", "is_maker", "direction")
+            timestamp_raw = _extract(entry, "time", "timestamp", "T", "ts", "createdAt", "updatedTime")
 
             maker_fee = _to_float(_extract(entry, "maker_fee", "makerFee"))
             taker_fee = _to_float(_extract(entry, "taker_fee", "takerFee"))
@@ -639,7 +649,9 @@ class MarketMaker:
             if isinstance(maker_flag, bool):
                 is_maker = maker_flag
             elif maker_flag is not None:
-                is_maker = str(maker_flag).lower() in ("true", "1", "yes")
+                maker_str = str(maker_flag).lower()
+                # APEX uses direction: MAKER/TAKER
+                is_maker = maker_str in ("true", "1", "yes", "maker")
             elif derived_maker_flag is not None:
                 is_maker = derived_maker_flag
 
@@ -848,10 +860,8 @@ class MarketMaker:
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
-            # aster 和 paradex 沒有 WebSocket，直接返回 True
-            if self.exchange in ('aster', 'paradex'):
-                return True
-            if self.exchange == 'lighter':
+            # aster, paradex, lighter, apex 沒有 WebSocket，直接返回 True
+            if self.exchange in ('aster', 'paradex', 'lighter', 'apex'):
                 return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
@@ -1864,12 +1874,14 @@ class MarketMaker:
         filled_trades = []
         if filled_order_ids:
             try:
-                recent_fills = self.client.get_fill_history(self.symbol, limit=50)
-                if recent_fills and not (isinstance(recent_fills, dict) and "error" in recent_fills):
+                recent_fills_raw = self.client.get_fill_history(self.symbol, limit=50)
+                if recent_fills_raw and not (isinstance(recent_fills_raw, dict) and "error" in recent_fills_raw):
+                    # 使用統一的格式處理方法
+                    recent_fills = self._normalize_fill_history_response(recent_fills_raw)
                     if not hasattr(self, '_processed_fill_ids'):
                         self._processed_fill_ids = set()
                     for fill in recent_fills:
-                        fill_id = fill.get('id')
+                        fill_id = fill.get('fill_id') or fill.get('id')
                         fill_order_id = fill.get('order_id')
                         if fill_id in self._processed_fill_ids:
                             continue
@@ -1877,15 +1889,15 @@ class MarketMaker:
                             filled_trades.append(fill)
                             self._processed_fill_ids.add(fill_id)
                             side = fill.get('side', '').upper()
-                            price = float(fill.get('price', 0))
-                            size = float(fill.get('size', 0))
-                            liquidity = fill.get('liquidity', 'UNKNOWN')
+                            price = float(fill.get('price', 0) or 0)
+                            size = float(fill.get('quantity', 0) or fill.get('size', 0) or 0)
+                            is_maker = fill.get('is_maker', True)
+                            liquidity = 'MAKER' if is_maker else 'TAKER'
                             realized_pnl = fill.get('realized_pnl', 0)
-                            is_maker = liquidity.upper() == 'MAKER'
                             
                             # 獲取手續費信息
-                            fee = float(fill.get('fee', 0))
-                            fee_currency = fill.get('fee_currency', self.quote_asset)
+                            fee = float(fill.get('fee', 0) or 0)
+                            fee_currency = fill.get('fee_asset', self.quote_asset) or self.quote_asset
                             
                             # 構建完整的成交資訊
                             fill_info = {
