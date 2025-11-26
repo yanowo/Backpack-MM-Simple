@@ -443,7 +443,7 @@ class ApexClient(BaseExchangeClient):
             logger.error("zkKey 簽名失敗: %s", e)
             return None
 
-    def _sign_request(self, request_path: str, method: str, timestamp: str, data: Dict[str, Any] = None) -> str:
+    def _sign_request(self, request_path: str, method: str, timestamp: str, data: Dict[str, Any] = None, include_data: bool = True) -> str:
         """Generate APEX API signature.
 
         Args:
@@ -451,12 +451,14 @@ class ApexClient(BaseExchangeClient):
             method: HTTP method (GET, POST, DELETE)
             timestamp: Timestamp string (milliseconds)
             data: Request parameters
+            include_data: Whether to include data in signature message (False for GET requests)
 
         Returns:
             Base64 encoded HMAC-SHA256 signature
         """
-        # Sort parameters alphabetically (for both GET and POST)
-        if data:
+        # For POST requests, sort parameters alphabetically and include in signature
+        # For GET requests, do NOT include query parameters in signature
+        if include_data and data:
             sorted_items = sorted(data.items(), key=lambda x: x[0])
             data_string = '&'.join(
                 f'{key}={value}' for key, value in sorted_items if value is not None
@@ -464,11 +466,12 @@ class ApexClient(BaseExchangeClient):
         else:
             data_string = ''
 
-        # Build message: timestamp + method + path + data (same for all methods)
+        # Build message: timestamp + method + path (+ dataString for POST only)
         message = timestamp + method.upper() + request_path + data_string
 
         # Create HMAC-SHA256 signature
-        # 官方 SDK: base64.standard_b64encode(secret.encode('utf-8'))
+        # Official SDK: base64.standard_b64encode(secret.encode('utf-8'))
+        # The secret is encoded as UTF-8 string, then base64 encoded to get the HMAC key
         hashed = hmac.new(
             base64.standard_b64encode(self.secret_key.encode('utf-8')),
             msg=message.encode('utf-8'),
@@ -477,6 +480,24 @@ class ApexClient(BaseExchangeClient):
 
         signature = base64.standard_b64encode(hashed.digest()).decode()
         return signature
+
+    def _generate_query_path(self, url: str, params: Dict[str, Any]) -> str:
+        """Generate URL with query parameters appended.
+        
+        This mimics the official SDK's generate_query_path function.
+        For GET requests, params are appended to the URL and the full path
+        (including query string) is used for signing.
+        """
+        if not params:
+            return url
+        
+        # Filter out None values and build query string
+        entries = [(k, v) for k, v in params.items() if v is not None]
+        if not entries:
+            return url
+        
+        params_string = '&'.join(f'{k}={v}' for k, v in entries)
+        return f'{url}?{params_string}'
 
     def make_request(
         self,
@@ -489,12 +510,19 @@ class ApexClient(BaseExchangeClient):
         data: Optional[Dict[str, Any]] = None,
         retry_count: int = 3,
     ) -> Dict[str, Any]:
-        url = f"{self.base_url}{endpoint}"
-        payload: Dict[str, Any] = {}
+        method_upper = method.upper()
+        
+        # For GET/DELETE: params go in URL query string
+        # For POST: params go in request body as form data
         if params:
-            payload.update({k: v for k, v in params.items() if v is not None})
+            clean_params = {k: v for k, v in params.items() if v is not None}
+        else:
+            clean_params = {}
+            
         if data:
-            payload.update({k: v for k, v in data.items() if v is not None})
+            clean_data = {k: v for k, v in data.items() if v is not None}
+        else:
+            clean_data = {}
 
         signed = bool(instruction)
         headers = {
@@ -508,8 +536,17 @@ class ApexClient(BaseExchangeClient):
             # 生成一次時間戳，用於簽名和 header（毫秒時間戳）
             timestamp = self._generate_timestamp()
 
-            # GET 和 POST 請求都需要在簽名中包含參數
-            signature = self._sign_request(endpoint, method, timestamp, payload)
+            # Official SDK behavior:
+            # - GET: params are appended to URL path, sign uses full path with query string, data={}
+            # - POST: sign uses endpoint path + sorted data params
+            if method_upper in {"GET", "DELETE"}:
+                # Build full path with query params for signing
+                sign_path = self._generate_query_path(endpoint, clean_params)
+                # Sign with empty data (params are in the path)
+                signature = self._sign_request(sign_path, method_upper, timestamp, {}, include_data=False)
+            else:
+                # POST: sign with endpoint and data
+                signature = self._sign_request(endpoint, method_upper, timestamp, clean_data, include_data=True)
 
             headers.update({
                 'APEX-SIGNATURE': signature,
@@ -518,8 +555,8 @@ class ApexClient(BaseExchangeClient):
                 'APEX-PASSPHRASE': self.passphrase or ''
             })
 
-        method_upper = method.upper()
         retry_total = retry_count or self.max_retries
+        url = f"{self.base_url}{endpoint}"
 
         for attempt in range(retry_total):
             try:
@@ -527,7 +564,7 @@ class ApexClient(BaseExchangeClient):
                     response = self.session.request(
                         method_upper,
                         url,
-                        params=payload,
+                        params=clean_params,
                         timeout=self.timeout,
                         headers=headers,
                     )
@@ -536,7 +573,7 @@ class ApexClient(BaseExchangeClient):
                         method_upper,
                         url,
                         params=None,
-                        data=payload,
+                        data=clean_data,
                         timeout=self.timeout,
                         headers=headers,
                     )
@@ -1011,15 +1048,24 @@ class ApexClient(BaseExchangeClient):
 
         return {"bids": bids, "asks": asks}
 
-    def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100) -> Any:
-        params = {"limit": limit}
+    def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100, page: int = 0) -> Any:
+        """獲取成交歷史（已成交的訂單）
+
+        Args:
+            symbol: 交易對符號 (如 BTC-USDT)，使用原始格式
+            limit: 返回數量限制，預設 100
+            page: 頁碼，從 0 開始
+
+        Returns:
+            成交歷史列表，格式為 {"orders": [...], "totalSize": N}
+        """
+        params = {"limit": limit, "page": page}
         if symbol:
             resolved_symbol = self._resolve_symbol(symbol)
             if not resolved_symbol:
                 return self._unknown_symbol_error(symbol)
-            self._ensure_symbol_cache()
-            api_symbol = self._cross_symbol_cache.get(resolved_symbol, resolved_symbol)
-            params["symbol"] = api_symbol
+            # fills API 需要原始格式 (BTC-USDT)，不是 crossSymbolName (BTCUSDT)
+            params["symbol"] = resolved_symbol
 
         return self.make_request(
             "GET",
