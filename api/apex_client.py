@@ -5,12 +5,24 @@ import base64
 import hashlib
 import hmac
 import time
+import sys
+import uuid
+import numpy as np
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_UP, ROUND_DOWN
 from urllib.parse import urlencode
 
 import requests
+
+# Import zklink_sdk for order signing
+try:
+    sys.path.insert(0, r'C:\Users\Yan\AppData\Local\Programs\Python\Python312\Lib\site-packages\apexomni\pc')
+    import zklink_sdk as zk_sdk
+    HAS_ZKLINK = True
+except ImportError:
+    HAS_ZKLINK = False
+    zk_sdk = None
 
 from .base_client import BaseExchangeClient
 from .proxy_utils import get_proxy_config
@@ -27,6 +39,7 @@ class ApexClient(BaseExchangeClient):
         self.api_key = config.get("api_key")
         self.secret_key = config.get("secret_key")
         self.passphrase = config.get("passphrase", "")
+        self.zk_seeds = config.get("zk_seeds", "")  # zkKey seeds for order signing
         # APEX Omni base URL
         self.base_url = config.get("base_url", "https://omni.apex.exchange")
         self.timeout = float(config.get("timeout", 10))
@@ -42,6 +55,8 @@ class ApexClient(BaseExchangeClient):
         self._symbol_cache: Dict[str, str] = {}
         self._market_info_cache: Dict[str, Dict[str, Any]] = {}
         self._cross_symbol_cache: Dict[str, str] = {}  # symbol -> crossSymbolName
+        self._account_data: Optional[Dict[str, Any]] = None  # Cached account data
+        self._config_data: Optional[Dict[str, Any]] = None  # Cached config data
 
     def get_exchange_name(self) -> str:
         return "APEX"
@@ -202,6 +217,207 @@ class ApexClient(BaseExchangeClient):
             return {"error": message, "status_code": 400, "details": {"candidates": suggestions}}
         logger.error(message)
         return {"error": message, "status_code": 400}
+
+    def _ensure_account_data(self) -> None:
+        """Lazy-load and cache account data."""
+        if self._account_data:
+            return
+
+        result = self.make_request(
+            "GET",
+            "/api/v3/account",
+            instruction=True,
+            retry_count=self.max_retries,
+        )
+
+        if isinstance(result, dict) and "error" not in result:
+            self._account_data = result.get("data", {})
+        else:
+            logger.error("獲取帳戶資料失敗: %s", result.get("error", "unknown"))
+            self._account_data = {}
+
+    def _ensure_config_data(self) -> None:
+        """Lazy-load and cache config data."""
+        if self._config_data:
+            return
+
+        # Try multiple config endpoints - APEX Omni uses different paths
+        for endpoint in ["/api/v3/configs", "/omni/v3/configs"]:
+            result = self.make_request(
+                "GET",
+                endpoint,
+                instruction=True,  # This endpoint requires authentication
+                retry_count=self.max_retries,
+            )
+            if isinstance(result, dict) and "error" not in result:
+                break
+
+        if isinstance(result, dict) and "error" not in result:
+            self._config_data = result.get("data", {})
+        else:
+            logger.warning("獲取 v3 配置失敗: %s，嘗試使用 v2 symbols", result.get("error", "unknown"))
+
+            # Fallback to /api/v2/symbols
+            result = self.get_markets()
+            if isinstance(result, dict) and "error" not in result:
+                data = result.get("data", {})
+
+                # Build contractConfig from usdcConfig and usdtConfig
+                perpetual_contracts = []
+                assets = []
+
+                for config_key in ["usdcConfig", "usdtConfig"]:
+                    config_data = data.get(config_key, {})
+                    if isinstance(config_data, dict):
+                        perp_contracts = config_data.get("perpetualContract", [])
+                        # Map crossSymbolId to l2PairId for zkLink compatibility
+                        # USDC contracts use crossSymbolId directly
+                        # USDT contracts use 50000 + index (1-based)
+                        for idx, contract in enumerate(perp_contracts):
+                            if 'l2PairId' not in contract or contract.get('l2PairId') is None:
+                                if config_key == "usdtConfig":
+                                    # USDT contracts: l2PairId = 50000 + index
+                                    contract['l2PairId'] = 50000 + idx + 1
+                                else:
+                                    # USDC contracts: use crossSymbolId
+                                    contract['l2PairId'] = contract.get('crossSymbolId')
+                        perpetual_contracts.extend(perp_contracts)
+                        config_assets = config_data.get("currency", [])
+                        # Map currency fields to asset format
+                        for asset in config_assets:
+                            if 'token' not in asset:
+                                asset['token'] = asset.get('id')
+                            if 'decimals' not in asset:
+                                # Get decimals from starkExResolution (e.g., 1000000 = 6 decimals)
+                                resolution = asset.get('starkExResolution', 1000000)
+                                try:
+                                    import math
+                                    resolution_int = int(resolution) if resolution else 1000000
+                                    asset['decimals'] = int(math.log10(resolution_int)) if resolution_int > 0 else 6
+                                except (ValueError, TypeError):
+                                    asset['decimals'] = 6
+                        assets.extend(config_assets)
+
+                self._config_data = {
+                    "contractConfig": {
+                        "perpetualContract": perpetual_contracts,
+                        "assets": assets,
+                    },
+                    "raw": data
+                }
+            else:
+                logger.error("獲取配置資料失敗: %s", result.get("error", "unknown"))
+                self._config_data = {}
+
+    def _sign_order(self, symbol: str, side: str, size: str, price: str, client_id: str) -> Optional[str]:
+        """Sign order using zkLink SDK.
+
+        Returns the zkKey signature for the order.
+        """
+        if not HAS_ZKLINK or not zk_sdk:
+            logger.error("zklink_sdk 未安裝，無法簽名訂單")
+            return None
+
+        if not self.zk_seeds:
+            logger.error("缺少 zk_seeds，無法簽名訂單。請前往 https://omni.apex.exchange/keyManagement 點擊 'Omni Key' 獲取")
+            return None
+
+        self._ensure_account_data()
+        self._ensure_config_data()
+
+        if not self._account_data or not self._config_data:
+            logger.error("缺少帳戶或配置資料")
+            return None
+
+        # Find symbol data
+        symbol_data = None
+        currency = {}
+
+        contract_config = self._config_data.get("contractConfig", {})
+        for contract in contract_config.get("perpetualContract", []):
+            if contract.get("symbol") == symbol or contract.get("crossSymbolName") == symbol:
+                symbol_data = contract
+                break
+
+        if not symbol_data:
+            logger.error("找不到交易對配置: %s", symbol)
+            return None
+
+        # Find currency data (check both settleAssetId and settleCurrencyId)
+        settle_asset = symbol_data.get("settleAssetId") or symbol_data.get("settleCurrencyId")
+        for asset in contract_config.get("assets", []):
+            if asset.get("token") == settle_asset or asset.get("id") == settle_asset:
+                currency = asset
+                break
+
+        # Verify we found the currency
+        if not currency:
+            logger.error(f"找不到結算資產: {settle_asset}")
+            return None
+
+        # zkLink uses 18 decimals internally (like Ethereum Wei)
+        # This is different from the settlement currency decimals (6 for USDT/USDC)
+        decimals = 18
+
+        logger.info(f"簽名參數: symbol={symbol}, l2PairId={symbol_data.get('l2PairId')}, settle={settle_asset}, decimals={decimals}")
+
+        # Get account info
+        account_id = self._account_data.get("id")
+        spot_account = self._account_data.get("spotAccount", {})
+        contract_account = self._account_data.get("contractAccount", {})
+
+        sub_account_id = spot_account.get("defaultSubAccountId", 1)
+        taker_fee_rate = contract_account.get("takerFeeRate", "0.0005")
+        maker_fee_rate = contract_account.get("makerFeeRate", "0.0002")
+
+        # Calculate nonce and slot from client_id
+        message_hash = hashlib.sha256(client_id.encode()).hexdigest()
+        nonce_int = int(message_hash, 16)
+
+        max_uint32 = np.iinfo(np.uint32).max
+        max_uint64 = np.iinfo(np.uint64).max
+
+        slot_id = int((nonce_int % max_uint64) / max_uint32)
+        nonce = nonce_int % max_uint32
+        account_id_int = int(account_id) % max_uint32
+
+        # Convert price and size to contract format
+        # Note: decimals was already calculated above
+        price_dec = Decimal(price) * Decimal(10) ** decimals
+        size_dec = Decimal(size) * Decimal(10) ** decimals
+
+        price_str = str(int(price_dec.quantize(Decimal(1), rounding=ROUND_DOWN)))
+        size_str = str(int(size_dec.quantize(Decimal(1), rounding=ROUND_DOWN)))
+
+        # Convert fee rates
+        taker_fee_int = int(Decimal(taker_fee_rate) * 10000)
+        maker_fee_int = int(Decimal(maker_fee_rate) * 10000)
+
+        # Build and sign the contract
+        try:
+            builder = zk_sdk.ContractBuilder(
+                int(account_id_int),
+                int(sub_account_id),
+                int(slot_id),
+                int(nonce),
+                int(symbol_data.get("l2PairId", 0)),
+                size_str,
+                price_str,
+                side.upper() == "BUY",
+                taker_fee_int,
+                maker_fee_int,
+                False  # is_market
+            )
+
+            tx = zk_sdk.Contract(builder)
+            seeds_bytes = bytes.fromhex(self.zk_seeds.removeprefix("0x"))
+            signer = zk_sdk.ZkLinkSigner().new_from_seed(seeds_bytes)
+            auth_data = signer.sign_musig(tx.get_bytes())
+
+            return auth_data.signature
+        except Exception as e:
+            logger.error("zkKey 簽名失敗: %s", e)
+            return None
 
     def _sign_request(self, request_path: str, method: str, timestamp: str, data: Dict[str, Any] = None) -> str:
         """Generate APEX API signature.
@@ -456,6 +672,8 @@ class ApexClient(BaseExchangeClient):
         }
         normalized_type = type_mapping.get(order_type.upper(), order_type.upper())
 
+        # Order API expects the original symbol format (e.g., BTC-USDC)
+        # NOT the crossSymbolName format (e.g., BTCUSDC)
         payload: Dict[str, Any] = {
             "symbol": resolved_symbol,
             "side": normalized_side,
@@ -488,13 +706,52 @@ class ApexClient(BaseExchangeClient):
         if price is not None:
             payload["price"] = str(price)
 
-        # Client order ID
-        if "clientId" in order_details:
-            payload["clientOrderId"] = order_details["clientId"]
+        # Client order ID - generate if not provided
+        client_id = order_details.get("clientId") or str(uuid.uuid4())
+        payload["clientId"] = client_id
 
         # Reduce only
         if order_details.get("reduceOnly"):
             payload["reduceOnly"] = "true"
+
+        # Calculate expiration (28 days from now) - must be in milliseconds
+        expiration = int(time.time()) + 3600 * 24 * 28
+        payload["expiration"] = expiration * 1000
+
+        # Calculate limit fee
+        size_dec = Decimal(str(quantity)) if quantity else Decimal("0")
+        price_dec = Decimal(str(price)) if price else Decimal("0")
+
+        self._ensure_account_data()
+        taker_fee_rate = Decimal(self._account_data.get("contractAccount", {}).get("takerFeeRate", "0.0005"))
+
+        # Calculate human cost (buy uses ROUND_UP, sell uses ROUND_DOWN)
+        if normalized_side == "BUY":
+            human_cost = (size_dec * price_dec).quantize(Decimal("0.000001"), rounding=ROUND_UP)
+        else:
+            human_cost = (size_dec * price_dec).quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
+
+        # Calculate fee
+        fee = human_cost * taker_fee_rate
+
+        # IMPORTANT: limitFee must ALWAYS round UP (even for sell orders)
+        limit_fee = fee.quantize(Decimal("0.000001"), rounding=ROUND_UP)
+
+        payload["limitFee"] = str(limit_fee)
+
+        # Generate zkKey signature
+        zk_signature = self._sign_order(
+            resolved_symbol,
+            normalized_side,
+            str(quantity),
+            str(price),
+            client_id
+        )
+
+        if zk_signature:
+            payload["signature"] = zk_signature
+        else:
+            return {"error": "無法生成 zkKey 簽名。請前往 https://omni.apex.exchange/keyManagement 點擊 'Omni Key' 獲取 zk_seeds 並添加到配置中"}
 
         result = self.make_request(
             "POST",
@@ -504,8 +761,12 @@ class ApexClient(BaseExchangeClient):
             retry_count=self.max_retries,
         )
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        if isinstance(result, dict):
+            # Check for error in response (can be 'error' or 'code' field)
+            if "error" in result:
+                return result
+            if result.get("code") and result.get("code") != 0:
+                return {"error": result.get("msg", f"Order failed with code {result.get('code')}"), "details": result}
 
         return self._normalize_order_fields(result.get("data", result))
 
@@ -515,7 +776,9 @@ class ApexClient(BaseExchangeClient):
             resolved_symbol = self._resolve_symbol(symbol)
             if not resolved_symbol:
                 return self._unknown_symbol_error(symbol)
-            params["symbol"] = resolved_symbol
+            self._ensure_symbol_cache()
+            api_symbol = self._cross_symbol_cache.get(resolved_symbol, resolved_symbol)
+            params["symbol"] = api_symbol
 
         result = self.make_request(
             "GET",
@@ -528,7 +791,16 @@ class ApexClient(BaseExchangeClient):
         if isinstance(result, dict) and "error" in result:
             return result
 
-        orders = result.get("data", {}).get("orders", [])
+        # Handle different response formats
+        if isinstance(result, list):
+            orders = result
+        else:
+            data = result.get("data", result)
+            if isinstance(data, list):
+                orders = data
+            else:
+                orders = data.get("orders", [])
+
         normalized: List[Dict[str, Any]] = []
         for item in orders:
             normalized.append(self._normalize_order_fields(dict(item)))
@@ -540,11 +812,14 @@ class ApexClient(BaseExchangeClient):
         if not resolved_symbol:
             return self._unknown_symbol_error(symbol)
 
+        self._ensure_symbol_cache()
+        api_symbol = self._cross_symbol_cache.get(resolved_symbol, resolved_symbol)
+
         result = self.make_request(
             "POST",
             "/api/v3/delete-open-orders",
             instruction=True,
-            data={"symbol": resolved_symbol},
+            data={"symbol": api_symbol},
             retry_count=self.max_retries,
         )
         return result
@@ -562,10 +837,17 @@ class ApexClient(BaseExchangeClient):
             retry_count=self.max_retries,
         )
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        if isinstance(result, dict):
+            if "error" in result:
+                return result
+            if result.get("code") and result.get("code") != 0:
+                return {"error": result.get("msg", f"Cancel failed with code {result.get('code')}"), "details": result}
+            data = result.get("data", result)
+            if isinstance(data, dict):
+                return self._normalize_order_fields(data)
+            return {"success": True, "data": data}
 
-        return self._normalize_order_fields(result.get("data", result))
+        return {"success": True}
 
     def get_ticker(self, symbol: str) -> Dict[str, Any]:
         resolved_symbol = self._resolve_symbol(symbol)
@@ -635,10 +917,14 @@ class ApexClient(BaseExchangeClient):
         if not resolved_symbol:
             return self._unknown_symbol_error(symbol)
 
+        # Depth API requires crossSymbolName format (e.g., BTCUSDT instead of BTC-USDT)
+        self._ensure_symbol_cache()
+        api_symbol = self._cross_symbol_cache.get(resolved_symbol, resolved_symbol)
+
         result = self.make_request(
             "GET",
             "/api/v3/depth",
-            params={"symbol": resolved_symbol, "limit": limit},
+            params={"symbol": api_symbol, "limit": limit},
             retry_count=self.max_retries,
         )
 
@@ -674,7 +960,9 @@ class ApexClient(BaseExchangeClient):
             resolved_symbol = self._resolve_symbol(symbol)
             if not resolved_symbol:
                 return self._unknown_symbol_error(symbol)
-            params["symbol"] = resolved_symbol
+            self._ensure_symbol_cache()
+            api_symbol = self._cross_symbol_cache.get(resolved_symbol, resolved_symbol)
+            params["symbol"] = api_symbol
 
         return self.make_request(
             "GET",
@@ -689,6 +977,10 @@ class ApexClient(BaseExchangeClient):
         if not resolved_symbol:
             return self._unknown_symbol_error(symbol)
 
+        # Klines API requires crossSymbolName format (e.g., BTCUSDT instead of BTC-USDT)
+        self._ensure_symbol_cache()
+        api_symbol = self._cross_symbol_cache.get(resolved_symbol, resolved_symbol)
+
         # Map interval to APEX format
         interval_mapping = {
             "1m": "1",
@@ -702,7 +994,7 @@ class ApexClient(BaseExchangeClient):
         apex_interval = interval_mapping.get(interval, interval)
 
         params = {
-            "symbol": resolved_symbol,
+            "symbol": api_symbol,
             "interval": apex_interval,
             "limit": limit
         }

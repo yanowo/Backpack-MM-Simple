@@ -141,6 +141,18 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
         if config_secret_key:
             config['private_key'] = config_secret_key
             config.pop('secret_key', None)
+    # APEX需要額外的zk_seeds
+    elif exchange == 'apex':
+        if config_api_key:
+            config['api_key'] = config_api_key
+        if config_secret_key:
+            config['secret_key'] = config_secret_key
+        if 'passphrase' not in config:
+            config['passphrase'] = os.getenv('APEX_PASSPHRASE', '')
+        if 'zk_seeds' not in config:
+            config['zk_seeds'] = os.getenv('APEX_ZK_SEEDS', '')
+        if 'base_url' not in config:
+            config['base_url'] = os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange')
     # 其他交易所使用傳統的api_key/secret_key
     else:
         if config_api_key:
