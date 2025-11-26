@@ -1228,8 +1228,21 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 break
 
         if not next_price:
-            logger.warning("開多價格 %.4f 已經是最高網格，無法掛平多單", open_price)
-            return
+            # 如果沒有更高的網格點位（最高網格成交），計算一個合理的平倉價格
+            # 使用網格間距作為目標利潤
+            if len(self.grid_levels) >= 2:
+                # 計算平均網格間距
+                sorted_levels = sorted(self.grid_levels)
+                grid_step = (sorted_levels[-1] - sorted_levels[0]) / (len(sorted_levels) - 1)
+            else:
+                # 只有一個網格點位，使用價格的 0.1% 作為間距
+                grid_step = open_price * 0.001
+            
+            next_price = round_to_tick_size(open_price + grid_step, self.tick_size)
+            logger.info(
+                "開多價格 %.4f 是最高網格，使用計算的平倉價格 %.4f (間距: %.4f)",
+                open_price, next_price, grid_step
+            )
 
         logger.info("開多成交後在價格 %.4f 掛平多單 (開倉價格: %.4f)", next_price, open_price)
 
@@ -1313,8 +1326,21 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 break
 
         if not next_price:
-            logger.warning("開空價格 %.4f 已經是最低網格，無法掛平空單", open_price)
-            return
+            # 如果沒有更低的網格點位（最低網格成交），計算一個合理的平倉價格
+            # 使用網格間距作為目標利潤
+            if len(self.grid_levels) >= 2:
+                # 計算平均網格間距
+                sorted_levels = sorted(self.grid_levels)
+                grid_step = (sorted_levels[-1] - sorted_levels[0]) / (len(sorted_levels) - 1)
+            else:
+                # 只有一個網格點位，使用價格的 0.1% 作為間距
+                grid_step = open_price * 0.001
+            
+            next_price = round_to_tick_size(open_price - grid_step, self.tick_size)
+            logger.info(
+                "開空價格 %.4f 是最低網格，使用計算的平倉價格 %.4f (間距: %.4f)",
+                open_price, next_price, grid_step
+            )
 
         logger.info("開空成交後在價格 %.4f 掛平空單 (開倉價格: %.4f)", next_price, open_price)
 
