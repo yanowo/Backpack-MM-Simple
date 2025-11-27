@@ -1531,6 +1531,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
         refilled = 0
         skipped_locked = 0
         skipped_has_order = 0
+        
+        # 追蹤本次迭代已補單的價格，避免重複補單
+        filled_prices_this_round: Set[float] = set()
 
         for price in self.grid_levels:
             # 獲取該網格點位的狀態
@@ -1539,8 +1542,12 @@ class PerpGridStrategy(PerpetualMarketMaker):
             
             if self.grid_type == "neutral":
                 if price < current_price:
-                    # 檢查是否已有開多單
-                    has_long_order = active_long_open_counts.get(price, 0) > 0
+                    # 檢查是否已有開多單（交易所 API + 本地追蹤 + 本輪已補）
+                    has_long_order = (
+                        active_long_open_counts.get(price, 0) > 0 or
+                        len(self.open_long_orders.get(price, {})) > 0 or
+                        price in filled_prices_this_round
+                    )
                     
                     if has_long_order:
                         logger.debug("網格點位 %.4f 已有開多單，不補單", price)
@@ -1560,10 +1567,15 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     logger.info("補充開多單: 價格=%.4f, 數量=%.4f", price, self.order_quantity)
                     if self._place_grid_long_order(price, self.order_quantity):
                         refilled += 1
+                        filled_prices_this_round.add(price)
                         
                 elif price > current_price:
-                    # 檢查是否已有開空單
-                    has_short_order = active_short_open_counts.get(price, 0) > 0
+                    # 檢查是否已有開空單（交易所 API + 本地追蹤 + 本輪已補）
+                    has_short_order = (
+                        active_short_open_counts.get(price, 0) > 0 or
+                        len(self.open_short_orders.get(price, {})) > 0 or
+                        price in filled_prices_this_round
+                    )
                     
                     if has_short_order:
                         logger.debug("網格點位 %.4f 已有開空單，不補單", price)
@@ -1583,11 +1595,16 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     logger.info("補充開空單: 價格=%.4f, 數量=%.4f", price, self.order_quantity)
                     if self._place_grid_short_order(price, self.order_quantity):
                         refilled += 1
+                        filled_prices_this_round.add(price)
 
             elif self.grid_type == "long":
                 if price <= current_price:
-                    # 檢查是否已有開多單
-                    has_long_order = active_long_open_counts.get(price, 0) > 0
+                    # 檢查是否已有開多單（交易所 API + 本地追蹤 + 本輪已補）
+                    has_long_order = (
+                        active_long_open_counts.get(price, 0) > 0 or
+                        len(self.open_long_orders.get(price, {})) > 0 or
+                        price in filled_prices_this_round
+                    )
                     
                     if has_long_order:
                         logger.debug("網格點位 %.4f 已有開多單，不補單", price)
@@ -1607,11 +1624,16 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     logger.info("補充開多單: 價格=%.4f, 數量=%.4f", price, self.order_quantity)
                     if self._place_grid_long_order(price, self.order_quantity):
                         refilled += 1
+                        filled_prices_this_round.add(price)
 
             elif self.grid_type == "short":
                 if price >= current_price:
-                    # 檢查是否已有開空單
-                    has_short_order = active_short_open_counts.get(price, 0) > 0
+                    # 檢查是否已有開空單（交易所 API + 本地追蹤 + 本輪已補）
+                    has_short_order = (
+                        active_short_open_counts.get(price, 0) > 0 or
+                        len(self.open_short_orders.get(price, {})) > 0 or
+                        price in filled_prices_this_round
+                    )
                     
                     if has_short_order:
                         logger.debug("網格點位 %.4f 已有開空單，不補單", price)
@@ -1631,6 +1653,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     logger.info("補充開空單: 價格=%.4f, 數量=%.4f", price, self.order_quantity)
                     if self._place_grid_short_order(price, self.order_quantity):
                         refilled += 1
+                        filled_prices_this_round.add(price)
 
         # 補單摘要
         if refilled > 0 or skipped_locked > 0:
