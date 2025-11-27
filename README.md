@@ -12,7 +12,7 @@
 | **Aster** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://www.asterdex.com/referral/1a7b6E) |
 | **Paradex** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.paradex.trade/r/yanowo) |
 | **Lighter** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
-| **APEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://omni.apex.exchange/referral?code=yanowo) |
+| **APEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://join.omni.apex.exchange/yanowo) |
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
