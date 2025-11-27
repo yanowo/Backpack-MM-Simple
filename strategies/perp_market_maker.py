@@ -389,14 +389,14 @@ class PerpetualMarketMaker(MarketMaker):
                 logger.warning(f"緊急平倉成功: {self.last_protective_action}")
                 return False  # 平倉後繼續運行
             else:
-                self.stop_reason = f"{trigger_label}觸發但平倉失敗，請立即檢查倉位！"
-                logger.error(self.stop_reason)
-                return True  # 停止策略
+                logger.error(f"{trigger_label}觸發但平倉失敗，將在下次迭代重試")
+                self.last_protective_action = f"{trigger_label}觸發但平倉失敗，等待重試"
+                return False 
 
         except Exception as e:
             logger.error(f"執行緊急平倉時出錯: {e}")
-            self.stop_reason = f"{trigger_label}觸發，平倉過程中出現錯誤: {e}"
-            return True
+            self.last_protective_action = f"{trigger_label}觸發，平倉出錯: {e}"
+            return False
 
     # ------------------------------------------------------------------
     # 下單相關 (此處函數未變動)
