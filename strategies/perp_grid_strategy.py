@@ -147,6 +147,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 訂單ID別名：clientOrderIndex 與交易所 order_id 對應
         self.order_alias_map: Dict[str, str] = {}
         self.order_aliases_by_primary: Dict[str, Set[str]] = {}
+        
+        # === 失敗重試機制 ===
+        # 待重試的平倉單隊列：[(open_price, quantity, position_type, retry_count)]
+        self.pending_close_orders: List[Tuple[float, float, str, int]] = []
+        self.max_close_order_retries = 3  # 平倉單最大重試次數
 
         logger.info("初始化永續合約網格交易策略: %s", symbol)
         logger.info("網格數量: %d | 模式: %s | 類型: %s", self.grid_num, self.grid_mode, self.grid_type)
@@ -1213,12 +1218,16 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         self._remove_order_aliases(order_id)
 
-    def _place_close_long_order(self, open_price: float, quantity: float) -> None:
+    def _place_close_long_order(self, open_price: float, quantity: float, retry_count: int = 0) -> bool:
         """掛平多單
         
         Args:
             open_price: 原始掛單價格（不是成交價格）
             quantity: 成交數量
+            retry_count: 當前重試次數
+            
+        Returns:
+            是否成功掛單
         """
         # 找到下一個更高的網格點位
         next_price = None
@@ -1296,10 +1305,13 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 )
                 if isinstance(result, dict) and "error" in result:
                     logger.error("重試仍失敗: %s", result.get('error', ''))
-                    return
-
+                    # 加入待重試隊列
+                    self._add_pending_close_order(open_price, quantity, 'long', retry_count)
+                    return False
             else:
-                return
+                # 其他錯誤，加入待重試隊列
+                self._add_pending_close_order(open_price, quantity, 'long', retry_count)
+                return False
 
         # 使用新的記錄系統記錄平倉單
         primary_id, alias_ids = self._extract_order_identifiers(result)
@@ -1310,13 +1322,20 @@ class PerpGridStrategy(PerpetualMarketMaker):
             # 計算潛在網格利潤
             grid_profit = (next_price - open_price) * quantity
             logger.info("掛出平多單，潛在利潤: %.4f %s", grid_profit, self.quote_asset)
+            return True
+        
+        return False
 
-    def _place_close_short_order(self, open_price: float, quantity: float) -> None:
+    def _place_close_short_order(self, open_price: float, quantity: float, retry_count: int = 0) -> bool:
         """掛平空單
         
         Args:
             open_price: 原始掛單價格（不是成交價格）
             quantity: 成交數量
+            retry_count: 當前重試次數
+            
+        Returns:
+            是否成功掛單
         """
         # 找到下一個更低的網格點位
         next_price = None
@@ -1393,10 +1412,13 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 )
                 if isinstance(result, dict) and "error" in result:
                     logger.error("重試仍失敗: %s", result.get('error', ''))
-                    return
-
+                    # 加入待重試隊列
+                    self._add_pending_close_order(open_price, quantity, 'short', retry_count)
+                    return False
             else:
-                return
+                # 其他錯誤，加入待重試隊列
+                self._add_pending_close_order(open_price, quantity, 'short', retry_count)
+                return False
 
         # 使用新的記錄系統記錄平倉單
         primary_id, alias_ids = self._extract_order_identifiers(result)
@@ -1407,6 +1429,72 @@ class PerpGridStrategy(PerpetualMarketMaker):
             # 計算潛在網格利潤
             grid_profit = (open_price - next_price) * quantity
             logger.info("掛出平空單，潛在利潤: %.4f %s", grid_profit, self.quote_asset)
+            return True
+        
+        return False
+    
+    def _add_pending_close_order(self, open_price: float, quantity: float, position_type: str, current_retry: int) -> None:
+        """將失敗的平倉單加入待重試隊列
+        
+        Args:
+            open_price: 開倉價格
+            quantity: 數量
+            position_type: 'long' 或 'short'
+            current_retry: 當前重試次數
+        """
+        next_retry = current_retry + 1
+        if next_retry > self.max_close_order_retries:
+            logger.error(
+                "平倉單已達最大重試次數 (%d)，放棄重試: 開倉價格=%.4f, 數量=%.4f, 類型=%s",
+                self.max_close_order_retries, open_price, quantity, position_type
+            )
+            # 解除網格點位鎖定，允許重新開倉
+            state = self.grid_level_states[open_price]
+            if position_type == 'long':
+                state['open_position'] = max(0, state['open_position'] - quantity)
+            else:
+                state['open_position'] = min(0, state['open_position'] + quantity)
+            
+            # 如果沒有剩餘持倉，解除鎖定
+            if abs(state['open_position']) < self.min_order_size:
+                state['locked'] = False
+                state['open_position'] = 0.0
+                logger.warning("網格點位 %.4f 已解除鎖定，允許重新開倉", open_price)
+            return
+        
+        # 檢查是否已在隊列中（避免重複添加）
+        for pending in self.pending_close_orders:
+            if pending[0] == open_price and pending[2] == position_type:
+                logger.debug("平倉單已在隊列中，更新重試次數: %.4f %s", open_price, position_type)
+                return
+        
+        self.pending_close_orders.append((open_price, quantity, position_type, next_retry))
+        logger.warning(
+            "平倉單加入重試隊列: 開倉價格=%.4f, 數量=%.4f, 類型=%s, 重試次數=%d/%d",
+            open_price, quantity, position_type, next_retry, self.max_close_order_retries
+        )
+    
+    def _retry_pending_close_orders(self) -> None:
+        """重試待處理的平倉單"""
+        if not self.pending_close_orders:
+            return
+        
+        logger.info("開始重試 %d 個待處理的平倉單...", len(self.pending_close_orders))
+        
+        # 複製列表，因為處理過程中會修改
+        pending_orders = list(self.pending_close_orders)
+        self.pending_close_orders.clear()
+        
+        for open_price, quantity, position_type, retry_count in pending_orders:
+            logger.info(
+                "重試平倉單: 開倉價格=%.4f, 數量=%.4f, 類型=%s, 重試次數=%d",
+                open_price, quantity, position_type, retry_count
+            )
+            
+            if position_type == 'long':
+                self._place_close_long_order(open_price, quantity, retry_count)
+            else:
+                self._place_close_short_order(open_price, quantity, retry_count)
 
     def place_limit_orders(self) -> None:
         """放置限價單 - 覆蓋父類方法（增加倉位變化檢測）"""
@@ -1420,6 +1508,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
         else:
             # 【新增】倉位變化檢測，補強訂單狀態的遺漏
             self._check_position_changes()
+            
+            # 【新增】重試失敗的平倉單
+            self._retry_pending_close_orders()
             
             # 一次性獲取所有必要數據，然後檢查並補充缺失的網格訂單
             current_price = self.get_current_price()
@@ -1713,6 +1804,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 ("多單數量", f"{total_buy_orders}"),
                 ("空單數量", f"{total_sell_orders}"),
                 ("鎖定網格數", f"{locked_levels}"),
+                ("待重試平倉單", f"{len(self.pending_close_orders)}"),
             ],
         ))
 
