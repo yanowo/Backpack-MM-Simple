@@ -1449,21 +1449,19 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 self.max_close_order_retries, open_price, quantity, position_type
             )
             
-            # 嘗試市價強制平倉
+            # 嘗試市價強制平倉 - 使用繼承的 close_position 方法
             try:
-                side = "Ask" if position_type == 'long' else "Bid"
-                market_result = self.client.execute_order(
-                    symbol=self.symbol,
-                    side=side,
-                    order_type="Market",
+                # position_type='long' 表示要平多倉（賣出），'short' 表示要平空倉（買入）
+                close_success = self.close_position(
                     quantity=quantity,
-                    reduce_only=True,
+                    order_type="Market",
+                    side=position_type,  # 'long' 或 'short'
                 )
                 
-                if market_result and market_result.get("status") != "Cancelled":
+                if close_success:
                     logger.warning(
-                        "市價強制平倉成功: 開倉價格=%.4f, 數量=%.4f, 類型=%s, 訂單ID=%s",
-                        open_price, quantity, position_type, market_result.get("id", "N/A")
+                        "市價強制平倉成功: 開倉價格=%.4f, 數量=%.4f, 類型=%s",
+                        open_price, quantity, position_type
                     )
                     # 更新網格狀態
                     state = self.grid_level_states[open_price]
@@ -1478,9 +1476,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
                         logger.info("網格點位 %.4f 已解除鎖定", open_price)
                     return
                 else:
-                    logger.error("市價強制平倉失敗，訂單被取消或無結果")
+                    logger.error("市價強制平倉失敗")
             except Exception as e:
                 logger.error("市價強制平倉出錯: %s", e)
+            
+            # 市價平倉也失敗，重新加入隊列，下一輪繼續嘗試市價平倉
+            logger.error(
+                "*** 警告 ***: 市價平倉失敗! 開倉價格=%.4f, 數量=%.4f, 類型=%s，下一輪將繼續嘗試",
+                open_price, quantity, position_type
+            )
+            # 保持在最大重試次數，這樣下一輪會繼續嘗試市價平倉
+            self.pending_close_orders.append((open_price, quantity, position_type, self.max_close_order_retries))
+            return
             
             # 市價平倉也失敗，重新加入隊列，下一輪繼續嘗試市價平倉
             logger.error(
