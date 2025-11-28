@@ -19,7 +19,8 @@ Maker-Taker 對沖策略僅在買一/賣一掛單，當掛單成交後立即以�
 | Backpack | ✅ | ✅ | 自動啟用 `autoLendRedeem` |
 | Aster | ❌ | ✅ | 移除 `postOnly` (永續) |
 | Paradex | ❌ | ✅ | JWT 自動刷新 |
-| Ligher | ❌ | ✅ | 簽名並獲取 index |
+| Lighter | ❌ | ✅ | zkLighter 鎖上簽名 |
+| APEX | ❌ | ✅ | zkLink 簽名，所有訂單需簽名 |
 
 ## 啟動示例
 
@@ -41,6 +42,12 @@ python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01
 
 # Paradex 永續對沖
 python run.py --exchange paradex --market-type perp --symbol BTC-USD-PERP --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
+
+# Lighter 永續對沖
+python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
+
+# APEX 永續對沖
+python run.py --exchange apex --market-type perp --symbol BTCUSDT --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 ```
 
 ## 執行流程示例

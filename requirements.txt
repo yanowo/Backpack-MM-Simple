@@ -8,3 +8,4 @@ Flask
 flask-socketio
 python-socketio
 werkzeug
+apexomni

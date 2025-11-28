@@ -164,6 +164,20 @@ def start_bot():
                 'account_address': account_address,
                 'base_url': base_url,
             }
+        elif exchange == 'apex':
+            api_key = os.getenv('APEX_API_KEY', '')
+            secret_key = os.getenv('APEX_SECRET_KEY', '')
+            passphrase = os.getenv('APEX_PASSPHRASE', '')
+            zk_seeds = os.getenv('APEX_ZK_SEEDS', '')
+            base_url = os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange')
+
+            exchange_config = {
+                'api_key': api_key,
+                'secret_key': secret_key,
+                'passphrase': passphrase,
+                'zk_seeds': zk_seeds,
+                'base_url': base_url,
+            }
         else:
             return jsonify({'success': False, 'message': f'不支持的交易所: {exchange}'}), 400
 
@@ -171,6 +185,9 @@ def start_bot():
         if exchange == 'paradex':
             if not secret_key or not account_address:
                 return jsonify({'success': False, 'message': 'Paradex需要提供StarkNet私鑰與帳户地址'}), 400
+        elif exchange == 'apex':
+            if not api_key or not secret_key:
+                return jsonify({'success': False, 'message': 'APEX API密鑰未配置，請檢查環境變量'}), 400
         else:
             if not api_key or not secret_key:
                 return jsonify({'success': False, 'message': 'API密鑰未配置，請檢查環境變量'}), 400
@@ -438,14 +455,15 @@ def stop_bot():
 def get_config():
     """獲取配置信息"""
     return jsonify({
-        'exchanges': ['backpack', 'aster', 'paradex'],
+        'exchanges': ['backpack', 'aster', 'paradex', 'lighter', 'apex'],
         'market_types': ['spot', 'perp'],
         'strategies': ['standard', 'maker_hedge', 'grid'],
         'env_configured': {
             'backpack': bool(os.getenv('BACKPACK_KEY') and os.getenv('BACKPACK_SECRET')),
             'aster': bool(os.getenv('ASTER_API_KEY') and os.getenv('ASTER_SECRET_KEY')),
             'paradex': bool(os.getenv('PARADEX_PRIVATE_KEY') and os.getenv('PARADEX_ACCOUNT_ADDRESS')),
-            'lighter': bool(os.getenv('LIGHTER_PRIVATE_KEY') and os.getenv('LIGHTER_PUBLIC_KEY'))
+            'lighter': bool(os.getenv('LIGHTER_PRIVATE_KEY') and os.getenv('LIGHTER_PUBLIC_KEY')),
+            'apex': bool(os.getenv('APEX_API_KEY') and os.getenv('APEX_SECRET_KEY'))
         }
     })
 
