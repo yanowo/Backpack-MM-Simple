@@ -1444,22 +1444,51 @@ class PerpGridStrategy(PerpetualMarketMaker):
         """
         next_retry = current_retry + 1
         if next_retry > self.max_close_order_retries:
-            logger.error(
-                "平倉單已達最大重試次數 (%d)，放棄重試: 開倉價格=%.4f, 數量=%.4f, 類型=%s",
+            logger.warning(
+                "平倉單已達最大限價重試次數 (%d)，嘗試市價強制平倉: 開倉價格=%.4f, 數量=%.4f, 類型=%s",
                 self.max_close_order_retries, open_price, quantity, position_type
             )
-            # 解除網格點位鎖定，允許重新開倉
-            state = self.grid_level_states[open_price]
-            if position_type == 'long':
-                state['open_position'] = max(0, state['open_position'] - quantity)
-            else:
-                state['open_position'] = min(0, state['open_position'] + quantity)
             
-            # 如果沒有剩餘持倉，解除鎖定
-            if abs(state['open_position']) < self.min_order_size:
-                state['locked'] = False
-                state['open_position'] = 0.0
-                logger.warning("網格點位 %.4f 已解除鎖定，允許重新開倉", open_price)
+            # 嘗試市價強制平倉
+            try:
+                side = "Ask" if position_type == 'long' else "Bid"
+                market_result = self.client.execute_order(
+                    symbol=self.symbol,
+                    side=side,
+                    order_type="Market",
+                    quantity=quantity,
+                    reduce_only=True,
+                )
+                
+                if market_result and market_result.get("status") != "Cancelled":
+                    logger.warning(
+                        "市價強制平倉成功: 開倉價格=%.4f, 數量=%.4f, 類型=%s, 訂單ID=%s",
+                        open_price, quantity, position_type, market_result.get("id", "N/A")
+                    )
+                    # 更新網格狀態
+                    state = self.grid_level_states[open_price]
+                    if position_type == 'long':
+                        state['open_position'] = max(0, state['open_position'] - quantity)
+                    else:
+                        state['open_position'] = min(0, state['open_position'] + quantity)
+                    
+                    if abs(state['open_position']) < self.min_order_size:
+                        state['locked'] = False
+                        state['open_position'] = 0.0
+                        logger.info("網格點位 %.4f 已解除鎖定", open_price)
+                    return
+                else:
+                    logger.error("市價強制平倉失敗，訂單被取消或無結果")
+            except Exception as e:
+                logger.error("市價強制平倉出錯: %s", e)
+            
+            # 市價平倉也失敗，重新加入隊列，下一輪繼續嘗試市價平倉
+            logger.error(
+                "*** 警告 ***: 市價平倉失敗! 開倉價格=%.4f, 數量=%.4f, 類型=%s，下一輪將繼續嘗試",
+                open_price, quantity, position_type
+            )
+            # 保持在最大重試次數，這樣下一輪會繼續嘗試市價平倉
+            self.pending_close_orders.append((open_price, quantity, position_type, self.max_close_order_retries))
             return
         
         # 檢查是否已在隊列中（避免重複添加）
