@@ -152,6 +152,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 待重試的平倉單隊列：[(open_price, quantity, position_type, retry_count)]
         self.pending_close_orders: List[Tuple[float, float, str, int]] = []
         self.max_close_order_retries = 3  # 平倉單最大重試次數
+        
+        # === 週期性倉位同步 ===
+        self._last_position_sync_time: float = 0.0  # 上次同步時間戳
+        self._position_sync_interval: int = 600  # 同步間隔（秒），預設 10 分鐘
 
         logger.info("初始化永續合約網格交易策略: %s", symbol)
         logger.info("網格數量: %d | 模式: %s | 類型: %s", self.grid_num, self.grid_mode, self.grid_type)
@@ -341,6 +345,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
             'price': price,
             'side': side,
             'quantity': quantity,
+            'filled_quantity': 0.0,  # 已成交數量（用於部分成交追蹤）
             'created_time': datetime.now(),
             'status': 'open',
             'alias_ids': set(alias_ids),
@@ -549,24 +554,36 @@ class PerpGridStrategy(PerpetualMarketMaker):
         if normalized_input_id and normalized_input_id != tracking_id:
             display_id = f"{normalized_input_id}->{tracking_id}"
 
+        # 更新已成交數量（支持部分成交）
+        order_info['filled_quantity'] = order_info.get('filled_quantity', 0.0) + quantity
+        original_qty = order_info.get('quantity', quantity)
+        filled_qty = order_info['filled_quantity']
+        is_fully_filled = filled_qty >= original_qty - 0.0001  # 考慮浮點誤差
+        
         logger.info(
-            "開倉單成交[訂單狀態]: ID=%s, 方向=%s, 網格價格=%.4f, 成交價格=%.4f, 數量=%.4f",
-            display_id, side, grid_price, price, quantity
+            "開倉單成交[訂單狀態]: ID=%s, 方向=%s, 網格價格=%.4f, 成交價格=%.4f, "
+            "本次成交=%.4f, 累計成交=%.4f/%.4f, 完全成交=%s",
+            display_id, side, grid_price, price, quantity, filled_qty, original_qty, is_fully_filled
         )
         
-        # 移除開倉單記錄
-        self._remove_open_order(tracking_id, grid_price, side)
+        # 只有完全成交時才移除開倉單記錄
+        if is_fully_filled:
+            self._remove_open_order(tracking_id, grid_price, side)
+        else:
+            logger.info("部分成交，保留訂單記錄等待後續成交")
         
-        # 更新網格點位狀態的持倉
+        # 更新網格點位狀態的持倉（每次部分成交都要更新）
         state = self.grid_level_states[grid_price]
         if side == 'Bid':
             state['open_position'] += quantity
-            self.grid_long_filled_count += 1
+            if is_fully_filled:
+                self.grid_long_filled_count += 1
         else:
             state['open_position'] -= quantity
-            self.grid_short_filled_count += 1
+            if is_fully_filled:
+                self.grid_short_filled_count += 1
         
-        # 掛平倉單
+        # 每次部分成交都掛對應數量的平倉單
         if side == 'Bid':
             self._place_close_long_order(grid_price, quantity)
         else:
@@ -955,7 +972,200 @@ class PerpGridStrategy(PerpetualMarketMaker):
         logger.info("網格初始化完成: 共放置 %d 個訂單", placed_orders)
         self.grid_initialized = True
 
+        # 啟動時同步倉位，為多餘的倉位補掛平倉單
+        self._sync_position_with_grid()
+
         return True
+
+    def _sync_position_with_grid(self) -> None:
+        """同步倉位與網格狀態
+        
+        檢查當前實際倉位和已掛平倉單，為多餘的倉位補掛平倉單
+        """
+        net_position = self.get_net_position()
+        
+        if abs(net_position) < self.min_order_size:
+            logger.info("倉位同步檢查: 當前無持倉，無需補掛平倉單")
+            return
+        
+        # 計算已掛平倉單的總數量
+        total_close_order_qty = 0.0
+        for close_info in self.close_orders.values():
+            total_close_order_qty += close_info.get('quantity', 0)
+        
+        # 計算待重試平倉單的總數量
+        pending_qty = sum(qty for _, qty, _, _ in self.pending_close_orders)
+        total_close_order_qty += pending_qty
+        
+        if net_position < 0:
+            # 空頭倉位
+            uncovered_qty = abs(net_position) - total_close_order_qty
+            if uncovered_qty >= self.min_order_size:
+                logger.warning(
+                    "倉位同步: 發現 %.4f 空頭倉位沒有對應的平倉單，正在補掛...",
+                    uncovered_qty
+                )
+                self._place_sync_close_orders(uncovered_qty, 'short')
+            else:
+                logger.info(
+                    "倉位同步檢查: 空頭倉位 %.4f, 已掛平倉單 %.4f, 無需補掛",
+                    abs(net_position), total_close_order_qty
+                )
+        else:
+            # 多頭倉位
+            uncovered_qty = net_position - total_close_order_qty
+            if uncovered_qty >= self.min_order_size:
+                logger.warning(
+                    "倉位同步: 發現 %.4f 多頭倉位沒有對應的平倉單，正在補掛...",
+                    uncovered_qty
+                )
+                self._place_sync_close_orders(uncovered_qty, 'long')
+            else:
+                logger.info(
+                    "倉位同步檢查: 多頭倉位 %.4f, 已掛平倉單 %.4f, 無需補掛",
+                    net_position, total_close_order_qty
+                )
+
+    def _place_sync_close_orders(self, uncovered_qty: float, position_type: str) -> None:
+        """為未覆蓋的倉位補掛平倉單
+        
+        Args:
+            uncovered_qty: 未覆蓋的倉位數量
+            position_type: 'long' 或 'short'
+        """
+        current_price = self.get_current_price()
+        if not current_price:
+            logger.error("無法獲取當前價格，無法補掛平倉單")
+            return
+        
+        # 計算需要補掛的訂單數量
+        order_qty = self.order_quantity if self.order_quantity else self.min_order_size
+        num_orders = int(uncovered_qty / order_qty)
+        remaining_qty = uncovered_qty - (num_orders * order_qty)
+        
+        placed_count = 0
+        
+        if position_type == 'short':
+            # 空頭倉位：需要在當前價格下方掛買單（平空）
+            # 找到當前價格下方的網格點位
+            close_prices = sorted([p for p in self.grid_levels if p < current_price], reverse=True)
+            
+            if not close_prices:
+                # 如果沒有合適的網格點位，使用當前價格減去網格間距
+                if len(self.grid_levels) >= 2:
+                    sorted_levels = sorted(self.grid_levels)
+                    grid_step = (sorted_levels[-1] - sorted_levels[0]) / (len(sorted_levels) - 1)
+                else:
+                    grid_step = current_price * 0.001
+                close_prices = [round_to_tick_size(current_price - grid_step * (i + 1), self.tick_size) 
+                               for i in range(num_orders + 1)]
+            
+            price_idx = 0
+            for i in range(num_orders):
+                if price_idx >= len(close_prices):
+                    price_idx = 0  # 循環使用價格
+                
+                close_price = close_prices[price_idx]
+                price_idx += 1
+                
+                logger.info("補掛平空單 %d/%d: 價格=%.4f, 數量=%.4f", i+1, num_orders, close_price, order_qty)
+                result = self.open_long(
+                    quantity=order_qty,
+                    price=close_price,
+                    order_type="Limit",
+                    reduce_only=True,
+                    post_only=False  # 補掛時不使用 post_only，確保能掛出
+                )
+                
+                if isinstance(result, dict) and "error" not in result:
+                    primary_id, alias_ids = self._extract_order_identifiers(result)
+                    if primary_id:
+                        # 同步補掛的訂單使用平倉價格作為開倉價格，這樣不會產生虛假利潤
+                        # 網格利潤只計算正常流程（開倉->平倉）的利潤
+                        self._record_close_order(primary_id, close_price, order_qty, 'short', aliases=alias_ids)
+                        placed_count += 1
+                        logger.info("同步平空單已記錄 (無利潤計算): ID=%s, 價格=%.4f", primary_id, close_price)
+                else:
+                    logger.error("補掛平空單失敗: %s", result.get('error', 'unknown') if isinstance(result, dict) else result)
+            
+            # 處理剩餘數量
+            if remaining_qty >= self.min_order_size and close_prices:
+                close_price = close_prices[0]
+                logger.info("補掛剩餘平空單: 價格=%.4f, 數量=%.4f", close_price, remaining_qty)
+                result = self.open_long(
+                    quantity=remaining_qty,
+                    price=close_price,
+                    order_type="Limit",
+                    reduce_only=True,
+                    post_only=False
+                )
+                if isinstance(result, dict) and "error" not in result:
+                    primary_id, alias_ids = self._extract_order_identifiers(result)
+                    if primary_id:
+                        # 同步補掛的訂單使用平倉價格作為開倉價格
+                        self._record_close_order(primary_id, close_price, remaining_qty, 'short', aliases=alias_ids)
+                        placed_count += 1
+                        logger.info("同步平空單已記錄 (無利潤計算): ID=%s, 價格=%.4f", primary_id, close_price)
+        
+        else:
+            # 多頭倉位：需要在當前價格上方掛賣單（平多）
+            close_prices = sorted([p for p in self.grid_levels if p > current_price])
+            
+            if not close_prices:
+                if len(self.grid_levels) >= 2:
+                    sorted_levels = sorted(self.grid_levels)
+                    grid_step = (sorted_levels[-1] - sorted_levels[0]) / (len(sorted_levels) - 1)
+                else:
+                    grid_step = current_price * 0.001
+                close_prices = [round_to_tick_size(current_price + grid_step * (i + 1), self.tick_size) 
+                               for i in range(num_orders + 1)]
+            
+            price_idx = 0
+            for i in range(num_orders):
+                if price_idx >= len(close_prices):
+                    price_idx = 0
+                
+                close_price = close_prices[price_idx]
+                price_idx += 1
+                
+                logger.info("補掛平多單 %d/%d: 價格=%.4f, 數量=%.4f", i+1, num_orders, close_price, order_qty)
+                result = self.open_short(
+                    quantity=order_qty,
+                    price=close_price,
+                    order_type="Limit",
+                    reduce_only=True,
+                    post_only=False
+                )
+                
+                if isinstance(result, dict) and "error" not in result:
+                    primary_id, alias_ids = self._extract_order_identifiers(result)
+                    if primary_id:
+                        # 同步補掛的訂單使用平倉價格作為開倉價格，這樣不會產生虛假利潤
+                        self._record_close_order(primary_id, close_price, order_qty, 'long', aliases=alias_ids)
+                        placed_count += 1
+                        logger.info("同步平多單已記錄 (無利潤計算): ID=%s, 價格=%.4f", primary_id, close_price)
+                else:
+                    logger.error("補掛平多單失敗: %s", result.get('error', 'unknown') if isinstance(result, dict) else result)
+            
+            if remaining_qty >= self.min_order_size and close_prices:
+                close_price = close_prices[0]
+                logger.info("補掛剩餘平多單: 價格=%.4f, 數量=%.4f", close_price, remaining_qty)
+                result = self.open_short(
+                    quantity=remaining_qty,
+                    price=close_price,
+                    order_type="Limit",
+                    reduce_only=True,
+                    post_only=False
+                )
+                if isinstance(result, dict) and "error" not in result:
+                    primary_id, alias_ids = self._extract_order_identifiers(result)
+                    if primary_id:
+                        # 同步補掛的訂單使用平倉價格作為開倉價格
+                        self._record_close_order(primary_id, close_price, remaining_qty, 'long', aliases=alias_ids)
+                        placed_count += 1
+                        logger.info("同步平多單已記錄 (無利潤計算): ID=%s, 價格=%.4f", primary_id, close_price)
+        
+        logger.warning("倉位同步完成: 成功補掛 %d 個平倉單", placed_count)
 
     def _record_grid_order(self, order_data: Any, price: float, side: str, quantity: float) -> None:
         """記錄網格訂單信息（使用新的記錄系統）"""
@@ -1292,7 +1502,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
             error_msg = result.get('error', '')
             logger.error("掛平多單失敗: %s", error_msg)
 
-            # 如果還是 reduce-only 錯誤，重試一次不使用 reduce_only
+            # 檢查是否是 post_only 導致的錯誤（價格會立即成交）
+            is_post_only_error = "immediately match" in error_msg.lower() or "would cross" in error_msg.lower()
+            
+            # 如果是 reduce-only 錯誤，重試不使用 reduce_only
             if "Reduce only" in error_msg and reduce_only:
                 logger.info("重試不使用 reduce_only...")
                 time.sleep(0.5)
@@ -1301,11 +1514,25 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     price=next_price,
                     order_type="Limit",
                     reduce_only=False,
-                    post_only=True  # 重試時也使用 Post-Only
+                    post_only=True
                 )
                 if isinstance(result, dict) and "error" in result:
                     logger.error("重試仍失敗: %s", result.get('error', ''))
-                    # 加入待重試隊列
+                    self._add_pending_close_order(open_price, quantity, 'long', retry_count)
+                    return False
+            # 如果是 post_only 錯誤，重試不使用 post_only（接受 taker 成交）
+            elif is_post_only_error:
+                logger.warning("平倉價格會立即成交，重試不使用 post_only（將作為 taker 成交）...")
+                time.sleep(0.3)
+                result = self.open_short(
+                    quantity=quantity,
+                    price=next_price,
+                    order_type="Limit",
+                    reduce_only=reduce_only,
+                    post_only=False  # 允許 taker 成交
+                )
+                if isinstance(result, dict) and "error" in result:
+                    logger.error("重試仍失敗: %s", result.get('error', ''))
                     self._add_pending_close_order(open_price, quantity, 'long', retry_count)
                     return False
             else:
@@ -1399,7 +1626,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
             error_msg = result.get('error', '')
             logger.error("掛平空單失敗: %s", error_msg)
 
-            # 如果還是 reduce-only 錯誤，重試一次不使用 reduce_only
+            # 檢查是否是 post_only 導致的錯誤（價格會立即成交）
+            is_post_only_error = "immediately match" in error_msg.lower() or "would cross" in error_msg.lower()
+            
+            # 如果是 reduce-only 錯誤，重試不使用 reduce_only
             if "Reduce only" in error_msg and reduce_only:
                 logger.info("重試不使用 reduce_only...")
                 time.sleep(0.5)
@@ -1408,11 +1638,25 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     price=next_price,
                     order_type="Limit",
                     reduce_only=False,
-                    post_only=True  # 重試時也使用 Post-Only
+                    post_only=True
                 )
                 if isinstance(result, dict) and "error" in result:
                     logger.error("重試仍失敗: %s", result.get('error', ''))
-                    # 加入待重試隊列
+                    self._add_pending_close_order(open_price, quantity, 'short', retry_count)
+                    return False
+            # 如果是 post_only 錯誤，重試不使用 post_only（接受 taker 成交）
+            elif is_post_only_error:
+                logger.warning("平倉價格會立即成交，重試不使用 post_only（將作為 taker 成交）...")
+                time.sleep(0.3)
+                result = self.open_long(
+                    quantity=quantity,
+                    price=next_price,
+                    order_type="Limit",
+                    reduce_only=reduce_only,
+                    post_only=False  # 允許 taker 成交
+                )
+                if isinstance(result, dict) and "error" in result:
+                    logger.error("重試仍失敗: %s", result.get('error', ''))
                     self._add_pending_close_order(open_price, quantity, 'short', retry_count)
                     return False
             else:
@@ -1532,6 +1776,63 @@ class PerpGridStrategy(PerpetualMarketMaker):
             else:
                 self._place_close_short_order(open_price, quantity, retry_count)
 
+    def _periodic_position_sync(self) -> None:
+        """週期性檢查並同步倉位與平倉單。
+        
+        每隔 _position_sync_interval 秒執行一次，
+        檢查目前持倉是否與追蹤的平倉單數量一致，如不一致則補掛平倉單。
+        """
+        current_time = time.time()
+        
+        # 檢查是否達到同步間隔
+        if current_time - self._last_position_sync_time < self._position_sync_interval:
+            return
+        
+        self._last_position_sync_time = current_time
+        
+        logger.info("=== 開始週期性倉位同步檢查 ===")
+        
+        # 獲取當前實際持倉
+        position_state = self.get_position_state()
+        current_position = float(position_state.get('net', 0.0))
+        
+        # 計算追蹤的平倉單總量
+        tracked_close_qty = sum(
+            abs(info.get('quantity', 0.0))
+            for info in self.close_orders.values()
+        )
+        
+        logger.info(
+            "倉位同步: 實際持倉=%.4f, 追蹤平倉單量=%.4f",
+            current_position, tracked_close_qty
+        )
+        
+        # 計算差異
+        if current_position > 0:
+            # 多頭持倉，應有等量的平多單
+            expected_close_qty = current_position
+            gap = abs(current_position) - tracked_close_qty
+        elif current_position < 0:
+            # 空頭持倉，應有等量的平空單
+            expected_close_qty = abs(current_position)
+            gap = abs(current_position) - tracked_close_qty
+        else:
+            # 無持倉
+            expected_close_qty = 0.0
+            gap = 0.0
+        
+        # 如果差異超過閾值（半個訂單量），進行同步
+        threshold = self.order_quantity * 0.5 if self.order_quantity else 1.0
+        if gap > threshold:
+            logger.warning(
+                "偵測到倉位不同步！持倉=%.4f, 平倉單覆蓋=%.4f, 缺口=%.4f, 觸發同步",
+                current_position, tracked_close_qty, gap
+            )
+            # 調用完整的倉位同步
+            self._sync_position_with_grid()
+        else:
+            logger.info("倉位同步檢查完成，無異常")
+
     def place_limit_orders(self) -> None:
         """放置限價單 - 覆蓋父類方法（增加倉位變化檢測）"""
         if not self.grid_initialized:
@@ -1541,12 +1842,17 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 return
             # 初始化後記錄持倉快照
             self.last_position_snapshot = self.get_net_position()
+            # 記錄初始同步時間
+            self._last_position_sync_time = time.time()
         else:
             # 【新增】倉位變化檢測，補強訂單狀態的遺漏
             self._check_position_changes()
             
             # 【新增】重試失敗的平倉單
             self._retry_pending_close_orders()
+            
+            # 【新增】週期性倉位同步檢查
+            self._periodic_position_sync()
             
             # 一次性獲取所有必要數據，然後檢查並補充缺失的網格訂單
             current_price = self.get_current_price()

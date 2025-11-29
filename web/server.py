@@ -811,7 +811,8 @@ def collect_strategy_stats():
 
         # 網格策略特有的統計數據
         if hasattr(current_strategy, 'grid_levels'):
-            stats['grid_profit'] = stats.get('realized_pnl', 0)
+            # 使用策略中計算的網格點差收益，而非帳戶盈虧
+            stats['grid_profit'] = round(current_strategy.grid_profit, 4) if hasattr(current_strategy, 'grid_profit') else 0
             stats['grid_buy_filled'] = len(current_strategy.session_buy_trades)
             stats['grid_sell_filled'] = len(current_strategy.session_sell_trades)
             stats['grid_count'] = len(current_strategy.grid_levels)
