@@ -27,9 +27,13 @@ class _MakerTakerHedgeMixin:
         self._hedge_label = hedge_label
         self._hedge_residuals: Dict[str, float] = {"Bid": 0.0, "Ask": 0.0}
         self._hedge_position_reference: float = 0.0
-        self._hedge_poll_attempts = 6
-        self._hedge_poll_interval = 0.5
         self._hedge_flat_tolerance = 1e-8
+        
+        # 本地倉位追蹤（基於成交推算，減少 API 請求）
+        self._local_position: Optional[float] = None
+        self._local_position_synced: bool = False
+        self._position_sync_interval: float = 60.0  # 每 60 秒強制同步一次
+        self._last_position_sync_ts: float = 0.0
 
         self._request_intervals: Dict[str, float] = {
             "limit": 0.35,
@@ -198,13 +202,21 @@ class _MakerTakerHedgeMixin:
             return
             
         logger.info(f"處理Maker成交：{side} {quantity}@{price}")
-            
-        current_position = self._fetch_current_position_reference()
+        
+        # 先根據 Maker 成交更新本地倉位追蹤
+        # Maker Bid（買入）成交 = 倉位增加，Maker Ask（賣出）成交 = 倉位減少
+        self._update_local_position_from_fill(side, quantity)
+        
+        # 使用更新後的本地追蹤倉位
+        current_position = self._get_tracked_position()
         if current_position is None:
-            logger.error("無法獲取當前倉位，對沖失敗")
-            return
+            logger.warning("本地倉位未初始化，嘗試同步 API")
+            current_position = self._sync_position_from_api()
+            if current_position is None:
+                logger.error("無法獲取當前倉位，對沖失敗")
+                return
 
-        logger.info(f"當前倉位：{current_position}")
+        logger.info(f"當前追蹤倉位：{current_position}")
 
         net_delta = current_position - self._hedge_position_reference
         if abs(net_delta) <= self._hedge_flat_tolerance:
@@ -213,27 +225,24 @@ class _MakerTakerHedgeMixin:
             self._hedge_residuals["Ask"] = 0.0
             return
 
-        hedge_side = "Ask" if side == "Bid" else "Bid"
-
-        previous_residual = self._hedge_residuals.get(hedge_side, 0.0)
-        target_quantity = quantity + previous_residual
-        if target_quantity <= 0:
-            logger.debug("對沖目標數量 <= 0，跳過")
-            return
-
-        hedge_qty = round_to_precision(target_quantity, self.base_precision)
+        # 根據實際倉位差來決定對沖方向和數量
+        # 倉位 > 參考 = 需要賣出(Ask)，倉位 < 參考 = 需要買入(Bid)
+        hedge_side = "Ask" if net_delta > 0 else "Bid"
+        hedge_qty = round_to_precision(abs(net_delta), self.base_precision)
 
         if hedge_qty < self.min_order_size:
-            self._hedge_residuals[hedge_side] = target_quantity
+            # 對沖量太小，累積到下次
+            self._hedge_residuals[hedge_side] = abs(net_delta)
             logger.info(
                 "對沖目標 %.8f 低於最小下單量，累積至下次 (殘留 %.8f)",
-                target_quantity,
-                target_quantity,
+                abs(net_delta),
+                abs(net_delta),
             )
             return
 
         logger.info(
-            "偵測到 Maker 成交，準備以市價對沖 %s %s",
+            "偵測到倉位偏移 %.8f，準備以市價對沖 %s %s",
+            net_delta,
             format_balance(hedge_qty),
             hedge_side,
         )
@@ -319,19 +328,24 @@ class _MakerTakerHedgeMixin:
             result = self._submit_order(order, slot="market")
             if isinstance(result, dict) and "error" in result:
                 logger.error(f"市價對沖失敗: {result['error']}")
+                # 對沖失敗，強制同步 API 校正本地追蹤
+                self._sync_position_from_api()
                 return None
 
             logger.info("市價對沖訂單已提交: %s", result.get("id", "未知ID"))
 
-            last_delta = self._poll_position_delta()
+            # 計算預期倉位變化：Ask(賣出)=-quantity, Bid(買入)=+quantity
+            expected_change = -remaining_quantity if attempt_side == "Ask" else remaining_quantity
+            last_delta = self._poll_position_delta(expected_change=expected_change)
             if last_delta is None:
-                logger.warning("無法從API/WS獲取最新倉位，保留殘量待下次對沖")
+                logger.warning("無法確認倉位變化，保留殘量待下次對沖")
                 return None
 
             if abs(last_delta) <= self._hedge_flat_tolerance:
-                refreshed_position = self._fetch_current_position_reference()
-                if refreshed_position is not None:
-                    self._hedge_position_reference = refreshed_position
+                # 對沖成功，更新參考倉位（使用本地追蹤，避免額外 API 請求）
+                if self._local_position is not None:
+                    self._hedge_position_reference = self._local_position
+                logger.info("對沖成功，倉位已回到參考水位")
                 return 0.0
 
             attempt_side = "Ask" if last_delta > 0 else "Bid"
@@ -344,86 +358,133 @@ class _MakerTakerHedgeMixin:
 
         return last_delta
 
-    def _poll_position_delta(self) -> Optional[float]:
-        """輪詢API/WS獲取最新倉位差值。"""
-
-        delta: Optional[float] = None
-        for _ in range(self._hedge_poll_attempts):
-            time.sleep(self._hedge_poll_interval)
-            current_position = self._fetch_current_position_reference()
-            if current_position is None:
-                continue
-            delta = current_position - self._hedge_position_reference
-            if delta is None:
-                continue
-            if abs(delta) <= self._hedge_flat_tolerance:
-                break
+    def _poll_position_delta(self, expected_change: float = 0.0) -> Optional[float]:
+        """等待並確認倉位變化，對沖後從 API 驗證實際倉位。
+        
+        Args:
+            expected_change: 預期的倉位變化量（正=買入，負=賣出）
+        """
+        # 等待訂單處理時間
+        time.sleep(1.0)
+        
+        # 對沖後必須從 API 確認實際倉位，避免追蹤偏差
+        # 這是唯一需要請求 API 的關鍵時刻
+        actual_position = self._sync_position_from_api()
+        if actual_position is None:
+            logger.warning("無法從 API 確認倉位，使用本地預估")
+            # 備用：使用本地追蹤 + 預期變化
+            if self._local_position is not None:
+                self._local_position += expected_change
+                actual_position = self._local_position
+            else:
+                return None
+        
+        delta = actual_position - self._hedge_position_reference
+        logger.debug("倉位差值: %.8f (實際 %.8f, 參考 %.8f)", delta, actual_position, self._hedge_position_reference)
         return delta
 
     def _initialize_hedge_reference_position(self) -> None:
-        """初始化倉位參考水位。"""
+        """初始化倉位參考水位和本地追蹤。"""
 
         reference = self._fetch_current_position_reference()
         if reference is None:
             reference = 0.0
         self._hedge_position_reference = reference
-        logger.info("對沖參考倉位初始化為 %.8f", reference)
+        # 同時初始化本地追蹤
+        self._local_position = reference
+        self._local_position_synced = True
+        self._last_position_sync_ts = time.monotonic()
+        logger.info("對沖參考倉位初始化為 %.8f（本地追蹤已同步）", reference)
+
+    def _get_tracked_position(self) -> Optional[float]:
+        """獲取本地追蹤的倉位，必要時自動同步。"""
+        now = time.monotonic()
+        
+        # 檢查是否需要強制同步（超過 60 秒）
+        if self._local_position_synced and (now - self._last_position_sync_ts) > self._position_sync_interval:
+            logger.info("定期同步：重新從 API 獲取倉位")
+            self._sync_position_from_api()
+        
+        return self._local_position
+    
+    def _sync_position_from_api(self) -> Optional[float]:
+        """從 API 同步倉位到本地追蹤。"""
+        position = self._fetch_current_position_reference()
+        if position is not None:
+            self._local_position = position
+            self._local_position_synced = True
+            self._last_position_sync_ts = time.monotonic()
+            logger.debug("倉位已從 API 同步: %.8f", position)
+        return position
+    
+    def _update_local_position_from_fill(self, side: str, quantity: float) -> None:
+        """根據成交更新本地追蹤倉位。
+        
+        Args:
+            side: 成交方向 ("Bid" = 買入, "Ask" = 賣出)
+            quantity: 成交數量
+        """
+        if self._local_position is None:
+            return
+            
+        if side == "Bid":
+            self._local_position += quantity
+        elif side == "Ask":
+            self._local_position -= quantity
+        
+        logger.debug("成交更新本地倉位: %s %.8f -> 當前 %.8f", side, quantity, self._local_position)
 
     def _calculate_position_delta(
         self,
         *,
         current_position: Optional[float] = None,
     ) -> Optional[float]:
-        """計算當前倉位相對參考水位的差值。"""
+        """計算當前倉位相對參考水位的差值（優先使用本地追蹤）。"""
 
-        current = current_position if current_position is not None else self._fetch_current_position_reference()
+        if current_position is not None:
+            current = current_position
+        else:
+            # 優先使用本地追蹤
+            current = self._get_tracked_position()
+            if current is None:
+                # 回退到 API
+                current = self._sync_position_from_api()
         if current is None:
             return None
         return current - self._hedge_position_reference
 
-    def _fetch_current_position_reference(self) -> Optional[float]:
-        """透過API或WS獲取當前倉位指標。"""
-
+    def _fetch_current_position_reference(self, force_refresh: bool = False) -> Optional[float]:
+        """透過 API 獲取當前倉位指標。
+        
+        Args:
+            force_refresh: 已棄用，保留供相容性
+        """
         try:
             if isinstance(self, PerpetualMarketMaker):
-                # 強制重新獲取倉位信息
-                for attempt in range(3):  # 最多重試3次
-                    positions = self._request_positions()
-                    
-                    if isinstance(positions, dict) and "error" in positions:
-                        error_msg = positions.get("error", "")
-                        if "404" in str(error_msg) or "RESOURCE_NOT_FOUND" in str(error_msg):
-                            logger.info("無倉位記錄，當前倉位為0")
-                            return 0.0
-                        logger.error(f"獲取倉位失敗 (嘗試 {attempt + 1}/3): {error_msg}")
-                        if attempt < 2:  # 如果不是最後一次嘗試
-                            time.sleep(0.5)  # 等待500ms後重試
-                            continue
-                        return None
-
-                    if isinstance(positions, list):
-                        if not positions:
-                            logger.info("無倉位記錄，當前倉位為0")
-                            return 0.0
-                            
-                        position = positions[0]
-                        # 嘗試所有可能的字段名
-                        for field in ["netQuantity", "size", "position_size", "amount"]:
-                            if field in position:
-                                net_value = float(position[field] or 0)
-                                logger.info(f"當前倉位 (from {field}): {net_value}")
-                                return net_value
-                                
-                        logger.warning(f"倉位信息中找不到數量字段: {position}")
+                positions = self._request_positions()
+                
+                if isinstance(positions, dict) and "error" in positions:
+                    error_msg = positions.get("error", "")
+                    if "404" in str(error_msg) or "RESOURCE_NOT_FOUND" in str(error_msg):
+                        logger.debug("無倉位記錄，當前倉位為0")
                         return 0.0
-                    
-                    logger.error(f"意外的API響應格式: {positions}")
-                    if attempt < 2:
-                        time.sleep(0.5)
-                        continue
+                    logger.error(f"獲取倉位失敗: {error_msg}")
                     return None
 
-                logger.error("多次嘗試後仍無法獲取有效倉位信息")
+                if isinstance(positions, list):
+                    if not positions:
+                        logger.debug("無倉位記錄，當前倉位為0")
+                        return 0.0
+                        
+                    position = positions[0]
+                    for field in ["netQuantity", "size", "position_size", "amount"]:
+                        if field in position:
+                            return float(position[field] or 0)
+                            
+                    logger.warning(f"倉位信息中找不到數量字段: {position}")
+                    return 0.0
+                
+                logger.error(f"意外的API響應格式: {positions}")
                 return None
 
             _, total = self.get_asset_balance(self.base_asset)
@@ -431,8 +492,6 @@ class _MakerTakerHedgeMixin:
             
         except Exception as exc:
             logger.error("獲取倉位資訊時發生錯誤: %s", exc)
-            import traceback
-            logger.error(f"詳細錯誤: {traceback.format_exc()}")
             return None
 
     # ------------------------------------------------------------------

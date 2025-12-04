@@ -83,7 +83,7 @@ class BackpackWebSocket:
         # API 備援方案相關屬性
         self.api_fallback_thread = None
         self.api_fallback_active = False
-        self.api_poll_interval = 2  # 秒
+        self.api_poll_interval = 1  # 秒（WS 中斷時的備援輪詢間隔）
 
         # REST 訂單更新追蹤
         self._fallback_bootstrapped = False
