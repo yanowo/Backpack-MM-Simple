@@ -2152,6 +2152,32 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         return sections
 
+    def check_stop_conditions(self, realized_pnl, unrealized_pnl, session_realized_pnl) -> bool:
+        """覆寫止損止盈檢查，在平倉成功後清理網格狀態      """
+        # 調用父類的止損止盈檢查
+        result = super().check_stop_conditions(realized_pnl, unrealized_pnl, session_realized_pnl)
+        
+        # 檢查是否有觸發止損/止盈（通過檢查 last_protective_action）
+        if hasattr(self, 'last_protective_action') and self.last_protective_action:
+            if "已執行緊急平倉" in self.last_protective_action:
+                logger.warning("止損/止盈平倉完成，清理網格狀態...")
+                
+                # 清理所有網格追蹤狀態
+                self._reset_grid_state()
+                
+                # 清理待重試的平倉單
+                self.pending_close_orders.clear()
+                
+                # 重置網格初始化狀態，讓下次迭代重新初始化
+                self.grid_initialized = False
+                
+                # 清空 last_protective_action 避免重複觸發
+                self.last_protective_action = None
+                
+                logger.info("網格狀態已清理，下次迭代將重新初始化網格")
+        
+        return result
+
     def run(self, duration_seconds=3600, interval_seconds=60):
         """運行永續合約網格交易策略"""
         logger.info("開始運行永續合約網格交易策略: %s", self.symbol)
