@@ -1,6 +1,6 @@
 # Tri Hedge Hold 策略（Lighter-only）
 
-`tri_hedge_hold_strategy_lighter.py` 实现了一个三账户协同的做市/持仓策略，主账号负责累积多头仓位，两个对冲账号即时抵消敞口，最终在持有一段时间后分批平仓。策略核心关注 Lighter 的积分激励：在交易量、持仓时长、标的流动性和 Maker/Taker 比例之间寻找最划算的组合，从而在尽量小的磨损下获取更多积分。
+`tri_hedge_hold_strategy_lighter.py` 实现了一个三账户协同的做市/持仓策略，主账号负责累积多头仓位，两个对冲账号即时抵消敞口，最终在持有一段时间后分批平仓。策略核心关注 Lighter 的积分激励：在交易量、持仓时长、标的流动性和 Maker/Taker 比例之间寻找最划算的组合，从而在尽量小的磨损下获取更多积分。策略退出时会触发 Telegram 通知，便于及时重启。
 
 ## 周期流程概览
 
@@ -32,6 +32,8 @@
 ```jsonc
 {
   "base_url": "https://mainnet.zklighter.elliot.ai",
+  "telegram_bot_token": "YOUR_BOT_TOKEN",
+  "telegram_chat_id": "YOUR_CHAT_ID",
   "hold_minutes": 21,
   "entry_price_offset_bps": 0,
   "exit_price_offset_bps": 0,
@@ -69,6 +71,7 @@
 - `default_slice_count`：默认把目标名义金额等分成多少个切片，用于推导 `slice_notional`。
 - `coinlist`：目标标的列表，可自定义 `target_notional`、`slice_notional`、`slice_count`、`hold_minutes` 等；字段名称也可写作 `symbols` 或 `coins`。
 - `accounts`：三组账户配置，可选字段还包括 `api_key_index`、`base_url`、`chain_id`、`signer_lib_dir` 等。
+- `telegram_bot_token` / `telegram_chat_id`：BotFather 机器人 Token 和聊天 ID（用于策略停止通知）。
 
 > 设置 `run_once: true` 可在跑完整个标的列表后退出。
 

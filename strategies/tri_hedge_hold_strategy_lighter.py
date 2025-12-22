@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 from api.lighter_client import LighterClient, SimpleSignerError
 from logger import setup_logger
 from utils.helpers import round_to_precision, round_to_tick_size
+from utils.telegram_notify import TelegramNotifier
 
 logger = setup_logger("tri_hedge_strategy")
 
@@ -101,6 +102,8 @@ class TriHedgeHoldStrategyConfig:
     base_url: Optional[str] = None
     chain_id: Optional[int] = None
     signer_lib_dir: Optional[str] = None
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
     hold_minutes: float = 1.0
     entry_price_offset_bps: float = 5.0
     exit_price_offset_bps: float = 5.0
@@ -133,6 +136,18 @@ class TriHedgeHoldStrategyConfig:
         signer_lib_dir = payload.get("signer_lib_dir")
         default_target_notional = float(payload.get("default_target_notional", 5000))
         default_slice_count = max(1, int(payload.get("default_slice_count", 50)))
+        telegram_bot_token = (
+            payload.get("telegram_bot_token")
+            or payload.get("tg_bot_token")
+            or os.getenv("TELEGRAM_BOT_TOKEN")
+            or os.getenv("TG_BOT_TOKEN")
+        )
+        telegram_chat_id = (
+            payload.get("telegram_chat_id")
+            or payload.get("tg_chat_id")
+            or os.getenv("TELEGRAM_CHAT_ID")
+            or os.getenv("TG_BOT_CHAT_ID")
+        )
 
         accounts_payload = payload.get("accounts") or []
         if len(accounts_payload) < 3:
@@ -203,6 +218,8 @@ class TriHedgeHoldStrategyConfig:
             base_url=base_url,
             chain_id=int(chain_id) if chain_id else None,
             signer_lib_dir=signer_lib_dir,
+            telegram_bot_token=str(telegram_bot_token) if telegram_bot_token else None,
+            telegram_chat_id=str(telegram_chat_id) if telegram_chat_id else None,
             hold_minutes=float(payload.get("hold_minutes", 17)),
             entry_price_offset_bps=float(payload.get("entry_price_offset_bps", 5)),
             exit_price_offset_bps=float(payload.get("exit_price_offset_bps", 5)),
@@ -244,10 +261,41 @@ class TriHedgeHoldStrategy:
         self._order_submit_retries = max(1, int(config.order_submit_retries))
         self._active_cycle_context: Optional[Dict[str, Any]] = None
         self._margin_failsafe_engaged = False
+        self._telegram_notifier: Optional[TelegramNotifier] = None
+        self._stop_notified = False
+        if config.telegram_bot_token and config.telegram_chat_id:
+            self._telegram_notifier = TelegramNotifier(
+                config.telegram_bot_token,
+                config.telegram_chat_id,
+            )
 
     # ------------------------------------------------------------------ lifecycle
     def stop(self) -> None:
         self._stop_event.set()
+
+    def _notify_strategy_stopped(self, reason: str, details: str = "") -> None:
+        if self._stop_notified or not self._telegram_notifier:
+            return
+        self._stop_notified = True
+        symbol = None
+        context = self._active_cycle_context or {}
+        if isinstance(context, dict):
+            plan = context.get("plan")
+            if isinstance(plan, SymbolPlan):
+                symbol = plan.symbol
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        message_lines = ["<b>TriHedge strategy stopped</b>"]
+        if symbol:
+            message_lines.append(f"Symbol: {symbol}")
+        message_lines.append(f"Reason: {reason}")
+        if details:
+            message_lines.append(f"Details: {details}")
+        message_lines.append(f"Time: {timestamp}")
+        message = "\n".join(message_lines)
+        try:
+            self._telegram_notifier.send_message(message)
+        except Exception as exc:  # noqa: BLE001 - never block shutdown on notification errors
+            logger.warning("Failed to send Telegram stop notification: %s", exc)
 
     def run(self) -> None:
         logger.info("TriHedgeHold Strategy booted with %d symbols", len(self.config.symbols))
@@ -315,10 +363,17 @@ class TriHedgeHoldStrategy:
                 self._current_symbol_index = (self._current_symbol_index + 1) % len(self.config.symbols)
                 self._current_primary_index = (self._current_primary_index + 1) % len(self._clients)
                 self._stop_event.wait(self.config.pause_between_symbols)  # short pause between symbols; still interruptible
-        except MarginFailsafeTriggered:
+        except MarginFailsafeTriggered as exc:
             logger.critical("Margin failsafe triggered; shutting down strategy loop.")
+            self._notify_strategy_stopped("margin_failsafe", str(exc))
+        except Exception as exc:
+            logger.exception("Strategy loop aborted: %s", exc)
+            self._notify_strategy_stopped("unhandled_exception", str(exc))
+            raise
         finally:
             self._active_cycle_context = None
+            if self._stop_event.is_set():
+                self._notify_strategy_stopped("stop_event", "stop() requested")
 
     # ------------------------------------------------------------------ core flow
     def _accumulate_position(self, primary_idx: int, hedgers: Sequence[int], plan: SymbolPlan) -> float:

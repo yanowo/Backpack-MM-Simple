@@ -1,5 +1,7 @@
 {
     "base_url": "https://mainnet.zklighter.elliot.ai",
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
     "hold_minutes": 21,
     "entry_price_offset_bps": 0,
     "exit_price_offset_bps": 0,
