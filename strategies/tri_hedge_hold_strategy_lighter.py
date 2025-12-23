@@ -299,70 +299,353 @@ class TriHedgeHoldStrategy:
 
     def run(self) -> None:
         logger.info("TriHedgeHold Strategy booted with %d symbols", len(self.config.symbols))
-        cycles_completed = 0
+        symbol_count = len(self.config.symbols)
+        account_count = len(self._clients)
+        if symbol_count == 0 or account_count == 0:
+            logger.error("No symbols or accounts configured; stopping.")
+            return
+        symbol_offset = self._current_symbol_index
+        rounds_completed = 0
+        epsilon_global = 1e-9
         try:
             while not self._stop_event.is_set():
-                plan = self.config.symbols[self._current_symbol_index]
-                primary_idx = self._current_primary_index
-
-                hedger_indices = [i for i in range(len(self._clients)) if i != primary_idx][:2]
-                primary_client = self._clients[primary_idx]
-                limits = self._get_market_limits_with_retry(primary_client, plan.symbol)
+                sessions = []
+                for primary_idx in range(account_count):
+                    symbol_idx = (symbol_offset + primary_idx) % symbol_count
+                    plan = self.config.symbols[symbol_idx]
+                    hedger_indices = [i for i in range(account_count) if i != primary_idx][:2]
+                    limits = self._get_market_limits_with_retry(self._clients[primary_idx], plan.symbol)
+                    sessions.append(
+                        {
+                            "primary_idx": primary_idx,
+                            "plan": plan,
+                            "hedgers": tuple(hedger_indices),
+                            "limits": limits,
+                            "status": "accumulating",
+                            "hold_end_ts": None,
+                            "next_allowed_time": 0.0,
+                        }
+                    )
                 logger.info(
-                    "Starting cycle: symbol=%s primary=%s hedgers=%s target=%s slice=%s",
-                    plan.symbol,
-                    self._account_labels[primary_idx],
-                    [self._account_labels[i] for i in hedger_indices],
-                    plan.target_notional,
-                    plan.slice_notional,
+                    "Round %d assignments: %s",
+                    rounds_completed + 1,
+                    ", ".join(
+                        f"{self._account_labels[s['primary_idx']]}->{s['plan'].symbol} hedgers={[self._account_labels[i] for i in s['hedgers']]}"
+                        for s in sessions
+                    ),
                 )
 
-                self._active_cycle_context = {
-                    "plan": plan,
-                    "primary_idx": primary_idx,
-                    "hedgers": tuple(hedger_indices),
-                }
-                try:
-                    maker_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
-                    target_base, _, price_hint = self._resolve_base_targets(primary_client, plan, limits)
-                    epsilon = 1e-9
-                    entry_summary = 0.0
-                    performed_accumulation = False
-                    maker_value_quote = maker_position * price_hint
-                    if plan.target_notional > 0 and maker_value_quote + epsilon >= plan.target_notional:
-                        logger.info(
-                            "Existing %s position %.8f (≈ %.2f quote) >= target %.2f; skip accumulation and proceed to flatten.",
-                            plan.symbol,
-                            maker_position,
-                            maker_value_quote,
-                            plan.target_notional,
-                        )
-                        entry_summary = maker_position
-                    else:
-                        entry_summary = self._accumulate_position(primary_idx, hedger_indices, plan)
-                        performed_accumulation = entry_summary > 0
+                while not self._stop_event.is_set():
+                    all_done = True
+                    now = time.time()
+                    for session in sessions:
+                        if session["status"] == "done":
+                            continue
+                        all_done = False
+                        if now < session.get("next_allowed_time", 0.0):
+                            continue
 
-                    if entry_summary <= 0:
-                        logger.warning("No fills recorded or available for %s, skipping exit leg", plan.symbol)
-                    else:
-                        if performed_accumulation:
-                            self._hold_position(plan)
-                        fresh_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
-                        self._flatten_position(primary_idx, hedger_indices, plan, fresh_position)
-                        self._print_cycle_summary(plan.symbol)
-                except OrderSubmissionError as exc:
-                    self._handle_order_failure(exc)
-                finally:
-                    self._active_cycle_context = None
+                        primary_idx = session["primary_idx"]
+                        plan = session["plan"]
+                        hedger_indices = session["hedgers"]
+                        limits: MarketConstraints = session["limits"]
+                        status = session["status"]
 
-                cycles_completed += 1
-                if self.config.run_once and cycles_completed >= len(self.config.symbols):
-                    logger.info("run_once enabled, stopping after one pass.")
+                        self._active_cycle_context = {
+                            "plan": plan,
+                            "primary_idx": primary_idx,
+                            "hedgers": tuple(hedger_indices),
+                        }
+                        try:
+                            if status == "accumulating":
+                                reference_price = self._compute_reference_price(
+                                    self._clients[primary_idx],
+                                    plan.symbol,
+                                    "Bid",
+                                    plan.entry_offset_bps,
+                                )
+                                if reference_price is None or reference_price <= 0:
+                                    logger.warning("Unable to compute entry price for %s, retrying later", plan.symbol)
+                                    session["next_allowed_time"] = now + 1.0
+                                    continue
+
+                                # 用当前价格估算 base 目标和 slice 数量
+                                target_base = (
+                                    round_to_precision(plan.target_notional / reference_price, limits.base_precision)
+                                    if plan.target_notional > 0
+                                    else 0.0
+                                )
+                                current_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
+                                target_remaining = max(target_base - current_position, 0.0)
+                                # 当目标已经满足时，进入持仓阶段
+                                if target_remaining <= epsilon_global:
+                                    hold_minutes = plan.hold_minutes or self.config.hold_minutes
+                                    session["hold_end_ts"] = time.time() + max(hold_minutes * 60, 1)
+                                    session["status"] = "holding"
+                                    logger.info(
+                                        "%s target met (%.8f/%.8f %s); starting hold for %.1f minutes",
+                                        plan.symbol,
+                                        current_position,
+                                        target_base,
+                                        plan.symbol,
+                                        hold_minutes,
+                                    )
+                                    continue
+
+                                self._rebalance_exposure(
+                                    symbol=plan.symbol,
+                                    primary_idx=primary_idx,
+                                    hedger_indices=hedger_indices,
+                                    limits=limits,
+                                    reference_price=reference_price,
+                                    allow_additional_shorts=True,
+                                    allow_reduce_shorts=False,
+                                )
+
+                                if plan.slice_notional and plan.slice_notional > 0:
+                                    desired_slice = plan.slice_notional / max(reference_price, 1e-12)
+                                    desired_slice = round_to_precision(desired_slice, limits.base_precision)
+                                else:
+                                    desired_slice = target_remaining
+                                slice_quantity = min(desired_slice, target_remaining)
+                                adjusted_slice = self._ensure_slice_meets_minimums(
+                                    symbol=plan.symbol,
+                                    remaining_quantity=target_remaining,
+                                    reference_price=reference_price,
+                                    limits=limits,
+                                    slice_quantity=slice_quantity,
+                                )
+                                if adjusted_slice is None:
+                                    # 剩余量不足最小单，直接进入持仓
+                                    hold_minutes = plan.hold_minutes or self.config.hold_minutes
+                                    session["hold_end_ts"] = time.time() + max(hold_minutes * 60, 1)
+                                    session["status"] = "holding"
+                                    logger.info(
+                                        "%s remaining below venue minimum; start hold for %.1f minutes",
+                                        plan.symbol,
+                                        hold_minutes,
+                                    )
+                                    continue
+                                slice_quantity = adjusted_slice
+                                baseline_position = self._get_cached_position(primary_idx, plan.symbol)
+                                order_index, response, rounded_price, rounded_qty = self._submit_limit_order(
+                                    client=self._clients[primary_idx],
+                                    client_idx=primary_idx,
+                                    symbol=plan.symbol,
+                                    side="Bid",
+                                    quantity=slice_quantity,
+                                    price=reference_price,
+                                    post_only=self.config.post_only,
+                                    reduce_only=False,
+                                    limits=limits,
+                                    account_label=self._account_labels[primary_idx],
+                                )
+                                if order_index is None:
+                                    delay = self.config.slice_delay_seconds + self._random.uniform(
+                                        0, max(self.config.slice_delay_jitter_seconds, 0)
+                                    )
+                                    session["next_allowed_time"] = now + max(delay, 0.0)
+                                    continue
+                                fills = self._wait_for_position_fill(
+                                    client=self._clients[primary_idx],
+                                    client_idx=primary_idx,
+                                    symbol=plan.symbol,
+                                    side="Bid",
+                                    order_index=order_index,
+                                    expected_quantity=rounded_qty,
+                                    limit_price=rounded_price,
+                                    limits=limits,
+                                    baseline_position=baseline_position,
+                                )
+                                filled_base = sum(fill["quantity"] for fill in fills)
+                                if filled_base > 0:
+                                    self._record_maker_fill(plan.symbol, fills)
+                                    logger.info(
+                                        "Primary %s filled %.8f %s (target remaining %.8f)",
+                                        self._account_labels[primary_idx],
+                                        filled_base,
+                                        plan.symbol,
+                                        max(target_remaining - filled_base, 0.0),
+                                    )
+                                    self._dispatch_hedges(
+                                        primary_idx,
+                                        plan.symbol,
+                                        "Ask",
+                                        filled_base,
+                                        hedger_indices,
+                                        limits,
+                                        reduce_only=False,
+                                    )
+                                    self._rebalance_exposure(
+                                        symbol=plan.symbol,
+                                        primary_idx=primary_idx,
+                                        hedger_indices=hedger_indices,
+                                        limits=limits,
+                                        reference_price=reference_price,
+                                        allow_additional_shorts=True,
+                                        allow_reduce_shorts=False,
+                                    )
+
+                                delay = self.config.slice_delay_seconds + self._random.uniform(
+                                    0, max(self.config.slice_delay_jitter_seconds, 0)
+                                )
+                                session["next_allowed_time"] = now + max(delay, 0.0)
+
+                            elif status == "holding":
+                                hold_end = session.get("hold_end_ts")
+                                if hold_end is None:
+                                    hold_minutes = plan.hold_minutes or self.config.hold_minutes
+                                    session["hold_end_ts"] = time.time() + max(hold_minutes * 60, 1)
+                                    continue
+                                if time.time() >= hold_end:
+                                    session["status"] = "exiting"
+                                    logger.info("%s hold complete; starting exit", plan.symbol)
+                                else:
+                                    # Allow others to proceed; minimal sleep to avoid busy loop.
+                                    session["next_allowed_time"] = time.time() + min(
+                                        self.config.order_poll_interval, 5.0
+                                    )
+
+                            elif status == "exiting":
+                                reference_price = self._compute_reference_price(
+                                    self._clients[primary_idx],
+                                    plan.symbol,
+                                    "Ask",
+                                    plan.exit_offset_bps,
+                                )
+                                if reference_price is None or reference_price <= 0:
+                                    logger.warning("Unable to compute exit price for %s, retrying later", plan.symbol)
+                                    session["next_allowed_time"] = now + 1.0
+                                    continue
+                                current_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
+                                min_exit_qty = self._effective_min_quantity(reference_price, limits)
+                                if current_position <= epsilon_global or current_position < min_exit_qty / 2:
+                                    session["status"] = "done"
+                                    self._log_position_snapshot(plan.symbol, primary_idx, hedger_indices)
+                                    self._print_cycle_summary(plan.symbol)
+                                    continue
+
+                                if plan.slice_notional and plan.slice_notional > 0:
+                                    slice_base = plan.slice_notional / max(reference_price, 1e-12)
+                                else:
+                                    slice_base = current_position
+                                configured_slice_qty = max(
+                                    round_to_precision(slice_base, limits.base_precision),
+                                    limits.min_order_size,
+                                )
+                                slice_quantity = min(configured_slice_qty, current_position)
+                                adjusted_exit = self._ensure_exit_slice_meets_minimums(
+                                    symbol=plan.symbol,
+                                    remaining_base=current_position,
+                                    reference_price=reference_price,
+                                    limits=limits,
+                                    slice_quantity=slice_quantity,
+                                )
+                                if adjusted_exit is None:
+                                    session["status"] = "done"
+                                    self._log_position_snapshot(plan.symbol, primary_idx, hedger_indices)
+                                    self._print_cycle_summary(plan.symbol)
+                                    continue
+                                slice_quantity = adjusted_exit
+                                effective_min = self._effective_min_quantity(reference_price, limits)
+                                if slice_quantity + epsilon_global < effective_min:
+                                    logger.info(
+                                        "Exit remainder %.8f %s below venue minimum %.8f; marking done.",
+                                        current_position,
+                                        plan.symbol,
+                                        effective_min,
+                                    )
+                                    session["status"] = "done"
+                                    self._log_position_snapshot(plan.symbol, primary_idx, hedger_indices)
+                                    self._print_cycle_summary(plan.symbol)
+                                    continue
+
+                                baseline_position = self._get_cached_position(primary_idx, plan.symbol)
+                                order_index, response, rounded_price, rounded_qty = self._submit_limit_order(
+                                    client=self._clients[primary_idx],
+                                    client_idx=primary_idx,
+                                    symbol=plan.symbol,
+                                    side="Ask",
+                                    quantity=slice_quantity,
+                                    price=reference_price,
+                                    post_only=self.config.post_only,
+                                    reduce_only=True,
+                                    limits=limits,
+                                    account_label=self._account_labels[primary_idx],
+                                )
+                                if order_index is None:
+                                    delay = self.config.slice_delay_seconds + self._random.uniform(
+                                        0, max(self.config.slice_delay_jitter_seconds, 0)
+                                    )
+                                    session["next_allowed_time"] = now + max(delay, 0.0)
+                                    continue
+                                fills = self._wait_for_position_fill(
+                                    client=self._clients[primary_idx],
+                                    client_idx=primary_idx,
+                                    symbol=plan.symbol,
+                                    side="Ask",
+                                    order_index=order_index,
+                                    expected_quantity=rounded_qty,
+                                    limit_price=rounded_price,
+                                    limits=limits,
+                                    baseline_position=baseline_position,
+                                )
+                                filled_base = sum(fill["quantity"] for fill in fills)
+                                if filled_base > 0:
+                                    self._record_maker_fill(plan.symbol, fills)
+                                    logger.info(
+                                        "Primary %s closed %.8f %s (%.8f remaining est.)",
+                                        self._account_labels[primary_idx],
+                                        filled_base,
+                                        plan.symbol,
+                                        max(current_position - filled_base, 0.0),
+                                    )
+                                    self._dispatch_hedges(
+                                        primary_idx,
+                                        plan.symbol,
+                                        "Bid",
+                                        filled_base,
+                                        hedger_indices,
+                                        limits,
+                                        reduce_only=True,
+                                    )
+                                    self._rebalance_exposure(
+                                        symbol=plan.symbol,
+                                        primary_idx=primary_idx,
+                                        hedger_indices=hedger_indices,
+                                        limits=limits,
+                                        reference_price=reference_price,
+                                        allow_additional_shorts=False,
+                                        allow_reduce_shorts=True,
+                                    )
+                                remaining_base = max(self._get_cached_position(primary_idx, plan.symbol), 0.0)
+                                if remaining_base <= epsilon_global or remaining_base < effective_min / 2:
+                                    session["status"] = "done"
+                                    self._log_position_snapshot(plan.symbol, primary_idx, hedger_indices)
+                                    self._print_cycle_summary(plan.symbol)
+                                delay = self.config.slice_delay_seconds + self._random.uniform(
+                                    0, max(self.config.slice_delay_jitter_seconds, 0)
+                                )
+                                session["next_allowed_time"] = now + max(delay, 0.0)
+
+                        except OrderSubmissionError as exc:
+                            self._handle_order_failure(exc)
+                        finally:
+                            self._active_cycle_context = None
+
+                    if all_done:
+                        break
+                    # 防止空转占满 CPU
+                    self._stop_event.wait(min(self.config.order_poll_interval, 0.5))
+
+                rounds_completed += 1
+                if self.config.run_once:
+                    logger.info("run_once enabled, stopping after one round.")
                     break
 
-                self._current_symbol_index = (self._current_symbol_index + 1) % len(self.config.symbols)
-                self._current_primary_index = (self._current_primary_index + 1) % len(self._clients)
-                self._stop_event.wait(self.config.pause_between_symbols)  # short pause between symbols; still interruptible
+                symbol_offset = (symbol_offset + 1) % symbol_count
+                self._current_symbol_index = symbol_offset
+                self._current_primary_index = 0
         except MarginFailsafeTriggered as exc:
             logger.critical("Margin failsafe triggered; shutting down strategy loop.")
             self._notify_strategy_stopped("margin_failsafe", str(exc))
