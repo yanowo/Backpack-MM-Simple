@@ -263,6 +263,7 @@ class TriHedgeHoldStrategy:
         self._margin_failsafe_engaged = False
         self._telegram_notifier: Optional[TelegramNotifier] = None
         self._stop_notified = False
+        self._start_notified = False
         if config.telegram_bot_token and config.telegram_chat_id:
             self._telegram_notifier = TelegramNotifier(
                 config.telegram_bot_token,
@@ -272,6 +273,30 @@ class TriHedgeHoldStrategy:
     # ------------------------------------------------------------------ lifecycle
     def stop(self) -> None:
         self._stop_event.set()
+
+    def _notify_strategy_started(self) -> None:
+        if self._start_notified or not self._telegram_notifier:
+            return
+        self._start_notified = True
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        message_lines = ["<b>TriHedge strategy started</b>"]
+        symbols = ", ".join(plan.symbol for plan in self.config.symbols)
+        if symbols:
+            message_lines.append(f"Symbols: {symbols}")
+        message_lines.append(f"Accounts: {', '.join(self._account_labels)}")
+        message_lines.append(f"Time: {timestamp}")
+        message = "\n".join(message_lines)
+        try:
+            ok = self._telegram_notifier.send_message(message)
+        except Exception as exc:  # noqa: BLE001 - never block startup on notification errors
+            logger.warning("Failed to send Telegram start notification: %s", exc)
+            return
+        if not ok:
+            error = getattr(self._telegram_notifier, "last_error", None)
+            if error:
+                logger.warning("Failed to send Telegram start notification: %s", error)
+            else:
+                logger.warning("Failed to send Telegram start notification.")
 
     def _notify_strategy_stopped(self, reason: str, details: str = "") -> None:
         if self._stop_notified or not self._telegram_notifier:
@@ -293,12 +318,20 @@ class TriHedgeHoldStrategy:
         message_lines.append(f"Time: {timestamp}")
         message = "\n".join(message_lines)
         try:
-            self._telegram_notifier.send_message(message)
+            ok = self._telegram_notifier.send_message(message)
         except Exception as exc:  # noqa: BLE001 - never block shutdown on notification errors
             logger.warning("Failed to send Telegram stop notification: %s", exc)
+            return
+        if not ok:
+            error = getattr(self._telegram_notifier, "last_error", None)
+            if error:
+                logger.warning("Failed to send Telegram stop notification: %s", error)
+            else:
+                logger.warning("Failed to send Telegram stop notification.")
 
     def run(self) -> None:
         logger.info("TriHedgeHold Strategy booted with %d symbols", len(self.config.symbols))
+        self._notify_strategy_started()
         symbol_count = len(self.config.symbols)
         account_count = len(self._clients)
         if symbol_count == 0 or account_count == 0:
