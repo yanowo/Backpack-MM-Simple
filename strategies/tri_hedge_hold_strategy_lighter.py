@@ -241,6 +241,10 @@ class TriHedgeHoldStrategyConfig:
 
 class TriHedgeHoldStrategy:
     """Implements the refactored multi-account volume/holding strategy."""
+    
+    # Constants
+    EPSILON_GLOBAL = 1e-9  # 全局精度容差
+    POSITION_TOLERANCE_FACTOR = 0.5  # 位置容差系数（用于 min_qty / 2 检查）
 
     def __init__(self, config: TriHedgeHoldStrategyConfig, *, random_seed: Optional[int] = None) -> None:
         self.config = config
@@ -347,7 +351,7 @@ class TriHedgeHoldStrategy:
             return
         symbol_offset = self._current_symbol_index
         rounds_completed = 0
-        epsilon_global = 1e-9
+        epsilon_global = self.EPSILON_GLOBAL
         try:
             while not self._stop_event.is_set():
                 sessions = []
@@ -400,7 +404,7 @@ class TriHedgeHoldStrategy:
                     all_done = True
                     now = time.time()
                     for session in sessions:
-                        if session["status"] == "done":
+                        if self._is_session_done(session):
                             continue
                         all_done = False
                         if now < session.get("next_allowed_time", 0.0):
@@ -438,8 +442,8 @@ class TriHedgeHoldStrategy:
                                 )
                                 current_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
                                 target_remaining = max(target_base - current_position, 0.0)
-                                logger.debug("[ENTER START] %s: current_position=%.8f, target_base=%.8f, target_remaining=%.8f, epsilon=%.2e", 
-                                           plan.symbol, current_position, target_base, target_remaining, epsilon_global)
+                                logger.debug("%s [ENTER START] %s: current_position=%.8f, target_base=%.8f, target_remaining=%.8f, epsilon=%.2e", 
+                                           self._log_prefix(primary_idx), plan.symbol, current_position, target_base, target_remaining, epsilon_global)
                                 # 当目标已经满足时，进入持仓阶段
                                 if target_remaining <= epsilon_global:
                                     hold_minutes = plan.hold_minutes or self.config.hold_minutes
@@ -447,7 +451,8 @@ class TriHedgeHoldStrategy:
                                         session, primary_idx, hedger_indices, plan.symbol, hold_minutes
                                     )
                                     logger.info(
-                                        "%s target met (%.8f/%.8f %s); starting hold for %.1f minutes",
+                                        "%s %s target met (%.8f/%.8f %s); starting hold for %.1f minutes",
+                                        self._log_prefix(primary_idx),
                                         plan.symbol,
                                         current_position,
                                         target_base,
@@ -486,7 +491,8 @@ class TriHedgeHoldStrategy:
                                         session, primary_idx, hedger_indices, plan.symbol, hold_minutes
                                     )
                                     logger.info(
-                                        "%s remaining below venue minimum; start hold for %.1f minutes",
+                                        "%s %s remaining below venue minimum; start hold for %.1f minutes",
+                                        self._log_prefix(primary_idx),
                                         plan.symbol,
                                         hold_minutes,
                                     )
@@ -526,7 +532,8 @@ class TriHedgeHoldStrategy:
                                 if filled_base > 0:
                                     self._record_maker_fill(plan.symbol, fills)
                                     logger.info(
-                                        "Primary %s filled %.8f %s (target remaining %.8f)",
+                                        "%s Primary %s filled %.8f %s (target remaining %.8f)",
+                                        self._log_prefix(primary_idx),
                                         self._account_labels[primary_idx],
                                         filled_base,
                                         plan.symbol,
@@ -565,7 +572,7 @@ class TriHedgeHoldStrategy:
                                 if time.time() >= hold_end:
                                     session["exit_start_time"] = time.time()
                                     session["status"] = "exiting"
-                                    logger.info("%s hold complete; starting exit", plan.symbol)
+                                    logger.info("%s %s hold complete; starting exit", self._log_prefix(primary_idx), plan.symbol)
                                 else:
                                     # Allow others to proceed; minimal sleep to avoid busy loop.
                                     session["next_allowed_time"] = time.time() + min(
@@ -585,9 +592,9 @@ class TriHedgeHoldStrategy:
                                     continue
                                 current_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
                                 min_exit_qty = self._effective_min_quantity(reference_price, limits)
-                                logger.debug("[EXIT START] %s: current_position=%.8f, min_exit_qty=%.8f, epsilon=%.2e", 
-                                           plan.symbol, current_position, min_exit_qty, epsilon_global)
-                                if current_position <= epsilon_global or current_position < min_exit_qty / 2:
+                                logger.debug("%s [EXIT START] %s: current_position=%.8f, min_exit_qty=%.8f, epsilon=%.2e", 
+                                           self._log_prefix(primary_idx), plan.symbol, current_position, min_exit_qty, epsilon_global)
+                                if current_position <= epsilon_global or current_position < min_exit_qty * self.POSITION_TOLERANCE_FACTOR:
                                     self._finalize_exit(session, primary_idx, hedger_indices, plan.symbol)
                                     continue
 
@@ -656,7 +663,8 @@ class TriHedgeHoldStrategy:
                                 if filled_base > 0:
                                     self._record_maker_fill(plan.symbol, fills)
                                     logger.info(
-                                        "Primary %s closed %.8f %s (%.8f remaining est.)",
+                                        "%s Primary %s closed %.8f %s (%.8f remaining est.)",
+                                        self._log_prefix(primary_idx),
                                         self._account_labels[primary_idx],
                                         filled_base,
                                         plan.symbol,
@@ -681,7 +689,7 @@ class TriHedgeHoldStrategy:
                                         allow_reduce_shorts=True,
                                     )
                                 remaining_base = max(self._get_cached_position(primary_idx, plan.symbol), 0.0)
-                                if remaining_base <= epsilon_global or remaining_base < effective_min / 2:
+                                if remaining_base <= epsilon_global or remaining_base < effective_min * self.POSITION_TOLERANCE_FACTOR:
                                     self._finalize_exit(session, primary_idx, hedger_indices, plan.symbol)
                                 delay = self.config.slice_delay_seconds + self._random.uniform(
                                     0, max(self.config.slice_delay_jitter_seconds, 0)
@@ -798,9 +806,7 @@ class TriHedgeHoldStrategy:
                 account_label=self._account_labels[primary_idx],
             )
             if order_index is None:
-                delay = self.config.slice_delay_seconds + self._random.uniform(
-                    0, max(self.config.slice_delay_jitter_seconds, 0)
-                )
+                delay = self._calculate_slice_delay()
                 logger.info("No valid order generated for this slice; waiting %.2f seconds before retry.", delay)
                 self._stop_event.wait(max(delay, 0.0))
                 continue
@@ -818,9 +824,7 @@ class TriHedgeHoldStrategy:
             filled_base = sum(fill["quantity"] for fill in fills)
             if filled_base <= 0:
                 logger.info("Slice produced no fills, retrying another order...")
-                delay = self.config.slice_delay_seconds + self._random.uniform(
-                    0, max(self.config.slice_delay_jitter_seconds, 0)
-                )
+                delay = self._calculate_slice_delay()
                 self._stop_event.wait(max(delay, 0.0))
                 continue
             self._record_maker_fill(plan.symbol, fills)
@@ -828,7 +832,8 @@ class TriHedgeHoldStrategy:
             total_base_filled += filled_base
             target_remaining = max(target_remaining - filled_base, 0.0)
             logger.info(
-                "Primary %s filled %.8f %s (%.8f / %.8f base done)",
+                "%s Primary %s filled %.8f %s (%.8f / %.8f base done)",
+                self._log_prefix(primary_idx),
                 self._account_labels[primary_idx],
                 filled_base,
                 plan.symbol,
@@ -938,9 +943,7 @@ class TriHedgeHoldStrategy:
                 account_label=self._account_labels[primary_idx],
             )
             if order_index is None:
-                delay = self.config.slice_delay_seconds + self._random.uniform(
-                    0, max(self.config.slice_delay_jitter_seconds, 0)
-                )
+                delay = self._calculate_slice_delay()
                 self._stop_event.wait(max(delay, 0.0))
                 continue
             fills = self._wait_for_position_fill(
@@ -957,16 +960,15 @@ class TriHedgeHoldStrategy:
             filled_base = sum(fill["quantity"] for fill in fills)
             if filled_base <= 0:
                 logger.info("Exit slice produced no fills, retrying...")
-                delay = self.config.slice_delay_seconds + self._random.uniform(
-                    0, max(self.config.slice_delay_jitter_seconds, 0)
-                )
+                delay = self._calculate_slice_delay()
                 self._stop_event.wait(max(delay, 0.0))
                 continue
             self._record_maker_fill(plan.symbol, fills)
 
             remaining_base = max(remaining_base - filled_base, 0.0)
             logger.info(
-                "Primary %s closed %.8f %s (%.8f remaining)",
+                "%s Primary %s closed %.8f %s (%.8f remaining)",
+                self._log_prefix(primary_idx),
                 self._account_labels[primary_idx],
                 filled_base,
                 plan.symbol,
@@ -1454,6 +1456,26 @@ class TriHedgeHoldStrategy:
         
         self._log_position_snapshot(symbol, primary_idx, hedger_indices)
         self._print_cycle_summary(symbol)
+
+    def _calculate_slice_delay(self) -> float:
+        """计算带随机抖动的切片延迟"""
+        return self.config.slice_delay_seconds + self._random.uniform(
+            0, max(self.config.slice_delay_jitter_seconds, 0)
+        )
+
+    def _is_session_done(self, session: Dict[str, Any]) -> bool:
+        """检查会话是否已完成"""
+        return session.get("status") == "done"
+
+    def _should_process_session(self, session: Dict[str, Any], now: float) -> bool:
+        """检查是否应该处理此会话（未完成且已过冷却期）"""
+        if self._is_session_done(session):
+            return False
+        return now >= session.get("next_allowed_time", 0.0)
+
+    def _log_prefix(self, account_idx: int) -> str:
+        """获取账户日志前缀"""
+        return f"[{self._account_labels[account_idx]}]"
 
     def _rebalance_exposure(
         self,
