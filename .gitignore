@@ -4,3 +4,5 @@ __pycache__/
 .env
 *.db
 .claude/settings.local.json
+settings/tri_hedge_strategy.json
+

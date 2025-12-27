@@ -365,16 +365,36 @@ class TriHedgeHoldStrategy:
                             "status": "accumulating",
                             "hold_end_ts": None,
                             "next_allowed_time": 0.0,
+                            "enter_start_time": time.time(),
                         }
                     )
+                round_num = rounds_completed + 1
                 logger.info(
                     "Round %d assignments: %s",
-                    rounds_completed + 1,
+                    round_num,
                     ", ".join(
                         f"{self._account_labels[s['primary_idx']]}->{s['plan'].symbol} hedgers={[self._account_labels[i] for i in s['hedgers']]}"
                         for s in sessions
                     ),
                 )
+                
+                # 初始化当前 round 的统计
+                self._current_round = {
+                    "round": round_num,
+                    "enter": {
+                        "time": {},
+                        "slippage": {},
+                        "fee": {},
+                        "wear": {},
+                    },
+                    "exit": {
+                        "time": {},
+                        "slippage": {},
+                        "fee": {},
+                        "wear": {},
+                    },
+                }
+                self._round_start_time = time.time()
 
                 while not self._stop_event.is_set():
                     all_done = True
@@ -1758,8 +1778,13 @@ class TriHedgeHoldStrategy:
                 total_wear,
                 total_time,
             )
+            
+            # 重置 _current_round 以便下一个 round 使用
+            self._current_round = None
         except Exception as exc:
             logger.error("Error finalizing round stats: %s", exc, exc_info=True)
+            # 即使出错也要重置，避免影响下一个 round
+            self._current_round = None
     
     def _save_round_stats(self) -> None:
         """保存轮次统计到 JSON 文件"""
@@ -1777,11 +1802,12 @@ class TriHedgeHoldStrategy:
             return
         
         try:
+            duration_minutes = duration / 60.0
             message = f"<b>Enter Phase Complete: {key}</b>\n"
             message += f"Slippage: {slippage:.6f}\n"
             message += f"Fee: {fee:.6f}\n"
             message += f"Total Wear: {wear:.6f}\n"
-            message += f"Duration: {duration:.1f}s"
+            message += f"Duration: {duration_minutes:.2f} min"
             self._telegram_notifier.send_message(message)
         except Exception as exc:
             logger.error("Error sending enter notification: %s", exc, exc_info=True)
@@ -1792,11 +1818,12 @@ class TriHedgeHoldStrategy:
             return
         
         try:
+            duration_minutes = duration / 60.0
             message = f"<b>Exit Phase Complete: {key}</b>\n"
             message += f"Slippage: {slippage:.6f}\n"
             message += f"Fee: {fee:.6f}\n"
             message += f"Total Wear: {wear:.6f}\n"
-            message += f"Duration: {duration:.1f}s"
+            message += f"Duration: {duration_minutes:.2f} min"
             self._telegram_notifier.send_message(message)
         except Exception as exc:
             logger.error("Error sending exit notification: %s", exc, exc_info=True)
@@ -1820,8 +1847,10 @@ class TriHedgeHoldStrategy:
             enter_wears = self._current_round["enter"]["wear"]
             for key, duration in enter_times.items():
                 wear = enter_wears.get(key, 0)
-                lines.append(f"  {key}: {duration:.1f}s, wear: {wear:.6f}")
-            lines.append(f"  Max time: {summary.get('round_times', {}).get('enter', 0):.1f}s")
+                duration_minutes = duration / 60.0
+                lines.append(f"  {key}: {duration_minutes:.2f} min, wear: {wear:.6f}")
+            max_enter_time = summary.get('round_times', {}).get('enter', 0) / 60.0
+            lines.append(f"  Max time: {max_enter_time:.2f} min")
             lines.append(f"  Total wear: {summary.get('wears', {}).get('enter', 0):.6f}")
             lines.append("")
             
@@ -1831,14 +1860,17 @@ class TriHedgeHoldStrategy:
             exit_wears = self._current_round["exit"]["wear"]
             for key, duration in exit_times.items():
                 wear = exit_wears.get(key, 0)
-                lines.append(f"  {key}: {duration:.1f}s, wear: {wear:.6f}")
-            lines.append(f"  Max time: {summary.get('round_times', {}).get('exit', 0):.1f}s")
+                duration_minutes = duration / 60.0
+                lines.append(f"  {key}: {duration_minutes:.2f} min, wear: {wear:.6f}")
+            max_exit_time = summary.get('round_times', {}).get('exit', 0) / 60.0
+            lines.append(f"  Max time: {max_exit_time:.2f} min")
             lines.append(f"  Total wear: {summary.get('wears', {}).get('exit', 0):.6f}")
             lines.append("")
             
             # Summary
             lines.append("<b>Summary:</b>")
-            lines.append(f"  Total time: {summary.get('totaltime', 0):.1f}s")
+            total_time_minutes = summary.get('totaltime', 0) / 60.0
+            lines.append(f"  Total time: {total_time_minutes:.2f} min")
             lines.append(f"  Total wear: {summary.get('wears', {}).get('total', 0):.6f}")
             lines.append(f"  Total slippage: {summary.get('slippage', {}).get('total', 0):.6f}")
             lines.append(f"  Total fee: {summary.get('fee', {}).get('total', 0):.6f}")
