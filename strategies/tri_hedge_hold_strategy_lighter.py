@@ -443,14 +443,9 @@ class TriHedgeHoldStrategy:
                                 # 当目标已经满足时，进入持仓阶段
                                 if target_remaining <= epsilon_global:
                                     hold_minutes = plan.hold_minutes or self.config.hold_minutes
-                                    enter_end_time = time.time()
-                                    session["enter_end_time"] = enter_end_time
-                                    session["hold_end_ts"] = enter_end_time + max(hold_minutes * 60, 1)
-                                    session["status"] = "holding"
-                                    
-                                    # 计算 Enter 阶段的磨损
-                                    self._calculate_enter_wear(session, primary_idx, hedger_indices, plan.symbol)
-                                    
+                                    self._transition_to_holding(
+                                        session, primary_idx, hedger_indices, plan.symbol, hold_minutes
+                                    )
                                     logger.info(
                                         "%s target met (%.8f/%.8f %s); starting hold for %.1f minutes",
                                         plan.symbol,
@@ -487,8 +482,9 @@ class TriHedgeHoldStrategy:
                                 if adjusted_slice is None:
                                     # 剩余量不足最小单，直接进入持仓
                                     hold_minutes = plan.hold_minutes or self.config.hold_minutes
-                                    session["hold_end_ts"] = time.time() + max(hold_minutes * 60, 1)
-                                    session["status"] = "holding"
+                                    self._transition_to_holding(
+                                        session, primary_idx, hedger_indices, plan.symbol, hold_minutes
+                                    )
                                     logger.info(
                                         "%s remaining below venue minimum; start hold for %.1f minutes",
                                         plan.symbol,
@@ -592,15 +588,7 @@ class TriHedgeHoldStrategy:
                                 logger.debug("[EXIT START] %s: current_position=%.8f, min_exit_qty=%.8f, epsilon=%.2e", 
                                            plan.symbol, current_position, min_exit_qty, epsilon_global)
                                 if current_position <= epsilon_global or current_position < min_exit_qty / 2:
-                                    exit_end_time = time.time()
-                                    session["exit_end_time"] = exit_end_time
-                                    session["status"] = "done"
-                                    
-                                    # 计算 Exit 阶段的磨损
-                                    self._calculate_exit_wear(session, primary_idx, hedger_indices, plan.symbol)
-                                    
-                                    self._log_position_snapshot(plan.symbol, primary_idx, hedger_indices)
-                                    self._print_cycle_summary(plan.symbol)
+                                    self._finalize_exit(session, primary_idx, hedger_indices, plan.symbol)
                                     continue
 
                                 if plan.slice_notional and plan.slice_notional > 0:
@@ -620,9 +608,7 @@ class TriHedgeHoldStrategy:
                                     slice_quantity=slice_quantity,
                                 )
                                 if adjusted_exit is None:
-                                    session["status"] = "done"
-                                    self._log_position_snapshot(plan.symbol, primary_idx, hedger_indices)
-                                    self._print_cycle_summary(plan.symbol)
+                                    self._finalize_exit(session, primary_idx, hedger_indices, plan.symbol)
                                     continue
                                 slice_quantity = adjusted_exit
                                 effective_min = self._effective_min_quantity(reference_price, limits)
@@ -633,9 +619,7 @@ class TriHedgeHoldStrategy:
                                         plan.symbol,
                                         effective_min,
                                     )
-                                    session["status"] = "done"
-                                    self._log_position_snapshot(plan.symbol, primary_idx, hedger_indices)
-                                    self._print_cycle_summary(plan.symbol)
+                                    self._finalize_exit(session, primary_idx, hedger_indices, plan.symbol)
                                     continue
 
                                 baseline_position = self._get_cached_position(primary_idx, plan.symbol)
@@ -698,9 +682,7 @@ class TriHedgeHoldStrategy:
                                     )
                                 remaining_base = max(self._get_cached_position(primary_idx, plan.symbol), 0.0)
                                 if remaining_base <= epsilon_global or remaining_base < effective_min / 2:
-                                    session["status"] = "done"
-                                    self._log_position_snapshot(plan.symbol, primary_idx, hedger_indices)
-                                    self._print_cycle_summary(plan.symbol)
+                                    self._finalize_exit(session, primary_idx, hedger_indices, plan.symbol)
                                 delay = self.config.slice_delay_seconds + self._random.uniform(
                                     0, max(self.config.slice_delay_jitter_seconds, 0)
                                 )
@@ -1438,6 +1420,41 @@ class TriHedgeHoldStrategy:
             return self._refresh_position(account_idx, symbol)
         return account_store[symbol]
 
+    def _transition_to_holding(
+        self,
+        session: Dict[str, Any],
+        primary_idx: int,
+        hedger_indices: Sequence[int],
+        symbol: str,
+        hold_minutes: float,
+    ) -> None:
+        """统一处理进入 holding 状态的逻辑"""
+        enter_end_time = time.time()
+        session["enter_end_time"] = enter_end_time
+        session["hold_end_ts"] = enter_end_time + max(hold_minutes * 60, 1)
+        session["status"] = "holding"
+        
+        # 计算 Enter 阶段的磨损
+        self._calculate_enter_wear(session, primary_idx, hedger_indices, symbol)
+
+    def _finalize_exit(
+        self,
+        session: Dict[str, Any],
+        primary_idx: int,
+        hedger_indices: Sequence[int],
+        symbol: str,
+    ) -> None:
+        """统一处理 Exit 完成的逻辑"""
+        exit_end_time = time.time()
+        session["exit_end_time"] = exit_end_time
+        session["status"] = "done"
+        
+        # 计算 Exit 阶段的磨损
+        self._calculate_exit_wear(session, primary_idx, hedger_indices, symbol)
+        
+        self._log_position_snapshot(symbol, primary_idx, hedger_indices)
+        self._print_cycle_summary(symbol)
+
     def _rebalance_exposure(
         self,
         symbol: str,
@@ -1720,16 +1737,32 @@ class TriHedgeHoldStrategy:
             # 获取当前市场价格（用于计算价差）
             current_price = self._compute_reference_price(client, symbol, "Ask", 0) or primary_entry_price
             
-            # 获取对冲账户的仓位和均价（Exit 阶段，对冲账户买入 Bid）
+            # 获取对冲账户的交易统计（Exit 阶段，对冲账户买入平仓）
+            # 优先使用 _hedge_price_stats，它记录了实际的对冲交易
             hedge_total_qty = 0.0
             hedge_weighted_price = 0.0
+            hedger_stats = self._hedge_price_stats.get(symbol, {})
+            
             for hedger_idx in hedger_indices:
-                hedge_qty, hedge_price = self._get_position_with_price(hedger_idx, symbol)
-                logger.debug("[DEBUG EXIT WEAR] %s: hedger[%d] raw_qty=%.8f, price=%.8f", 
-                           key, hedger_idx, hedge_qty, hedge_price)
-                # Exit 阶段，对冲账户应该是多头（正数，因为已经平仓对冲）
-                hedge_qty = abs(hedge_qty) if hedge_qty > 0 else 0.0
-                logger.debug("[DEBUG EXIT WEAR] %s: hedger[%d] adjusted_qty=%.8f", key, hedger_idx, hedge_qty)
+                # 首先尝试从 hedge_price_stats 获取（记录了实际交易）
+                hedge_stat = hedger_stats.get(hedger_idx)
+                if hedge_stat and hedge_stat.get("qty", 0) > 0:
+                    hedge_qty = hedge_stat["qty"]
+                    hedge_notional = hedge_stat["notional"]
+                    hedge_price = hedge_notional / hedge_qty if hedge_qty > 0 else 0.0
+                    logger.debug("[DEBUG EXIT WEAR] %s: hedger[%d] from stats qty=%.8f, price=%.8f", 
+                               key, hedger_idx, hedge_qty, hedge_price)
+                else:
+                    # 如果没有统计数据，尝试从当前仓位获取
+                    hedge_qty, hedge_price = self._get_position_with_price(hedger_idx, symbol)
+                    logger.debug("[DEBUG EXIT WEAR] %s: hedger[%d] from position raw_qty=%.8f, price=%.8f", 
+                               key, hedger_idx, hedge_qty, hedge_price)
+                    # Exit 阶段，对冲账户平仓买入，仓位应该从负数变为0或正数
+                    # 如果仓位是负数，说明还没完全平仓，我们需要计算已平仓的部分
+                    # 但由于没有历史数据，我们只能取绝对值作为估算
+                    hedge_qty = abs(hedge_qty)
+                    logger.debug("[DEBUG EXIT WEAR] %s: hedger[%d] adjusted_qty=%.8f", key, hedger_idx, hedge_qty)
+                
                 if hedge_qty > 0 and hedge_price > 0:
                     hedge_total_qty += hedge_qty
                     hedge_weighted_price += hedge_qty * hedge_price
