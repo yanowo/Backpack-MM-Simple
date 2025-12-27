@@ -256,7 +256,15 @@ class TriHedgeHoldStrategy:
         self._wear_cumulative = {"wear_notional": 0.0, "maker_qty": 0.0}
         self._primary_time_in_force = str(config.primary_time_in_force or "GTC").upper()
         self._position_cache: Dict[int, Dict[str, float]] = {idx: {} for idx in range(len(self._clients))}
+        self._position_price_cache: Dict[int, Dict[str, float]] = {idx: {} for idx in range(len(self._clients))}
         self._small_fill_selector: Dict[Tuple[int, ...], int] = {}
+        # 磨损统计
+        self._round_stats: List[Dict[str, Any]] = []
+        self._current_round: Optional[Dict[str, Any]] = None
+        self._round_start_time: Optional[float] = None
+        # 手续费费率
+        self._maker_fee_rate = 0.00002  # 0.002%
+        self._taker_fee_rate = 0.0002  # 0.02%
         self._market_fetch_retries = max(1, int(config.market_fetch_retries))
         self._order_submit_retries = max(1, int(config.order_submit_retries))
         self._active_cycle_context: Optional[Dict[str, Any]] = None
@@ -413,8 +421,14 @@ class TriHedgeHoldStrategy:
                                 # 当目标已经满足时，进入持仓阶段
                                 if target_remaining <= epsilon_global:
                                     hold_minutes = plan.hold_minutes or self.config.hold_minutes
-                                    session["hold_end_ts"] = time.time() + max(hold_minutes * 60, 1)
+                                    enter_end_time = time.time()
+                                    session["enter_end_time"] = enter_end_time
+                                    session["hold_end_ts"] = enter_end_time + max(hold_minutes * 60, 1)
                                     session["status"] = "holding"
+                                    
+                                    # 计算 Enter 阶段的磨损
+                                    self._calculate_enter_wear(session, primary_idx, hedger_indices, plan.symbol)
+                                    
                                     logger.info(
                                         "%s target met (%.8f/%.8f %s); starting hold for %.1f minutes",
                                         plan.symbol,
@@ -531,6 +545,7 @@ class TriHedgeHoldStrategy:
                                     session["hold_end_ts"] = time.time() + max(hold_minutes * 60, 1)
                                     continue
                                 if time.time() >= hold_end:
+                                    session["exit_start_time"] = time.time()
                                     session["status"] = "exiting"
                                     logger.info("%s hold complete; starting exit", plan.symbol)
                                 else:
@@ -553,7 +568,13 @@ class TriHedgeHoldStrategy:
                                 current_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
                                 min_exit_qty = self._effective_min_quantity(reference_price, limits)
                                 if current_position <= epsilon_global or current_position < min_exit_qty / 2:
+                                    exit_end_time = time.time()
+                                    session["exit_end_time"] = exit_end_time
                                     session["status"] = "done"
+                                    
+                                    # 计算 Exit 阶段的磨损
+                                    self._calculate_exit_wear(session, primary_idx, hedger_indices, plan.symbol)
+                                    
                                     self._log_position_snapshot(plan.symbol, primary_idx, hedger_indices)
                                     self._print_cycle_summary(plan.symbol)
                                     continue
@@ -667,6 +688,8 @@ class TriHedgeHoldStrategy:
                             self._active_cycle_context = None
 
                     if all_done:
+                        # 所有 session 完成，计算本轮总结并保存
+                        self._finalize_round_stats()
                         break
                     # 防止空转占满 CPU
                     self._stop_event.wait(min(self.config.order_poll_interval, 0.5))
@@ -1351,10 +1374,12 @@ class TriHedgeHoldStrategy:
             self._refresh_position(idx, symbol)
 
     def _refresh_position(self, account_idx: int, symbol: str) -> float:
+        """刷新仓位，返回数量"""
         client = self._clients[account_idx]
         time.sleep(0.1)
         positions = client.get_positions(symbol)
         value = 0.0
+        entry_price = 0.0
         if isinstance(positions, list):
             for entry in positions:
                 if not isinstance(entry, dict):
@@ -1364,9 +1389,23 @@ class TriHedgeHoldStrategy:
                     value = float(raw)
                 except (TypeError, ValueError):
                     continue
+                # 获取均价
+                entry_price = float(entry.get("entryPrice") or entry.get("avgEntryPrice") or 0)
                 break
         self._position_cache.setdefault(account_idx, {})[symbol] = value
+        if entry_price > 0:
+            self._position_price_cache.setdefault(account_idx, {})[symbol] = entry_price
         return value
+    
+    def _get_position_with_price(self, account_idx: int, symbol: str) -> Tuple[float, float]:
+        """获取仓位数量和均价"""
+        qty = self._get_cached_position(account_idx, symbol)
+        price = self._position_price_cache.get(account_idx, {}).get(symbol, 0.0)
+        if price <= 0:
+            # 如果缓存中没有均价，刷新一次
+            self._refresh_position(account_idx, symbol)
+            price = self._position_price_cache.get(account_idx, {}).get(symbol, 0.0)
+        return qty, price
 
     def _get_cached_position(self, account_idx: int, symbol: str) -> float:
         account_store = self._position_cache.setdefault(account_idx, {})
@@ -1472,6 +1511,343 @@ class TriHedgeHoldStrategy:
             stats["qty"] += qty
             stats["notional"] += qty * price
 
+    def _calculate_enter_wear(
+        self,
+        session: Dict[str, Any],
+        primary_idx: int,
+        hedger_indices: Sequence[int],
+        symbol: str,
+    ) -> None:
+        """计算 Enter 阶段的磨损（价差 + 手续费）"""
+        try:
+            # 获取主账户和对冲账户的仓位和均价
+            primary_qty, primary_price = self._get_position_with_price(primary_idx, symbol)
+            
+            if primary_qty <= 0 or primary_price <= 0:
+                logger.warning("Cannot calculate enter wear for %s: invalid position", symbol)
+                return
+            
+            # 获取对冲账户的仓位和均价
+            hedge_total_qty = 0.0
+            hedge_weighted_price = 0.0
+            for hedger_idx in hedger_indices:
+                hedge_qty, hedge_price = self._get_position_with_price(hedger_idx, symbol)
+                # 对冲账户应该是空头（负数）
+                hedge_qty = abs(hedge_qty) if hedge_qty < 0 else 0.0
+                if hedge_qty > 0 and hedge_price > 0:
+                    hedge_total_qty += hedge_qty
+                    hedge_weighted_price += hedge_qty * hedge_price
+            
+            if hedge_total_qty <= 0:
+                logger.warning("Cannot calculate enter wear for %s: no hedge position", symbol)
+                return
+            
+            hedge_avg_price = hedge_weighted_price / hedge_total_qty
+            
+            # 计算价差（Enter: 主账户买入 Bid，对冲账户卖出 Ask）
+            # 价差 = (对冲Ask价格 - 主账户Bid价格) * 数量
+            slippage = abs(hedge_avg_price - primary_price) * min(primary_qty, hedge_total_qty)
+            
+            # 计算手续费
+            # 主账户是 maker (0.002%), 对冲账户是 taker (0.02%)
+            primary_value = primary_qty * primary_price
+            hedge_value = hedge_total_qty * hedge_avg_price
+            primary_fee = primary_value * self._maker_fee_rate
+            hedge_fee = hedge_value * self._taker_fee_rate
+            total_fee = primary_fee + hedge_fee
+            
+            # 总磨损
+            total_wear = slippage + total_fee
+            
+            # 计算时间
+            enter_start = session.get("enter_start_time", 0)
+            enter_end = session.get("enter_end_time", time.time())
+            enter_duration = enter_end - enter_start
+            
+            # 记录到当前 round
+            account_label = self._account_labels[primary_idx]
+            key = f"{account_label}_{symbol}"
+            
+            if self._current_round:
+                self._current_round["enter"]["time"][key] = enter_duration
+                self._current_round["enter"]["slippage"][key] = slippage
+                self._current_round["enter"]["fee"][key] = total_fee
+                self._current_round["enter"]["wear"][key] = total_wear
+            
+            logger.info(
+                "[ENTER WEAR] %s: slippage=%.6f, fee=%.6f, total=%.6f, duration=%.1fs",
+                key,
+                slippage,
+                total_fee,
+                total_wear,
+                enter_duration,
+            )
+            
+            # 发送 Enter 阶段的 Telegram 通知
+            if self._telegram_notifier:
+                self._send_enter_notification(key, slippage, total_fee, total_wear, enter_duration)
+        except Exception as exc:
+            logger.error("Error calculating enter wear: %s", exc, exc_info=True)
+    
+    def _calculate_exit_wear(
+        self,
+        session: Dict[str, Any],
+        primary_idx: int,
+        hedger_indices: Sequence[int],
+        symbol: str,
+    ) -> None:
+        """计算 Exit 阶段的磨损（价差 + 手续费）"""
+        try:
+            # 获取主账户的 entry price（从 Enter 阶段保存的均价）
+            # 如果主账户已经平仓，从缓存中获取之前的 entry price
+            primary_entry_qty, primary_entry_price = self._get_position_with_price(primary_idx, symbol)
+            
+            # 如果主账户仓位为0，尝试从 maker_price_stats 获取均价
+            if primary_entry_qty <= 0 or primary_entry_price <= 0:
+                maker_stats = self._maker_price_stats.get(symbol)
+                if maker_stats and maker_stats.get("qty", 0) > 0:
+                    primary_entry_price = maker_stats["notional"] / maker_stats["qty"]
+                    primary_entry_qty = maker_stats["qty"]
+            
+            if primary_entry_price <= 0:
+                logger.warning("Cannot calculate exit wear for %s: no entry price", symbol)
+                return
+            
+            # 获取当前市场价格（主账户卖出价格）
+            client = self._clients[primary_idx]
+            limits = session.get("limits")
+            if not limits:
+                limits = self._get_market_limits_with_retry(client, symbol)
+            
+            # 获取当前市场价格（用于计算价差）
+            current_price = self._compute_reference_price(client, symbol, "Ask", 0) or primary_entry_price
+            
+            # 获取对冲账户的仓位和均价（Exit 阶段，对冲账户买入 Bid）
+            hedge_total_qty = 0.0
+            hedge_weighted_price = 0.0
+            for hedger_idx in hedger_indices:
+                hedge_qty, hedge_price = self._get_position_with_price(hedger_idx, symbol)
+                # Exit 阶段，对冲账户应该是多头（正数，因为已经平仓对冲）
+                hedge_qty = abs(hedge_qty) if hedge_qty > 0 else 0.0
+                if hedge_qty > 0 and hedge_price > 0:
+                    hedge_total_qty += hedge_qty
+                    hedge_weighted_price += hedge_qty * hedge_price
+            
+            if hedge_total_qty <= 0:
+                logger.warning("Cannot calculate exit wear for %s: no hedge position", symbol)
+                return
+            
+            hedge_avg_price = hedge_weighted_price / hedge_total_qty
+            
+            # 计算价差（Exit: 主账户卖出 Ask，对冲账户买入 Bid）
+            # 价差 = (主账户Ask价格 - 对冲Bid价格) * 数量
+            exit_qty = min(primary_entry_qty, hedge_total_qty)
+            slippage = abs(current_price - hedge_avg_price) * exit_qty
+            
+            # 计算手续费
+            # 主账户是 maker (0.002%), 对冲账户是 taker (0.02%)
+            # 使用实际成交数量计算
+            primary_value = exit_qty * current_price
+            hedge_value = exit_qty * hedge_avg_price  # 只计算匹配的数量
+            primary_fee = primary_value * self._maker_fee_rate
+            hedge_fee = hedge_value * self._taker_fee_rate
+            total_fee = primary_fee + hedge_fee
+            
+            # 总磨损
+            total_wear = slippage + total_fee
+            
+            # 计算时间
+            exit_start = session.get("exit_start_time")
+            if not exit_start:
+                # 如果 exit_start_time 未设置，从 holding 结束时间开始
+                exit_start = session.get("hold_end_ts", time.time())
+                session["exit_start_time"] = exit_start
+            exit_end = session.get("exit_end_time", time.time())
+            exit_duration = exit_end - exit_start
+            
+            # 记录到当前 round
+            account_label = self._account_labels[primary_idx]
+            key = f"{account_label}_{symbol}"
+            
+            if self._current_round:
+                self._current_round["exit"]["time"][key] = exit_duration
+                self._current_round["exit"]["slippage"][key] = slippage
+                self._current_round["exit"]["fee"][key] = total_fee
+                self._current_round["exit"]["wear"][key] = total_wear
+            
+            logger.info(
+                "[EXIT WEAR] %s: slippage=%.6f, fee=%.6f, total=%.6f, duration=%.1fs",
+                key,
+                slippage,
+                total_fee,
+                total_wear,
+                exit_duration,
+            )
+            
+            # 发送 Exit 阶段的 Telegram 通知
+            if self._telegram_notifier:
+                self._send_exit_notification(key, slippage, total_fee, total_wear, exit_duration)
+        except Exception as exc:
+            logger.error("Error calculating exit wear: %s", exc, exc_info=True)
+    
+    def _finalize_round_stats(self) -> None:
+        """完成本轮统计，计算总结并保存"""
+        if not self._current_round:
+            return
+        
+        try:
+            # 计算时间统计
+            enter_times = self._current_round["enter"]["time"]
+            exit_times = self._current_round["exit"]["time"]
+            
+            # 总时间 = max(所有 enter 时间) + max(所有 exit 时间)
+            max_enter_time = max(enter_times.values()) if enter_times else 0.0
+            max_exit_time = max(exit_times.values()) if exit_times else 0.0
+            total_time = max_enter_time + max_exit_time
+            
+            # 计算总磨损
+            enter_wears = self._current_round["enter"]["wear"]
+            exit_wears = self._current_round["exit"]["wear"]
+            total_enter_wear = sum(enter_wears.values())
+            total_exit_wear = sum(exit_wears.values())
+            total_wear = total_enter_wear + total_exit_wear
+            
+            # 计算总价差和手续费
+            total_enter_slippage = sum(self._current_round["enter"]["slippage"].values())
+            total_exit_slippage = sum(self._current_round["exit"]["slippage"].values())
+            total_enter_fee = sum(self._current_round["enter"]["fee"].values())
+            total_exit_fee = sum(self._current_round["exit"]["fee"].values())
+            
+            # 填充 summary
+            self._current_round["summary"] = {
+                "round_times": {
+                    "enter": max_enter_time,
+                    "exit": max_exit_time,
+                    "total": total_time,
+                },
+                "wears": {
+                    "enter": total_enter_wear,
+                    "exit": total_exit_wear,
+                    "total": total_wear,
+                },
+                "slippage": {
+                    "enter": total_enter_slippage,
+                    "exit": total_exit_slippage,
+                    "total": total_enter_slippage + total_exit_slippage,
+                },
+                "fee": {
+                    "enter": total_enter_fee,
+                    "exit": total_exit_fee,
+                    "total": total_enter_fee + total_exit_fee,
+                },
+                "totaltime": total_time,
+            }
+            
+            # 保存到列表
+            self._round_stats.append(self._current_round.copy())
+            
+            # 保存到 JSON 文件
+            self._save_round_stats()
+            
+            # 发送 Telegram 通知
+            self._send_round_notification()
+            
+            logger.info(
+                "[ROUND SUMMARY] Round %d: total_wear=%.6f, total_time=%.1fs",
+                self._current_round["round"],
+                total_wear,
+                total_time,
+            )
+        except Exception as exc:
+            logger.error("Error finalizing round stats: %s", exc, exc_info=True)
+    
+    def _save_round_stats(self) -> None:
+        """保存轮次统计到 JSON 文件"""
+        try:
+            stats_file = "tri_hedge_round_stats.json"
+            with open(stats_file, "w", encoding="utf-8") as f:
+                json.dump(self._round_stats, f, indent=2, ensure_ascii=False, default=str)
+            logger.info("Round stats saved to %s", stats_file)
+        except Exception as exc:
+            logger.error("Error saving round stats: %s", exc, exc_info=True)
+    
+    def _send_enter_notification(self, key: str, slippage: float, fee: float, wear: float, duration: float) -> None:
+        """发送 Enter 阶段的 Telegram 通知"""
+        if not self._telegram_notifier:
+            return
+        
+        try:
+            message = f"<b>Enter Phase Complete: {key}</b>\n"
+            message += f"Slippage: {slippage:.6f}\n"
+            message += f"Fee: {fee:.6f}\n"
+            message += f"Total Wear: {wear:.6f}\n"
+            message += f"Duration: {duration:.1f}s"
+            self._telegram_notifier.send_message(message)
+        except Exception as exc:
+            logger.error("Error sending enter notification: %s", exc, exc_info=True)
+    
+    def _send_exit_notification(self, key: str, slippage: float, fee: float, wear: float, duration: float) -> None:
+        """发送 Exit 阶段的 Telegram 通知"""
+        if not self._telegram_notifier:
+            return
+        
+        try:
+            message = f"<b>Exit Phase Complete: {key}</b>\n"
+            message += f"Slippage: {slippage:.6f}\n"
+            message += f"Fee: {fee:.6f}\n"
+            message += f"Total Wear: {wear:.6f}\n"
+            message += f"Duration: {duration:.1f}s"
+            self._telegram_notifier.send_message(message)
+        except Exception as exc:
+            logger.error("Error sending exit notification: %s", exc, exc_info=True)
+    
+    def _send_round_notification(self) -> None:
+        """发送本轮统计的 Telegram 通知"""
+        if not self._telegram_notifier or not self._current_round:
+            return
+        
+        try:
+            summary = self._current_round.get("summary", {})
+            round_num = self._current_round.get("round", 0)
+            
+            # 构建消息
+            lines = [f"<b>Round {round_num} Summary</b>"]
+            lines.append("")
+            
+            # Enter 阶段
+            lines.append("<b>Enter Phase:</b>")
+            enter_times = self._current_round["enter"]["time"]
+            enter_wears = self._current_round["enter"]["wear"]
+            for key, duration in enter_times.items():
+                wear = enter_wears.get(key, 0)
+                lines.append(f"  {key}: {duration:.1f}s, wear: {wear:.6f}")
+            lines.append(f"  Max time: {summary.get('round_times', {}).get('enter', 0):.1f}s")
+            lines.append(f"  Total wear: {summary.get('wears', {}).get('enter', 0):.6f}")
+            lines.append("")
+            
+            # Exit 阶段
+            lines.append("<b>Exit Phase:</b>")
+            exit_times = self._current_round["exit"]["time"]
+            exit_wears = self._current_round["exit"]["wear"]
+            for key, duration in exit_times.items():
+                wear = exit_wears.get(key, 0)
+                lines.append(f"  {key}: {duration:.1f}s, wear: {wear:.6f}")
+            lines.append(f"  Max time: {summary.get('round_times', {}).get('exit', 0):.1f}s")
+            lines.append(f"  Total wear: {summary.get('wears', {}).get('exit', 0):.6f}")
+            lines.append("")
+            
+            # Summary
+            lines.append("<b>Summary:</b>")
+            lines.append(f"  Total time: {summary.get('totaltime', 0):.1f}s")
+            lines.append(f"  Total wear: {summary.get('wears', {}).get('total', 0):.6f}")
+            lines.append(f"  Total slippage: {summary.get('slippage', {}).get('total', 0):.6f}")
+            lines.append(f"  Total fee: {summary.get('fee', {}).get('total', 0):.6f}")
+            
+            message = "\n".join(lines)
+            self._telegram_notifier.send_message(message)
+        except Exception as exc:
+            logger.error("Error sending round notification: %s", exc, exc_info=True)
+    
     def _print_cycle_summary(self, symbol: str) -> None:
         maker_stats = self._maker_price_stats.get(symbol)
         hedger_stats = self._hedge_price_stats.get(symbol, {})
