@@ -438,6 +438,8 @@ class TriHedgeHoldStrategy:
                                 )
                                 current_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
                                 target_remaining = max(target_base - current_position, 0.0)
+                                logger.debug("[ENTER START] %s: current_position=%.8f, target_base=%.8f, target_remaining=%.8f, epsilon=%.2e", 
+                                           plan.symbol, current_position, target_base, target_remaining, epsilon_global)
                                 # 当目标已经满足时，进入持仓阶段
                                 if target_remaining <= epsilon_global:
                                     hold_minutes = plan.hold_minutes or self.config.hold_minutes
@@ -587,6 +589,8 @@ class TriHedgeHoldStrategy:
                                     continue
                                 current_position = max(self._refresh_position(primary_idx, plan.symbol), 0.0)
                                 min_exit_qty = self._effective_min_quantity(reference_price, limits)
+                                logger.debug("[EXIT START] %s: current_position=%.8f, min_exit_qty=%.8f, epsilon=%.2e", 
+                                           plan.symbol, current_position, min_exit_qty, epsilon_global)
                                 if current_position <= epsilon_global or current_position < min_exit_qty / 2:
                                     exit_end_time = time.time()
                                     session["exit_end_time"] = exit_end_time
@@ -1030,16 +1034,17 @@ class TriHedgeHoldStrategy:
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, float]:
         rounded_qty = max(round_to_precision(quantity, limits.base_precision), limits.min_order_size)
         rounded_price = round_to_tick_size(price, limits.tick_size)
-        logger.info(
-            "Submitting %s order: account=%s side=%s qty=%.8f price=%.8f post_only=%s reduce_only=%s",
-            symbol,
-            account_label,
-            side,
-            rounded_qty,
-            rounded_price,
-            post_only,
-            reduce_only,
-        )
+        # 精简日志，不再打印 submit
+        # logger.info(
+        #     "Submitting %s order: account=%s side=%s qty=%.8f price=%.8f post_only=%s reduce_only=%s",
+        #     symbol,
+        #     account_label,
+        #     side,
+        #     rounded_qty,
+        #     rounded_price,
+        #     post_only,
+        #     reduce_only,
+        # )
         tif_upper = self._primary_time_in_force
         post_only_flag = post_only
         if tif_upper in ("FOK", "IOC") and post_only_flag:
@@ -1540,11 +1545,31 @@ class TriHedgeHoldStrategy:
     ) -> None:
         """计算 Enter 阶段的磨损（价差 + 手续费）"""
         try:
+            # DEBUG: 函数入口
+            account_label = self._account_labels[primary_idx]
+            key = f"{account_label}_{symbol}"
+            logger.debug("[DEBUG ENTER WEAR] Called for %s, primary_idx=%d, hedger_indices=%s, _current_round=%s", 
+                        key, primary_idx, hedger_indices, "exists" if self._current_round else "None")
+            
             # 获取主账户和对冲账户的仓位和均价
             primary_qty, primary_price = self._get_position_with_price(primary_idx, symbol)
+            logger.debug("[DEBUG ENTER WEAR] %s: primary_qty=%.8f, primary_price=%.8f", key, primary_qty, primary_price)
             
             if primary_qty <= 0 or primary_price <= 0:
-                logger.warning("Cannot calculate enter wear for %s: invalid position", symbol)
+                logger.warning("[DEBUG ENTER WEAR] %s: Cannot calculate - invalid position (qty=%.8f, price=%.8f)", 
+                             key, primary_qty, primary_price)
+                # 即使计算失败，也记录 0 值，确保 Round Summary 有数据
+                if self._current_round:
+                    enter_start = session.get("enter_start_time", 0)
+                    enter_end = session.get("enter_end_time", time.time())
+                    enter_duration = enter_end - enter_start
+                    self._current_round["enter"]["time"][key] = enter_duration
+                    self._current_round["enter"]["slippage"][key] = 0.0
+                    self._current_round["enter"]["fee"][key] = 0.0
+                    self._current_round["enter"]["wear"][key] = 0.0
+                    logger.debug("[DEBUG ENTER WEAR] %s: Recorded 0 values to _current_round, duration=%.2f", key, enter_duration)
+                else:
+                    logger.warning("[DEBUG ENTER WEAR] %s: _current_round is None, cannot record data", key)
                 return
             
             # 获取对冲账户的仓位和均价
@@ -1552,14 +1577,32 @@ class TriHedgeHoldStrategy:
             hedge_weighted_price = 0.0
             for hedger_idx in hedger_indices:
                 hedge_qty, hedge_price = self._get_position_with_price(hedger_idx, symbol)
+                logger.debug("[DEBUG ENTER WEAR] %s: hedger[%d] raw_qty=%.8f, price=%.8f", 
+                           key, hedger_idx, hedge_qty, hedge_price)
                 # 对冲账户应该是空头（负数）
                 hedge_qty = abs(hedge_qty) if hedge_qty < 0 else 0.0
+                logger.debug("[DEBUG ENTER WEAR] %s: hedger[%d] adjusted_qty=%.8f", key, hedger_idx, hedge_qty)
                 if hedge_qty > 0 and hedge_price > 0:
                     hedge_total_qty += hedge_qty
                     hedge_weighted_price += hedge_qty * hedge_price
             
+            logger.debug("[DEBUG ENTER WEAR] %s: hedge_total_qty=%.8f", key, hedge_total_qty)
+            
             if hedge_total_qty <= 0:
-                logger.warning("Cannot calculate enter wear for %s: no hedge position", symbol)
+                logger.warning("[DEBUG ENTER WEAR] %s: Cannot calculate - no hedge position (total_qty=%.8f)", 
+                             key, hedge_total_qty)
+                # 即使计算失败，也记录 0 值，确保 Round Summary 有数据
+                if self._current_round:
+                    enter_start = session.get("enter_start_time", 0)
+                    enter_end = session.get("enter_end_time", time.time())
+                    enter_duration = enter_end - enter_start
+                    self._current_round["enter"]["time"][key] = enter_duration
+                    self._current_round["enter"]["slippage"][key] = 0.0
+                    self._current_round["enter"]["fee"][key] = 0.0
+                    self._current_round["enter"]["wear"][key] = 0.0
+                    logger.debug("[DEBUG ENTER WEAR] %s: Recorded 0 values to _current_round, duration=%.2f", key, enter_duration)
+                else:
+                    logger.warning("[DEBUG ENTER WEAR] %s: _current_round is None, cannot record data", key)
                 return
             
             hedge_avg_price = hedge_weighted_price / hedge_total_qty
@@ -1585,14 +1628,20 @@ class TriHedgeHoldStrategy:
             enter_duration = enter_end - enter_start
             
             # 记录到当前 round
-            account_label = self._account_labels[primary_idx]
-            key = f"{account_label}_{symbol}"
+            logger.debug("[DEBUG ENTER WEAR] %s: Calculated values - slippage=%.6f, fee=%.6f, wear=%.6f, duration=%.2f", 
+                        key, slippage, total_fee, total_wear, enter_duration)
             
             if self._current_round:
                 self._current_round["enter"]["time"][key] = enter_duration
                 self._current_round["enter"]["slippage"][key] = slippage
                 self._current_round["enter"]["fee"][key] = total_fee
                 self._current_round["enter"]["wear"][key] = total_wear
+                logger.debug("[DEBUG ENTER WEAR] %s: Recorded to _current_round - time=%.2f, slippage=%.6f, fee=%.6f, wear=%.6f", 
+                           key, enter_duration, slippage, total_fee, total_wear)
+                logger.debug("[DEBUG ENTER WEAR] %s: _current_round['enter'] keys: %s", 
+                           key, list(self._current_round["enter"]["time"].keys()))
+            else:
+                logger.warning("[DEBUG ENTER WEAR] %s: _current_round is None, cannot record calculated values!", key)
             
             logger.info(
                 "[ENTER WEAR] %s: slippage=%.6f, fee=%.6f, total=%.6f, duration=%.1fs",
@@ -1605,7 +1654,10 @@ class TriHedgeHoldStrategy:
             
             # 发送 Enter 阶段的 Telegram 通知
             if self._telegram_notifier:
+                logger.info("[ENTER NOTIFY] %s: Sending Telegram notification", key)
                 self._send_enter_notification(key, slippage, total_fee, total_wear, enter_duration)
+            else:
+                logger.warning("[ENTER NOTIFY] %s: _telegram_notifier is None, cannot send notification", key)
         except Exception as exc:
             logger.error("Error calculating enter wear: %s", exc, exc_info=True)
     
@@ -1618,19 +1670,45 @@ class TriHedgeHoldStrategy:
     ) -> None:
         """计算 Exit 阶段的磨损（价差 + 手续费）"""
         try:
+            # DEBUG: 函数入口
+            account_label = self._account_labels[primary_idx]
+            key = f"{account_label}_{symbol}"
+            logger.debug("[DEBUG EXIT WEAR] Called for %s, primary_idx=%d, hedger_indices=%s, _current_round=%s", 
+                        key, primary_idx, hedger_indices, "exists" if self._current_round else "None")
+            
             # 获取主账户的 entry price（从 Enter 阶段保存的均价）
             # 如果主账户已经平仓，从缓存中获取之前的 entry price
             primary_entry_qty, primary_entry_price = self._get_position_with_price(primary_idx, symbol)
+            logger.debug("[DEBUG EXIT WEAR] %s: primary_entry_qty=%.8f, primary_entry_price=%.8f", 
+                        key, primary_entry_qty, primary_entry_price)
             
             # 如果主账户仓位为0，尝试从 maker_price_stats 获取均价
             if primary_entry_qty <= 0 or primary_entry_price <= 0:
                 maker_stats = self._maker_price_stats.get(symbol)
+                logger.debug("[DEBUG EXIT WEAR] %s: Trying maker_price_stats: %s", key, maker_stats)
                 if maker_stats and maker_stats.get("qty", 0) > 0:
                     primary_entry_price = maker_stats["notional"] / maker_stats["qty"]
                     primary_entry_qty = maker_stats["qty"]
+                    logger.debug("[DEBUG EXIT WEAR] %s: Got from maker_price_stats: qty=%.8f, price=%.8f", 
+                               key, primary_entry_qty, primary_entry_price)
             
             if primary_entry_price <= 0:
-                logger.warning("Cannot calculate exit wear for %s: no entry price", symbol)
+                logger.warning("[DEBUG EXIT WEAR] %s: Cannot calculate - no entry price (qty=%.8f, price=%.8f)", 
+                             key, primary_entry_qty, primary_entry_price)
+                # 即使计算失败，也记录 0 值，确保 Round Summary 有数据
+                if self._current_round:
+                    exit_start = session.get("exit_start_time")
+                    if not exit_start:
+                        exit_start = session.get("hold_end_ts", time.time())
+                    exit_end = session.get("exit_end_time", time.time())
+                    exit_duration = exit_end - exit_start
+                    self._current_round["exit"]["time"][key] = exit_duration
+                    self._current_round["exit"]["slippage"][key] = 0.0
+                    self._current_round["exit"]["fee"][key] = 0.0
+                    self._current_round["exit"]["wear"][key] = 0.0
+                    logger.debug("[DEBUG EXIT WEAR] %s: Recorded 0 values to _current_round, duration=%.2f", key, exit_duration)
+                else:
+                    logger.warning("[DEBUG EXIT WEAR] %s: _current_round is None, cannot record data", key)
                 return
             
             # 获取当前市场价格（主账户卖出价格）
@@ -1647,14 +1725,34 @@ class TriHedgeHoldStrategy:
             hedge_weighted_price = 0.0
             for hedger_idx in hedger_indices:
                 hedge_qty, hedge_price = self._get_position_with_price(hedger_idx, symbol)
+                logger.debug("[DEBUG EXIT WEAR] %s: hedger[%d] raw_qty=%.8f, price=%.8f", 
+                           key, hedger_idx, hedge_qty, hedge_price)
                 # Exit 阶段，对冲账户应该是多头（正数，因为已经平仓对冲）
                 hedge_qty = abs(hedge_qty) if hedge_qty > 0 else 0.0
+                logger.debug("[DEBUG EXIT WEAR] %s: hedger[%d] adjusted_qty=%.8f", key, hedger_idx, hedge_qty)
                 if hedge_qty > 0 and hedge_price > 0:
                     hedge_total_qty += hedge_qty
                     hedge_weighted_price += hedge_qty * hedge_price
             
+            logger.debug("[DEBUG EXIT WEAR] %s: hedge_total_qty=%.8f", key, hedge_total_qty)
+            
             if hedge_total_qty <= 0:
-                logger.warning("Cannot calculate exit wear for %s: no hedge position", symbol)
+                logger.warning("[DEBUG EXIT WEAR] %s: Cannot calculate - no hedge position (total_qty=%.8f)", 
+                             key, hedge_total_qty)
+                # 即使计算失败，也记录 0 值，确保 Round Summary 有数据
+                if self._current_round:
+                    exit_start = session.get("exit_start_time")
+                    if not exit_start:
+                        exit_start = session.get("hold_end_ts", time.time())
+                    exit_end = session.get("exit_end_time", time.time())
+                    exit_duration = exit_end - exit_start
+                    self._current_round["exit"]["time"][key] = exit_duration
+                    self._current_round["exit"]["slippage"][key] = 0.0
+                    self._current_round["exit"]["fee"][key] = 0.0
+                    self._current_round["exit"]["wear"][key] = 0.0
+                    logger.debug("[DEBUG EXIT WEAR] %s: Recorded 0 values to _current_round, duration=%.2f", key, exit_duration)
+                else:
+                    logger.warning("[DEBUG EXIT WEAR] %s: _current_round is None, cannot record data", key)
                 return
             
             hedge_avg_price = hedge_weighted_price / hedge_total_qty
@@ -1686,14 +1784,20 @@ class TriHedgeHoldStrategy:
             exit_duration = exit_end - exit_start
             
             # 记录到当前 round
-            account_label = self._account_labels[primary_idx]
-            key = f"{account_label}_{symbol}"
+            logger.debug("[DEBUG EXIT WEAR] %s: Calculated values - slippage=%.6f, fee=%.6f, wear=%.6f, duration=%.2f", 
+                        key, slippage, total_fee, total_wear, exit_duration)
             
             if self._current_round:
                 self._current_round["exit"]["time"][key] = exit_duration
                 self._current_round["exit"]["slippage"][key] = slippage
                 self._current_round["exit"]["fee"][key] = total_fee
                 self._current_round["exit"]["wear"][key] = total_wear
+                logger.debug("[DEBUG EXIT WEAR] %s: Recorded to _current_round - time=%.2f, slippage=%.6f, fee=%.6f, wear=%.6f", 
+                           key, exit_duration, slippage, total_fee, total_wear)
+                logger.debug("[DEBUG EXIT WEAR] %s: _current_round['exit'] keys: %s", 
+                           key, list(self._current_round["exit"]["time"].keys()))
+            else:
+                logger.warning("[DEBUG EXIT WEAR] %s: _current_round is None, cannot record calculated values!", key)
             
             logger.info(
                 "[EXIT WEAR] %s: slippage=%.6f, fee=%.6f, total=%.6f, duration=%.1fs",
@@ -1713,30 +1817,47 @@ class TriHedgeHoldStrategy:
     def _finalize_round_stats(self) -> None:
         """完成本轮统计，计算总结并保存"""
         if not self._current_round:
+            logger.warning("[DEBUG FINALIZE] _current_round is None, cannot finalize")
             return
         
         try:
+            round_num = self._current_round.get("round", 0)
+            logger.debug("[DEBUG FINALIZE] Round %d: Starting finalization", round_num)
+            logger.debug("[DEBUG FINALIZE] Round %d: _current_round keys: %s", round_num, list(self._current_round.keys()))
+            
             # 计算时间统计
             enter_times = self._current_round["enter"]["time"]
             exit_times = self._current_round["exit"]["time"]
+            logger.debug("[DEBUG FINALIZE] Round %d: enter_times keys: %s, values: %s", 
+                        round_num, list(enter_times.keys()), enter_times)
+            logger.debug("[DEBUG FINALIZE] Round %d: exit_times keys: %s, values: %s", 
+                        round_num, list(exit_times.keys()), exit_times)
             
             # 总时间 = max(所有 enter 时间) + max(所有 exit 时间)
             max_enter_time = max(enter_times.values()) if enter_times else 0.0
             max_exit_time = max(exit_times.values()) if exit_times else 0.0
             total_time = max_enter_time + max_exit_time
+            logger.debug("[DEBUG FINALIZE] Round %d: max_enter_time=%.2f, max_exit_time=%.2f, total_time=%.2f", 
+                        round_num, max_enter_time, max_exit_time, total_time)
             
             # 计算总磨损
             enter_wears = self._current_round["enter"]["wear"]
             exit_wears = self._current_round["exit"]["wear"]
+            logger.debug("[DEBUG FINALIZE] Round %d: enter_wears: %s", round_num, enter_wears)
+            logger.debug("[DEBUG FINALIZE] Round %d: exit_wears: %s", round_num, exit_wears)
             total_enter_wear = sum(enter_wears.values())
             total_exit_wear = sum(exit_wears.values())
             total_wear = total_enter_wear + total_exit_wear
+            logger.debug("[DEBUG FINALIZE] Round %d: total_enter_wear=%.6f, total_exit_wear=%.6f, total_wear=%.6f", 
+                        round_num, total_enter_wear, total_exit_wear, total_wear)
             
             # 计算总价差和手续费
             total_enter_slippage = sum(self._current_round["enter"]["slippage"].values())
             total_exit_slippage = sum(self._current_round["exit"]["slippage"].values())
             total_enter_fee = sum(self._current_round["enter"]["fee"].values())
             total_exit_fee = sum(self._current_round["exit"]["fee"].values())
+            logger.debug("[DEBUG FINALIZE] Round %d: slippage (enter=%.6f, exit=%.6f), fee (enter=%.6f, exit=%.6f)", 
+                        round_num, total_enter_slippage, total_exit_slippage, total_enter_fee, total_exit_fee)
             
             # 填充 summary
             self._current_round["summary"] = {
@@ -1769,7 +1890,15 @@ class TriHedgeHoldStrategy:
             # 保存到 JSON 文件
             self._save_round_stats()
             
+            # 验证 summary 数据完整性
+            logger.debug("[DEBUG FINALIZE] Round %d: Summary before sending: %s", round_num, self._current_round.get("summary", {}))
+            logger.debug("[DEBUG FINALIZE] Round %d: Enter data count: %d, Exit data count: %d", 
+                        round_num, 
+                        len(self._current_round["enter"]["time"]), 
+                        len(self._current_round["exit"]["time"]))
+            
             # 发送 Telegram 通知
+            logger.info("[ROUND SUMMARY] Round %d: Finalizing and sending Telegram notification", round_num)
             self._send_round_notification()
             
             logger.info(
@@ -1799,16 +1928,24 @@ class TriHedgeHoldStrategy:
     def _send_enter_notification(self, key: str, slippage: float, fee: float, wear: float, duration: float) -> None:
         """发送 Enter 阶段的 Telegram 通知"""
         if not self._telegram_notifier:
+            logger.warning("[ENTER NOTIFY] %s: _telegram_notifier is None", key)
             return
         
         try:
             duration_minutes = duration / 60.0
-            message = f"<b>Enter Phase Complete: {key}</b>\n"
+            round_num = self._current_round.get("round", 0) if self._current_round else 0
+            message = f"<b>Round {round_num} - Enter Phase Complete: {key}</b>\n"
             message += f"Slippage: {slippage:.6f}\n"
             message += f"Fee: {fee:.6f}\n"
             message += f"Total Wear: {wear:.6f}\n"
             message += f"Duration: {duration_minutes:.2f} min"
-            self._telegram_notifier.send_message(message)
+            logger.debug("[ENTER NOTIFY] %s: Sending message: %s", key, message)
+            success = self._telegram_notifier.send_message(message)
+            if success:
+                logger.info("[ENTER NOTIFY] %s: Telegram notification sent successfully", key)
+            else:
+                error = getattr(self._telegram_notifier, "last_error", "Unknown error")
+                logger.warning("[ENTER NOTIFY] %s: Failed to send Telegram notification: %s", key, error)
         except Exception as exc:
             logger.error("Error sending enter notification: %s", exc, exc_info=True)
     
@@ -1819,7 +1956,8 @@ class TriHedgeHoldStrategy:
         
         try:
             duration_minutes = duration / 60.0
-            message = f"<b>Exit Phase Complete: {key}</b>\n"
+            round_num = self._current_round.get("round", 0) if self._current_round else 0
+            message = f"<b>Round {round_num} - Exit Phase Complete: {key}</b>\n"
             message += f"Slippage: {slippage:.6f}\n"
             message += f"Fee: {fee:.6f}\n"
             message += f"Total Wear: {wear:.6f}\n"
@@ -1831,11 +1969,16 @@ class TriHedgeHoldStrategy:
     def _send_round_notification(self) -> None:
         """发送本轮统计的 Telegram 通知"""
         if not self._telegram_notifier or not self._current_round:
+            logger.warning("[ROUND NOTIFY] Cannot send - notifier=%s, _current_round=%s", 
+                         "exists" if self._telegram_notifier else "None",
+                         "exists" if self._current_round else "None")
             return
         
         try:
             summary = self._current_round.get("summary", {})
             round_num = self._current_round.get("round", 0)
+            logger.debug("[DEBUG ROUND NOTIFY] Round %d: summary keys: %s", round_num, list(summary.keys()))
+            logger.debug("[DEBUG ROUND NOTIFY] Round %d: summary content: %s", round_num, summary)
             
             # 构建消息
             lines = [f"<b>Round {round_num} Summary</b>"]
@@ -1845,6 +1988,8 @@ class TriHedgeHoldStrategy:
             lines.append("<b>Enter Phase:</b>")
             enter_times = self._current_round["enter"]["time"]
             enter_wears = self._current_round["enter"]["wear"]
+            logger.debug("[DEBUG ROUND NOTIFY] Round %d: enter_times=%s, enter_wears=%s", 
+                        round_num, enter_times, enter_wears)
             for key, duration in enter_times.items():
                 wear = enter_wears.get(key, 0)
                 duration_minutes = duration / 60.0
@@ -1876,7 +2021,15 @@ class TriHedgeHoldStrategy:
             lines.append(f"  Total fee: {summary.get('fee', {}).get('total', 0):.6f}")
             
             message = "\n".join(lines)
-            self._telegram_notifier.send_message(message)
+            logger.info("[ROUND NOTIFY] Round %d: Sending Round Summary to Telegram (length=%d chars)", 
+                       round_num, len(message))
+            logger.debug("[ROUND NOTIFY] Round %d: Message content:\n%s", round_num, message)
+            success = self._telegram_notifier.send_message(message)
+            if success:
+                logger.info("[ROUND NOTIFY] Round %d: Round Summary sent successfully to Telegram", round_num)
+            else:
+                error = getattr(self._telegram_notifier, "last_error", "Unknown error")
+                logger.warning("[ROUND NOTIFY] Round %d: Failed to send Round Summary: %s", round_num, error)
         except Exception as exc:
             logger.error("Error sending round notification: %s", exc, exc_info=True)
     
