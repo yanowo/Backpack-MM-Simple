@@ -1439,6 +1439,17 @@ class PerpGridStrategy(PerpetualMarketMaker):
         Returns:
             是否成功掛單
         """
+        # 避免在倉位已清空的情況下繼續掛賣單導致開空
+        if self.grid_type == "long":
+            net_position = self.get_net_position()
+            if net_position <= 0:
+                logger.warning(
+                    "做多網格：當前無多頭倉位 (淨倉位: %.4f)，跳過平多單 (開倉價格: %.4f, 數量: %.4f)",
+                    net_position, open_price, quantity
+                )
+                # 從待重試隊列中移除此訂單（如果存在）
+                return True  # 返回 True 表示不需要再重試
+        
         # 找到下一個更高的網格點位
         next_price = None
         for price in sorted(self.grid_levels):
@@ -1483,9 +1494,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
             if net_position >= quantity * 0.9:
                 reduce_only = True
                 logger.debug("持倉足夠，使用 reduce_only 掛平倉單")
-            else:
+            elif self.grid_type == "long" and net_position <= 0:
+                # 做多網格且無多頭倉位，直接跳過
                 logger.warning(
-                    "多頭持倉不足 (當前: %.4f, 需要: %.4f)，改為不使用 reduce_only",
+                    "做多網格：多頭持倉不足且已無倉位 (當前: %.4f)，跳過平多單",
+                    net_position
+                )
+                return True
+            else:
+                # 對於中性網格或仍有部分倉位的情況，使用 reduce_only=True
+                reduce_only = True
+                logger.warning(
+                    "多頭持倉不足 (當前: %.4f, 需要: %.4f)，仍使用 reduce_only=True 以避免開新倉",
                     net_position, quantity
                 )
 
@@ -1505,21 +1525,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
             # 檢查是否是 post_only 導致的錯誤（價格會立即成交）
             is_post_only_error = "immediately match" in error_msg.lower() or "would cross" in error_msg.lower()
             
-            # 如果是 reduce-only 錯誤，重試不使用 reduce_only
+            # 如果是 reduce-only 錯誤，加入待重試隊列，等待倉位更新後重試
             if "Reduce only" in error_msg and reduce_only:
-                logger.info("重試不使用 reduce_only...")
-                time.sleep(0.5)
-                result = self.open_short(
-                    quantity=quantity,
-                    price=next_price,
-                    order_type="Limit",
-                    reduce_only=False,
-                    post_only=True
-                )
-                if isinstance(result, dict) and "error" in result:
-                    logger.error("重試仍失敗: %s", result.get('error', ''))
-                    self._add_pending_close_order(open_price, quantity, 'long', retry_count)
-                    return False
+                logger.warning("reduce_only 報錯，持倉可能還沒更新，加入待重試隊列...")
+                self._add_pending_close_order(open_price, quantity, 'long', retry_count)
+                return False
             # 如果是 post_only 錯誤，重試不使用 post_only（接受 taker 成交）
             elif is_post_only_error:
                 logger.warning("平倉價格會立即成交，重試不使用 post_only（將作為 taker 成交）...")
@@ -1564,6 +1574,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
         Returns:
             是否成功掛單
         """
+        # 對於做空網格，如果當前沒有空頭倉位，則不應該掛平空單
+        # 避免在倉位已清空的情況下繼續掛買單導致開多
+        if self.grid_type == "short":
+            net_position = self.get_net_position()
+            if net_position >= 0:
+                logger.warning(
+                    "做空網格：當前無空頭倉位 (淨倉位: %.4f)，跳過平空單 (開倉價格: %.4f, 數量: %.4f)",
+                    net_position, open_price, quantity
+                )
+                # 從待重試隊列中移除此訂單（如果存在）
+                return True  # 返回 True 表示不需要再重試
+        
         # 找到下一個更低的網格點位
         next_price = None
         for price in sorted(self.grid_levels, reverse=True):
@@ -1607,9 +1629,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
             if net_position <= -quantity * 0.9:
                 reduce_only = True
                 logger.debug("持倉足夠，使用 reduce_only 掛平倉單")
-            else:
+            elif self.grid_type == "short" and net_position >= 0:
+                # 做空網格且無空頭倉位，直接跳過
                 logger.warning(
-                    "空頭持倉不足 (當前: %.4f, 需要: %.4f)，改為不使用 reduce_only",
+                    "做空網格：空頭持倉不足且已無倉位 (當前: %.4f)，跳過平空單",
+                    net_position
+                )
+                return True
+            else:
+                # 對於中性網格或仍有部分倉位的情況，使用 reduce_only=True
+                reduce_only = True
+                logger.warning(
+                    "空頭持倉不足 (當前: %.4f, 需要: %.4f)，仍使用 reduce_only=True",
                     net_position, -quantity
                 )
 
@@ -1629,21 +1660,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
             # 檢查是否是 post_only 導致的錯誤（價格會立即成交）
             is_post_only_error = "immediately match" in error_msg.lower() or "would cross" in error_msg.lower()
             
-            # 如果是 reduce-only 錯誤，重試不使用 reduce_only
+            # 如果是 reduce-only 錯誤，加入待重試隊列，等待倉位更新後重試
             if "Reduce only" in error_msg and reduce_only:
-                logger.info("重試不使用 reduce_only...")
-                time.sleep(0.5)
-                result = self.open_long(
-                    quantity=quantity,
-                    price=next_price,
-                    order_type="Limit",
-                    reduce_only=False,
-                    post_only=True
-                )
-                if isinstance(result, dict) and "error" in result:
-                    logger.error("重試仍失敗: %s", result.get('error', ''))
-                    self._add_pending_close_order(open_price, quantity, 'short', retry_count)
-                    return False
+                logger.warning("reduce_only 報錯，持倉可能還沒更新，加入待重試隊列...")
+                self._add_pending_close_order(open_price, quantity, 'short', retry_count)
+                return False
             # 如果是 post_only 錯誤，重試不使用 post_only（接受 taker 成交）
             elif is_post_only_error:
                 logger.warning("平倉價格會立即成交，重試不使用 post_only（將作為 taker 成交）...")
