@@ -1439,6 +1439,15 @@ class PerpGridStrategy(PerpetualMarketMaker):
         Returns:
             是否成功掛單
         """
+        # 確保數量符合交易所精度要求
+        quantity = round_to_precision(quantity, self.base_precision)
+        if quantity < self.min_order_size:
+            logger.warning(
+                "平多單數量 %.8f 小於最小訂單量 %.8f，跳過",
+                quantity, self.min_order_size
+            )
+            return True
+        
         # 避免在倉位已清空的情況下繼續掛賣單導致開空
         if self.grid_type == "long":
             net_position = self.get_net_position()
@@ -1574,6 +1583,15 @@ class PerpGridStrategy(PerpetualMarketMaker):
         Returns:
             是否成功掛單
         """
+        # 確保數量符合交易所精度要求
+        quantity = round_to_precision(quantity, self.base_precision)
+        if quantity < self.min_order_size:
+            logger.warning(
+                "平空單數量 %.8f 小於最小訂單量 %.8f，跳過",
+                quantity, self.min_order_size
+            )
+            return True
+        
         # 對於做空網格，如果當前沒有空頭倉位，則不應該掛平空單
         # 避免在倉位已清空的情況下繼續掛買單導致開多
         if self.grid_type == "short":
@@ -1707,6 +1725,15 @@ class PerpGridStrategy(PerpetualMarketMaker):
             position_type: 'long' 或 'short'
             current_retry: 當前重試次數
         """
+        # 確保數量符合交易所精度要求
+        quantity = round_to_precision(quantity, self.base_precision)
+        if quantity < self.min_order_size:
+            logger.warning(
+                "待重試平倉單數量 %.8f 小於最小訂單量 %.8f，跳過",
+                quantity, self.min_order_size
+            )
+            return
+        
         next_retry = current_retry + 1
         if next_retry > self.max_close_order_retries:
             logger.warning(
