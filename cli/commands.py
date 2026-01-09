@@ -11,7 +11,7 @@ from api.aster_client import AsterClient
 from api.paradex_client import ParadexClient
 from api.lighter_client import LighterClient
 from api.apex_client import ApexClient
-from ws_client.client import BackpackWebSocket
+from ws_client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
 from strategies.maker_taker_hedge import MakerTakerHedgeStrategy

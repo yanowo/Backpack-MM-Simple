@@ -250,7 +250,7 @@ class _MakerTakerHedgeMixin:
 
         if residual_delta is None:
             # 對沖提交失敗，保留完整目標量
-            self._hedge_residuals[hedge_side] = target_quantity
+            self._hedge_residuals[hedge_side] = hedge_qty
             return
 
         self._hedge_residuals["Bid"] = 0.0
@@ -317,6 +317,18 @@ class _MakerTakerHedgeMixin:
                 order["autoLend"] = True
 
             if isinstance(self, PerpetualMarketMaker):
+                # reduceOnly 需要確保對沖數量不超過實際倉位
+                actual_position = current_position if current_position is not None else self._get_tracked_position()
+                if actual_position is not None:
+                    max_reduce = abs(actual_position)
+                    if remaining_quantity > max_reduce:
+                        logger.warning(
+                            "對沖數量 %.8f 超過當前倉位 %.8f，調整為最大可平倉量",
+                            remaining_quantity,
+                            max_reduce,
+                        )
+                        remaining_quantity = round_to_precision(max_reduce, self.base_precision)
+                        order["quantity"] = str(remaining_quantity)
                 order["reduceOnly"] = True
 
             logger.info(
