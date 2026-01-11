@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from api.bp_client import BPClient
 from api.aster_client import AsterClient
 from api.lighter_client import LighterClient
-from ws_client.client import BackpackWebSocket
+from ws_client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
 from logger import setup_logger
@@ -2295,20 +2295,25 @@ class MarketMaker:
         # 如果使用 Websea，不需要 WebSocket 數據流
         if self.ws is None:
             return
+        
+        # 構建完整的頻道名稱（包含 symbol）
+        depth_channel = f"depth.{self.symbol}"
+        ticker_channel = f"bookTicker.{self.symbol}"
+        order_update_channel = f"account.orderUpdate.{self.symbol}"
             
         # 檢查深度流訂閲
-        if "depth" not in self.ws.subscriptions:
+        if depth_channel not in self.ws.subscriptions:
             logger.info("重新訂閲深度數據流...")
             self.ws.initialize_orderbook()  # 重新初始化訂單簿
             self.ws.subscribe_depth()
         
         # 檢查行情數據訂閲
-        if "bookTicker" not in self.ws.subscriptions:
+        if ticker_channel not in self.ws.subscriptions:
             logger.info("重新訂閲行情數據...")
             self.ws.subscribe_bookTicker()
         
         # 檢查私有訂單更新流
-        if f"account.orderUpdate.{self.symbol}" not in self.ws.subscriptions:
+        if order_update_channel not in self.ws.subscriptions:
             logger.info("重新訂閲私有訂單更新流...")
             self.subscribe_order_updates()
 
@@ -2363,16 +2368,21 @@ class MarketMaker:
             # 先確保 WebSocket 連接可用
             connection_status = self.check_ws_connection()
             if connection_status and self.ws is not None:
+                # 構建完整的頻道名稱
+                depth_channel = f"depth.{self.symbol}"
+                ticker_channel = f"bookTicker.{self.symbol}"
+                order_update_channel = f"account.orderUpdate.{self.symbol}"
+                
                 # 初始化訂單簿和數據流
                 if not self.ws.orderbook["bids"] and not self.ws.orderbook["asks"]:
                     self.ws.initialize_orderbook()
                 
                 # 檢查並確保所有數據流訂閲
-                if "depth" not in self.ws.subscriptions:
+                if depth_channel not in self.ws.subscriptions:
                     self.ws.subscribe_depth()
-                if "bookTicker" not in self.ws.subscriptions:
+                if ticker_channel not in self.ws.subscriptions:
                     self.ws.subscribe_bookTicker()
-                if f"account.orderUpdate.{self.symbol}" not in self.ws.subscriptions:
+                if order_update_channel not in self.ws.subscriptions:
                     self.subscribe_order_updates()
             
             while time.time() - start_time < duration_seconds and not self._stop_flag:
