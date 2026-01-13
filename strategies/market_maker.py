@@ -558,7 +558,9 @@ class MarketMaker:
                 continue
 
             maker = fill.get('is_maker', True)
-            fee = fill.get('fee', 0.0)
+            # 確保 fee 是有效數字，因為 fill.get('fee', 0.0) 在 key 存在但值為 None 時返回 None
+            fee_raw = fill.get('fee')
+            fee = float(fee_raw) if fee_raw is not None else 0.0
             fee_asset = fill.get('fee_asset') or self.quote_asset
 
             normalized_side = None
@@ -606,9 +608,9 @@ class MarketMaker:
                         'order_id': t.order_id,
                         'symbol': t.symbol,
                         'side': t.side,
-                        'price': float(t.price) if t.price else None,
-                        'quantity': float(t.size) if t.size else None,  # TradeInfo 使用 size
-                        'fee': float(t.fee) if t.fee else None,
+                        'price': float(t.price) if t.price is not None else None,
+                        'quantity': float(t.size) if t.size is not None else None,  # TradeInfo 使用 size
+                        'fee': float(t.fee) if t.fee is not None else 0.0,  # fee 可以是 0，不能用 if t.fee 判斷
                         'fee_asset': t.fee_asset,
                         'is_maker': t.is_maker,
                         'timestamp': t.timestamp,
@@ -796,6 +798,15 @@ class MarketMaker:
 
         if register_processed:
             self._register_processed_fill(trade_id, timestamp or 0)
+
+        # 確保 fee 是有效數字，避免 NoneType 格式化錯誤
+        if fee is None:
+            fee = 0.0
+        else:
+            try:
+                fee = float(fee)
+            except (TypeError, ValueError):
+                fee = 0.0
 
         fee_asset = fee_asset or self.quote_asset
 
@@ -2117,8 +2128,24 @@ class MarketMaker:
         )
 
         if self.active_buy_orders and self.active_sell_orders:
-            buy_price = float(self.active_buy_orders[-1].get('price', 0))
-            sell_price = float(self.active_sell_orders[0].get('price', 0))
+            # 支援 dict 或 OrderInfo/OrderResult dataclass
+            last_buy = self.active_buy_orders[-1]
+            first_sell = self.active_sell_orders[0]
+            
+            if hasattr(last_buy, 'price'):
+                buy_price = float(last_buy.price or 0)
+            elif isinstance(last_buy, dict):
+                buy_price = float(last_buy.get('price', 0) or 0)
+            else:
+                buy_price = 0
+            
+            if hasattr(first_sell, 'price'):
+                sell_price = float(first_sell.price or 0)
+            elif isinstance(first_sell, dict):
+                sell_price = float(first_sell.get('price', 0) or 0)
+            else:
+                sell_price = 0
+            
             spread = sell_price - buy_price
             spread_pct = (spread / buy_price * 100) if buy_price > 0 else 0
             order_line = f"買 {buy_price:.3f} | 賣 {sell_price:.3f} | 價差 {spread:.3f} ({spread_pct:.3f}%)"

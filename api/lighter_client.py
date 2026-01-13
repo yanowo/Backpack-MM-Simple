@@ -576,7 +576,7 @@ class LighterClient(BaseExchangeClient):
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.base_url: str = config.get("base_url").rstrip("/")
+        self.base_url: str = (config.get("base_url") or "https://mainnet.lighter.xyz").rstrip("/")
         self.verify_ssl: bool = bool(config.get("verify_ssl", True))
         self.timeout: float = float(config.get("timeout", DEFAULT_HTTP_TIMEOUT) or DEFAULT_HTTP_TIMEOUT)
         self.session = requests.Session()
@@ -1814,7 +1814,7 @@ class LighterClient(BaseExchangeClient):
                         symbol=symbol,
                         side=normalized.get("side"),
                         price=normalized.get("price"),
-                        quantity=normalized.get("size"),
+                        size=normalized.get("size"),
                         fee=normalized.get("fee"),
                         fee_asset=normalized.get("fee_asset"),
                         is_maker=normalized.get("is_maker"),
