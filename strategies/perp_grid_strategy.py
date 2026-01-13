@@ -965,7 +965,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
                                     side = 'Bid'
                                 elif side.upper() in ['SELL', 'SHORT', 'ASK']:
                                     side = 'Ask'
-                            quantity = float(order_result.filled_quantity or order_result.quantity or self.order_quantity)
+                            # OrderResult 使用 filled_size 和 size，不是 filled_quantity 和 quantity
+                            quantity = float(order_result.filled_size or order_result.size or self.order_quantity)
                             order_dict = order_result.raw if hasattr(order_result, 'raw') and order_result.raw else {'id': order_result.order_id}
                             self._record_grid_order(order_dict, price, side, quantity)
                             placed_orders += 1

@@ -379,7 +379,8 @@ class GridStrategy(MarketMaker):
                                     logger.warning("無法匹配訂單 %s，使用返回數據", order_id)
                                     price = result_price
                                     side = result_side
-                                    quantity = float(order_result.quantity) if order_result.quantity else self.order_quantity
+                                    # OrderResult 使用 size 而不是 quantity
+                                    quantity = float(order_result.size) if order_result.size else self.order_quantity
                                     self._record_grid_order(order_id, price, side, quantity)
                                     placed_orders += 1
                         logger.info("批量下單成功: %d 個訂單", placed_orders)
