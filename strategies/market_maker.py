@@ -114,16 +114,45 @@ class MarketMaker:
         self.session_quote_volume = 0.0
 
         # 初始化市場限制
-        self.market_limits = self.client.get_market_limits(symbol)
-        if not self.market_limits:
+        market_limits_response = self.client.get_market_limits(symbol)
+        if not market_limits_response.success:
+            raise ValueError(f"無法獲取 {symbol} 的市場限制: {market_limits_response.error_message}")
+        
+        market_info = market_limits_response.data
+        if not market_info:
             raise ValueError(f"無法獲取 {symbol} 的市場限制")
         
-        self.base_asset = self.market_limits['base_asset']
-        self.quote_asset = self.market_limits['quote_asset']
-        self.base_precision = self.market_limits['base_precision']
-        self.quote_precision = self.market_limits['quote_precision']
-        self.min_order_size = float(self.market_limits['min_order_size'])
-        self.tick_size = float(self.market_limits['tick_size'])
+        # 保存原始數據供後續使用（支援 MarketInfo dataclass 或 dict）
+        if hasattr(market_info, 'raw') and market_info.raw:
+            self.market_limits = market_info.raw
+        elif isinstance(market_info, dict):
+            self.market_limits = market_info
+        else:
+            # MarketInfo dataclass，轉換為 dict 方便存取
+            self.market_limits = {
+                'base_asset': getattr(market_info, 'base_asset', symbol),
+                'quote_asset': getattr(market_info, 'quote_asset', ''),
+                'base_precision': getattr(market_info, 'base_precision', 8),
+                'quote_precision': getattr(market_info, 'quote_precision', 8),
+                'min_order_size': getattr(market_info, 'min_order_size', 0),
+                'tick_size': getattr(market_info, 'tick_size', 0.00000001),
+            }
+        
+        # 從 MarketInfo dataclass 或 dict 取值
+        if hasattr(market_info, 'base_asset'):
+            self.base_asset = market_info.base_asset
+            self.quote_asset = market_info.quote_asset
+            self.base_precision = market_info.base_precision
+            self.quote_precision = market_info.quote_precision
+            self.min_order_size = float(market_info.min_order_size)
+            self.tick_size = float(market_info.tick_size)
+        else:
+            self.base_asset = market_info.get('base_asset', symbol)
+            self.quote_asset = market_info.get('quote_asset', '')
+            self.base_precision = market_info.get('base_precision', 8)
+            self.quote_precision = market_info.get('quote_precision', 8)
+            self.min_order_size = float(market_info.get('min_order_size', 0))
+            self.tick_size = float(market_info.get('tick_size', 0.00000001))
         
         # 交易量統計
         self.maker_buy_volume = 0
@@ -249,38 +278,40 @@ class MarketMaker:
         """獲取總餘額，包含普通餘額和抵押品餘額"""
         try:
             # 獲取普通餘額
-            balances = self.client.get_balance()
-            logger.debug(f"普通餘額原始數據: {balances}")
-            if isinstance(balances, dict) and "error" in balances:
-                logger.error(f"獲取普通餘額失敗: {balances['error']}")
+            balance_response = self.client.get_balance()
+            logger.debug(f"普通餘額原始數據: {balance_response.raw}")
+            if not balance_response.success:
+                logger.error(f"獲取普通餘額失敗: {balance_response.error_message}")
                 return None
 
             # 獲取抵押品餘額
-            collateral = self.client.get_collateral()
-            logger.debug(f"抵押品原始數據: {collateral}")
-            if isinstance(collateral, dict) and "error" in collateral:
-                logger.warning(f"獲取抵押品餘額失敗: {collateral['error']}")
+            collateral_response = self.client.get_collateral()
+            logger.debug(f"抵押品原始數據: {collateral_response.raw}")
+            if not collateral_response.success:
+                logger.warning(f"獲取抵押品餘額失敗: {collateral_response.error_message}")
                 collateral_assets = []
             else:
-                collateral_assets = collateral.get('assets') or collateral.get('collateral', [])
+                # 從 raw 數據中提取抵押品資產
+                raw_data = collateral_response.raw or {}
+                collateral_assets = raw_data.get('assets') or raw_data.get('collateral', [])
 
             logger.debug(f"抵押品資產列表: {collateral_assets}")
 
             # 初始化總餘額字典
             total_balances = {}
 
-            # 處理普通餘額
-            if isinstance(balances, dict):
-                for asset, details in balances.items():
-                    available = float(details.get('available', 0))
-                    locked = float(details.get('locked', 0))
-                    total_balances[asset] = {
-                        'available': available,
-                        'locked': locked,
-                        'total': available + locked,
-                        'collateral_available': 0,
-                        'collateral_total': 0
-                    }
+            # 處理普通餘額 (List[BalanceInfo])
+            for balance_info in balance_response.data:
+                asset = balance_info.asset
+                available = float(balance_info.available or 0)
+                locked = float(balance_info.locked or 0)
+                total_balances[asset] = {
+                    'available': available,
+                    'locked': locked,
+                    'total': available + locked,
+                    'collateral_available': 0,
+                    'collateral_total': 0
+                }
 
             logger.debug(f"處理普通餘額後的 total_balances: {total_balances}")
 
@@ -559,14 +590,36 @@ class MarketMaker:
 
     def _normalize_fill_history_response(self, response) -> List[Dict[str, Any]]:
         """將 REST API 回傳的成交資料轉換為統一格式"""
-        if isinstance(response, dict) and 'error' in response:
-            logger.error(f"獲取成交歷史失敗: {response['error']}")
-            return []
+        # 支援新的 ApiResponse 格式
+        if hasattr(response, 'success'):
+            if not response.success:
+                logger.error(f"獲取成交歷史失敗: {response.error_message}")
+                return []
+            # 如果 data 是空列表，直接返回
+            if response.data is not None and isinstance(response.data, list):
+                if len(response.data) == 0:
+                    return []
+                # 如果是 List[TradeInfo]，直接轉換
+                if hasattr(response.data[0], 'trade_id'):
+                    return [{
+                        'fill_id': t.trade_id,
+                        'order_id': t.order_id,
+                        'symbol': t.symbol,
+                        'side': t.side,
+                        'price': float(t.price) if t.price else None,
+                        'quantity': float(t.size) if t.size else None,  # TradeInfo 使用 size
+                        'fee': float(t.fee) if t.fee else None,
+                        'fee_asset': t.fee_asset,
+                        'is_maker': t.is_maker,
+                        'timestamp': t.timestamp,
+                    } for t in response.data]
+            data = response.raw
+        else:
+            data = response
 
-        data = response
-        if isinstance(response, dict):
+        if isinstance(data, dict):
             # APEX 格式: {"data": {"orders": [...]}}
-            inner_data = response.get('data', response)
+            inner_data = data.get('data', data)
             if isinstance(inner_data, dict):
                 # APEX 成交在 orders 字段中
                 data = inner_data.get('orders', inner_data.get('fills', inner_data))
@@ -574,6 +627,10 @@ class MarketMaker:
                 data = inner_data
 
         if not isinstance(data, list):
+            # 只在非空 dict（不是純狀態響應）時顯示警告
+            if isinstance(data, dict) and data.get('orders') is None and data.get('fills') is None:
+                # APEX 返回 {"code": 0, "msg": "", ...} 表示沒有成交，這是正常的
+                return []
             logger.warning(f"成交歷史返回格式異常: {type(data)}")
             return []
 
@@ -1339,15 +1396,16 @@ class MarketMaker:
             price = self.ws.get_current_price()
         
         if price is None:
-            ticker = self.client.get_ticker(self.symbol)
-            if isinstance(ticker, dict) and "error" in ticker:
-                logger.error(f"獲取價格失敗: {ticker['error']}")
+            ticker_response = self.client.get_ticker(self.symbol)
+            if not ticker_response.success:
+                logger.error(f"獲取價格失敗: {ticker_response.error_message}")
                 return None
             
-            if "lastPrice" not in ticker:
-                logger.error(f"獲取到的價格數據不完整: {ticker}")
+            ticker = ticker_response.data
+            if ticker.last_price is None:
+                logger.error(f"獲取到的價格數據不完整: {ticker_response.raw}")
                 return None
-            return float(ticker['lastPrice'])
+            return float(ticker.last_price)
         return price
     
     def get_market_depth(self):
@@ -1358,18 +1416,17 @@ class MarketMaker:
             bid_price, ask_price = self.ws.get_bid_ask()
         
         if bid_price is None or ask_price is None:
-            order_book = self.client.get_order_book(self.symbol)
-            if isinstance(order_book, dict) and "error" in order_book:
-                logger.error(f"獲取訂單簿失敗: {order_book['error']}")
+            orderbook_response = self.client.get_order_book(self.symbol)
+            if not orderbook_response.success:
+                logger.error(f"獲取訂單簿失敗: {orderbook_response.error_message}")
                 return None, None
             
-            bids = order_book.get('bids', [])
-            asks = order_book.get('asks', [])
-            if not bids or not asks:
+            orderbook = orderbook_response.data
+            if not orderbook.bids or not orderbook.asks:
                 return None, None
             
-            highest_bid = float(bids[0][0]) if bids else None
-            lowest_ask = float(asks[0][0]) if asks else None
+            highest_bid = float(orderbook.bids[0].price)
+            lowest_ask = float(orderbook.asks[0].price)
             
             return highest_bid, lowest_ask
         
@@ -1612,15 +1669,16 @@ class MarketMaker:
             return
         
         # 執行訂單
-        result = self.client.execute_order(order_details)
+        order_response = self.client.execute_order(order_details)
         
-        if isinstance(result, dict) and "error" in result:
-            logger.error(f"重新平衡訂單執行失敗: {result['error']}")
+        if not order_response.success:
+            logger.error(f"重新平衡訂單執行失敗: {order_response.error_message}")
         else:
             logger.info(f"重新平衡訂單執行成功")
             # 記錄這是一個重平衡訂單
-            if 'id' in result and self._db_available():
-                self.db.record_rebalance_order(result['id'], self.symbol)
+            order_result = order_response.data
+            if order_result and order_result.order_id and self._db_available():
+                self.db.record_rebalance_order(order_result.order_id, self.symbol)
         
         logger.info("倉位重新平衡完成")
     
@@ -1718,13 +1776,13 @@ class MarketMaker:
                 "autoLend": True
             }
             res = self.client.execute_order(order)
-            if isinstance(res, dict) and "error" in res and "POST_ONLY_TAKER" in str(res["error"]):
+            if not res.success and "POST_ONLY_TAKER" in str(res.error_message or ""):
                 logger.info("調整買單價格並重試...")
                 order["price"] = str(round_to_tick_size(float(order["price"]) - self.tick_size, self.tick_size))
                 res = self.client.execute_order(order)
             
             # 特殊處理資金不足錯誤
-            if isinstance(res, dict) and "error" in res and "INSUFFICIENT_FUNDS" in str(res["error"]):
+            if not res.success and "INSUFFICIENT_FUNDS" in str(res.error_message or ""):
                 logger.warning(f"買單資金不足，可能需要手動贖回抵押品或等待自動贖回生效")
             
             return qty, order["price"], res
@@ -1738,11 +1796,11 @@ class MarketMaker:
         buy_order_count = 0
         for future in buy_futures:
             qty, p_used, res = future.result()
-            if isinstance(res, dict) and "error" in res:
-                logger.error(f"買單失敗: {res['error']}")
+            if not res.success:
+                logger.error(f"買單失敗: {res.error_message}")
             else:
                 logger.info(f"買單成功: 價格 {p_used}, 數量 {qty}")
-                self.active_buy_orders.append(res)
+                self.active_buy_orders.append(res.raw)
                 self.orders_placed += 1
                 buy_order_count += 1
 
@@ -1762,13 +1820,13 @@ class MarketMaker:
                 "autoLend": True
             }
             res = self.client.execute_order(order)
-            if isinstance(res, dict) and "error" in res and "POST_ONLY_TAKER" in str(res["error"]):
+            if not res.success and "POST_ONLY_TAKER" in str(res.error_message or ""):
                 logger.info("調整賣單價格並重試...")
                 order["price"] = str(round_to_tick_size(float(order["price"]) + self.tick_size, self.tick_size))
                 res = self.client.execute_order(order)
             
             # 特殊處理資金不足錯誤
-            if isinstance(res, dict) and "error" in res and "INSUFFICIENT_FUNDS" in str(res["error"]):
+            if not res.success and "INSUFFICIENT_FUNDS" in str(res.error_message or ""):
                 logger.warning(f"賣單資金不足，可能需要手動贖回抵押品或等待自動贖回生效")
             
             return qty, order["price"], res
@@ -1782,11 +1840,11 @@ class MarketMaker:
         sell_order_count = 0
         for future in sell_futures:
             qty, p_used, res = future.result()
-            if isinstance(res, dict) and "error" in res:
-                logger.error(f"賣單失敗: {res['error']}")
+            if not res.success:
+                logger.error(f"賣單失敗: {res.error_message}")
             else:
                 logger.info(f"賣單成功: 價格 {p_used}, 數量 {qty}")
-                self.active_sell_orders.append(res)
+                self.active_sell_orders.append(res.raw)
                 self.orders_placed += 1
                 sell_order_count += 1
             
@@ -1794,12 +1852,13 @@ class MarketMaker:
     
     def cancel_existing_orders(self):
         """取消所有現有訂單"""
-        open_orders = self.client.get_open_orders(self.symbol)
+        orders_response = self.client.get_open_orders(self.symbol)
         
-        if isinstance(open_orders, dict) and "error" in open_orders:
-            logger.error(f"獲取訂單失敗: {open_orders['error']}")
+        if not orders_response.success:
+            logger.error(f"獲取訂單失敗: {orders_response.error_message}")
             return
         
+        open_orders = orders_response.data
         if not open_orders:
             logger.info("沒有需要取消的現有訂單")
             self.active_buy_orders = []
@@ -1810,10 +1869,10 @@ class MarketMaker:
         
         try:
             # 嘗試批量取消
-            result = self.client.cancel_all_orders(self.symbol)
+            cancel_response = self.client.cancel_all_orders(self.symbol)
             
-            if isinstance(result, dict) and "error" in result:
-                logger.error(f"批量取消訂單失敗: {result['error']}")
+            if not cancel_response.success:
+                logger.error(f"批量取消訂單失敗: {cancel_response.error_message}")
                 logger.info("嘗試逐個取消...")
                 
                 # 初始化線程池
@@ -1821,8 +1880,8 @@ class MarketMaker:
                     cancel_futures = []
                     
                     # 提交取消訂單任務
-                    for order in open_orders:
-                        order_id = order.get('id')
+                    for order_info in open_orders:
+                        order_id = order_info.order_id if hasattr(order_info, 'order_id') else order_info.get('id')
                         if not order_id:
                             continue
                         
@@ -1839,8 +1898,8 @@ class MarketMaker:
                     for order_id, future in cancel_futures:
                         try:
                             res = future.result()
-                            if isinstance(res, dict) and "error" in res:
-                                logger.error(f"取消訂單 {order_id} 失敗: {res['error']}")
+                            if not res.success:
+                                logger.error(f"取消訂單 {order_id} 失敗: {res.error_message}")
                             else:
                                 logger.info(f"取消訂單 {order_id} 成功")
                                 self.orders_cancelled += 1
@@ -1856,7 +1915,8 @@ class MarketMaker:
         time.sleep(1)
         
         # 檢查是否還有未取消的訂單
-        remaining_orders = self.client.get_open_orders(self.symbol)
+        remaining_response = self.client.get_open_orders(self.symbol)
+        remaining_orders = remaining_response.data if remaining_response.success else []
         if remaining_orders and len(remaining_orders) > 0:
             logger.warning(f"警告: 仍有 {len(remaining_orders)} 個未取消的訂單")
         else:
@@ -1867,30 +1927,31 @@ class MarketMaker:
         self.active_sell_orders = []
     
     def check_order_fills(self):
-        open_orders = self.client.get_open_orders(self.symbol)
-        if isinstance(open_orders, dict) and "error" in open_orders:
-            logger.error(f"獲取訂單失敗: {open_orders['error']}")
+        orders_response = self.client.get_open_orders(self.symbol)
+        if not orders_response.success:
+            logger.error(f"獲取訂單失敗: {orders_response.error_message}")
             return []
+        open_orders = orders_response.data
         current_order_ids = set()
         if open_orders:
-            for order in open_orders:
-                order_id = order.get('id')
+            for order_info in open_orders:
+                order_id = order_info.order_id if hasattr(order_info, 'order_id') else order_info.get('id')
                 if order_id:
                     current_order_ids.add(order_id)
         prev_buy_orders = len(self.active_buy_orders)
         prev_sell_orders = len(self.active_sell_orders)
         filled_order_ids = []
         for order in self.active_buy_orders + self.active_sell_orders:
-            order_id = order.get('id')
+            order_id = order.get('id') if isinstance(order, dict) else getattr(order, 'order_id', None)
             if order_id and order_id not in current_order_ids:
                 filled_order_ids.append(order_id)
         filled_trades = []
         if filled_order_ids:
             try:
-                recent_fills_raw = self.client.get_fill_history(self.symbol, limit=50)
-                if recent_fills_raw and not (isinstance(recent_fills_raw, dict) and "error" in recent_fills_raw):
+                fills_response = self.client.get_fill_history(self.symbol, limit=50)
+                if fills_response.success:
                     # 使用統一的格式處理方法
-                    recent_fills = self._normalize_fill_history_response(recent_fills_raw)
+                    recent_fills = self._normalize_fill_history_response(fills_response)
                     if not hasattr(self, '_processed_fill_ids'):
                         self._processed_fill_ids = set()
                     for fill in recent_fills:
@@ -1951,9 +2012,14 @@ class MarketMaker:
         active_sell_orders = []
         if open_orders:
             for order in open_orders:
-                if order.get('side') == 'Bid' or order.get('side') == 'BUY':
+                # 支援 OrderInfo dataclass 或 dict
+                if hasattr(order, 'side'):
+                    side = str(order.side).upper()
+                else:
+                    side = str(order.get('side', '')).upper()
+                if side in ('BID', 'BUY'):
                     active_buy_orders.append(order)
-                elif order.get('side') == 'Ask' or order.get('side') == 'SELL':
+                elif side in ('ASK', 'SELL'):
                     active_sell_orders.append(order)
         self.active_buy_orders = active_buy_orders
         self.active_sell_orders = active_sell_orders

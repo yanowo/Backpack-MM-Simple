@@ -659,14 +659,21 @@ class PerpGridStrategy(PerpetualMarketMaker):
     def _sync_orders_with_exchange(self) -> None:
         """與交易所同步訂單狀態，找出已成交但未被檢測到的訂單"""
         try:
-            open_orders = self.client.get_open_orders(self.symbol) or []
+            open_orders_response = self.client.get_open_orders(self.symbol)
         except Exception as exc:
             logger.error("同步訂單狀態失敗: %s", exc)
             return
         
-        if isinstance(open_orders, dict) and open_orders.get('error'):
-            logger.error("同步訂單狀態返回錯誤: %s", open_orders['error'])
+        if not open_orders_response.success:
+            logger.error("同步訂單狀態返回錯誤: %s", open_orders_response.error_message)
             return
+        
+        open_orders = open_orders_response.data or []
+        # 轉換為字典列表用於後續處理
+        if hasattr(open_orders, '__iter__') and open_orders:
+            first = next(iter(open_orders), None)
+            if hasattr(first, 'raw'):
+                open_orders = [o.raw if o.raw else {} for o in open_orders]
 
         exchange_order_ids = self._update_aliases_from_open_orders(open_orders)
         
@@ -730,16 +737,21 @@ class PerpGridStrategy(PerpetualMarketMaker):
     def _initialize_grid_prices(self) -> bool:
         """初始化網格價格點位"""
         # 強制使用REST API獲取準確的初始價格
-        ticker = self.client.get_ticker(self.symbol)
-        if isinstance(ticker, dict) and "error" in ticker:
-            logger.error("無法獲取當前價格: %s", ticker.get('error'))
+        ticker_response = self.client.get_ticker(self.symbol)
+        if not ticker_response.success:
+            logger.error("無法獲取當前價格: %s", ticker_response.error_message)
             return False
         
-        if "lastPrice" not in ticker:
-            logger.error("Ticker數據不完整: %s", ticker)
-            return False
+        ticker = ticker_response.data
+        # 支援 TickerInfo dataclass
+        if hasattr(ticker, 'last_price'):
+            current_price = float(ticker.last_price or 0)
+        else:
+            if "lastPrice" not in ticker:
+                logger.error("Ticker數據不完整: %s", ticker)
+                return False
+            current_price = float(ticker['lastPrice'])
         
-        current_price = float(ticker['lastPrice'])
         logger.info("從REST API獲取當前價格: %.4f", current_price)
         
         if not current_price or current_price <= 0:
@@ -893,8 +905,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
                 result = self.client.execute_order_batch(orders_to_place)
 
-                if isinstance(result, dict) and "error" in result:
-                    logger.error("批量下單失敗: %s", result['error'])
+                if not result.success:
+                    logger.error("批量下單失敗: %s", result.error_message)
                     # 如果批量下單失敗，回退到逐個下單
                     logger.info("回退到逐個下單模式...")
                     for i, order in enumerate(orders_to_place):
@@ -902,28 +914,41 @@ class PerpGridStrategy(PerpetualMarketMaker):
                         side = order['side']
                         result_single = self.client.execute_order(order)
 
-                        if isinstance(result_single, dict) and "error" not in result_single:
-                            self._record_grid_order(result_single, price, side, self.order_quantity)
+                        if result_single.success:
+                            order_data = result_single.data
+                            # 轉換為字典用於記錄
+                            order_dict = order_data.raw if hasattr(order_data, 'raw') and order_data.raw else {'id': order_data.order_id if hasattr(order_data, 'order_id') else None}
+                            self._record_grid_order(order_dict, price, side, self.order_quantity)
                             placed_orders += 1
                             logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
                         else:
-                            logger.error("掛單失敗: %s", result_single.get('error', 'unknown'))
+                            logger.error("掛單失敗: %s", result_single.error_message)
                 else:
                     # 批量下單成功，記錄所有訂單
                     # 處理不同交易所的響應格式
                     orders_list = []
-
-                    if isinstance(result, list):
+                    batch_data = result.data
+                    
+                    # 如果是 BatchOrderResult dataclass
+                    if hasattr(batch_data, 'orders'):
+                        orders_list = batch_data.orders or []
+                        if hasattr(batch_data, 'errors') and batch_data.errors:
+                            real_errors = [e for e in batch_data.errors if e is not None]
+                            if real_errors:
+                                logger.warning("批量下單部分失敗，錯誤數量: %d", len(real_errors))
+                                for error_info in real_errors[:3]:
+                                    logger.warning("錯誤詳情: %s", error_info)
+                    elif isinstance(batch_data, list):
                         # 直接返回訂單數組（Backpack、Lighter、Paradex 成功時）
-                        orders_list = result
-                    elif isinstance(result, dict):
+                        orders_list = batch_data
+                    elif isinstance(batch_data, dict):
                         # 包含 orders 字段的響應（Paradex 部分成功時）
-                        if "orders" in result:
-                            orders_list = result["orders"]
+                        if "orders" in batch_data:
+                            orders_list = batch_data["orders"]
                             # 記錄錯誤（過濾掉 None 值）
-                            if "errors" in result and result.get("errors"):
+                            if "errors" in batch_data and batch_data.get("errors"):
                                 # Paradex API 返回的 errors 中，成功的訂單對應 None
-                                real_errors = [e for e in result["errors"] if e is not None]
+                                real_errors = [e for e in batch_data["errors"] if e is not None]
                                 if real_errors:
                                     logger.warning("批量下單部分失敗，錯誤數量: %d", len(real_errors))
                                     for error_info in real_errors[:3]:  # 只記錄前3個錯誤
@@ -931,27 +956,38 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
                     # 記錄所有成功的訂單
                     for order_result in orders_list:
-                        if not isinstance(order_result, dict):
-                            continue
+                        # 支援 OrderResult dataclass 或 dict
+                        if hasattr(order_result, 'order_id'):
+                            price = float(order_result.price or 0)
+                            side = order_result.side or ''
+                            if isinstance(side, str):
+                                if side.upper() in ['BUY', 'LONG']:
+                                    side = 'Bid'
+                                elif side.upper() in ['SELL', 'SHORT', 'ASK']:
+                                    side = 'Ask'
+                            quantity = float(order_result.filled_quantity or order_result.quantity or self.order_quantity)
+                            order_dict = order_result.raw if hasattr(order_result, 'raw') and order_result.raw else {'id': order_result.order_id}
+                            self._record_grid_order(order_dict, price, side, quantity)
+                            placed_orders += 1
+                        elif isinstance(order_result, dict):
+                            price = float(order_result.get('price', 0))
+                            side = order_result.get('side', '')
+                            if isinstance(side, str):
+                                if side.upper() in ['BUY', 'LONG']:
+                                    side = 'Bid'
+                                elif side.upper() in ['SELL', 'SHORT', 'ASK']:
+                                    side = 'Ask'
 
-                        price = float(order_result.get('price', 0))
-                        side = order_result.get('side', '')
-                        if isinstance(side, str):
-                            if side.upper() in ['BUY', 'LONG']:
-                                side = 'Bid'
-                            elif side.upper() in ['SELL', 'SHORT', 'ASK']:
-                                side = 'Ask'
+                            quantity_raw = (
+                                order_result.get('quantity') or
+                                order_result.get('size') or
+                                order_result.get('origQty') or
+                                self.order_quantity
+                            )
+                            quantity = float(quantity_raw)
 
-                        quantity_raw = (
-                            order_result.get('quantity') or
-                            order_result.get('size') or
-                            order_result.get('origQty') or
-                            self.order_quantity
-                        )
-                        quantity = float(quantity_raw)
-
-                        self._record_grid_order(order_result, price, side, quantity)
-                        placed_orders += 1
+                            self._record_grid_order(order_result, price, side, quantity)
+                            placed_orders += 1
 
                     logger.info("批量下單成功: %d 個訂單", placed_orders)
             else:
@@ -962,12 +998,15 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     side = order['side']
                     result_single = self.client.execute_order(order)
 
-                    if isinstance(result_single, dict) and "error" not in result_single:
-                        self._record_grid_order(result_single, price, side, self.order_quantity)
+                    if result_single.success:
+                        order_data = result_single.data
+                        # 轉換為字典用於記錄
+                        order_dict = order_data.raw if hasattr(order_data, 'raw') and order_data.raw else {'id': order_data.order_id if hasattr(order_data, 'order_id') else None}
+                        self._record_grid_order(order_dict, price, side, self.order_quantity)
                         placed_orders += 1
                         logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
                     else:
-                        logger.error("掛單失敗: %s", result_single.get('error', 'unknown'))
+                        logger.error("掛單失敗: %s", result_single.error_message)
 
         logger.info("網格初始化完成: 共放置 %d 個訂單", placed_orders)
         self.grid_initialized = True
@@ -1077,8 +1116,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     post_only=False  # 補掛時不使用 post_only，確保能掛出
                 )
                 
-                if isinstance(result, dict) and "error" not in result:
-                    primary_id, alias_ids = self._extract_order_identifiers(result)
+                if result.success:
+                    result_data = result.data
+                    result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
+                    primary_id, alias_ids = self._extract_order_identifiers(result_dict)
                     if primary_id:
                         # 同步補掛的訂單使用平倉價格作為開倉價格，這樣不會產生虛假利潤
                         # 網格利潤只計算正常流程（開倉->平倉）的利潤
@@ -1086,7 +1127,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                         placed_count += 1
                         logger.info("同步平空單已記錄 (無利潤計算): ID=%s, 價格=%.4f", primary_id, close_price)
                 else:
-                    logger.error("補掛平空單失敗: %s", result.get('error', 'unknown') if isinstance(result, dict) else result)
+                    logger.error("補掛平空單失敗: %s", result.error_message)
             
             # 處理剩餘數量
             if remaining_qty >= self.min_order_size and close_prices:
@@ -1099,8 +1140,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     reduce_only=True,
                     post_only=False
                 )
-                if isinstance(result, dict) and "error" not in result:
-                    primary_id, alias_ids = self._extract_order_identifiers(result)
+                if result.success:
+                    result_data = result.data
+                    result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
+                    primary_id, alias_ids = self._extract_order_identifiers(result_dict)
                     if primary_id:
                         # 同步補掛的訂單使用平倉價格作為開倉價格
                         self._record_close_order(primary_id, close_price, remaining_qty, 'short', aliases=alias_ids)
@@ -1137,15 +1180,17 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     post_only=False
                 )
                 
-                if isinstance(result, dict) and "error" not in result:
-                    primary_id, alias_ids = self._extract_order_identifiers(result)
+                if result.success:
+                    result_data = result.data
+                    result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
+                    primary_id, alias_ids = self._extract_order_identifiers(result_dict)
                     if primary_id:
                         # 同步補掛的訂單使用平倉價格作為開倉價格，這樣不會產生虛假利潤
                         self._record_close_order(primary_id, close_price, order_qty, 'long', aliases=alias_ids)
                         placed_count += 1
                         logger.info("同步平多單已記錄 (無利潤計算): ID=%s, 價格=%.4f", primary_id, close_price)
                 else:
-                    logger.error("補掛平多單失敗: %s", result.get('error', 'unknown') if isinstance(result, dict) else result)
+                    logger.error("補掛平多單失敗: %s", result.error_message)
             
             if remaining_qty >= self.min_order_size and close_prices:
                 close_price = close_prices[0]
@@ -1157,8 +1202,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     reduce_only=True,
                     post_only=False
                 )
-                if isinstance(result, dict) and "error" not in result:
-                    primary_id, alias_ids = self._extract_order_identifiers(result)
+                if result.success:
+                    result_data = result.data
+                    result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
+                    primary_id, alias_ids = self._extract_order_identifiers(result_dict)
                     if primary_id:
                         # 同步補掛的訂單使用平倉價格作為開倉價格
                         self._record_close_order(primary_id, close_price, remaining_qty, 'long', aliases=alias_ids)
@@ -1191,11 +1238,13 @@ class PerpGridStrategy(PerpetualMarketMaker):
             post_only=True  # 強制 Post-Only，避免市價成交
         )
 
-        if isinstance(result, dict) and "error" in result:
-            logger.error("掛開多單失敗 (價格 %.4f): %s", price, result.get('error'))
+        if not result.success:
+            logger.error("掛開多單失敗 (價格 %.4f): %s", price, result.error_message)
             return False
 
-        primary_id, alias_ids = self._extract_order_identifiers(result)
+        result_data = result.data
+        result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
+        primary_id, alias_ids = self._extract_order_identifiers(result_dict)
         logger.info("成功掛開多單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, primary_id)
 
         # 使用新的記錄系統
@@ -1218,11 +1267,13 @@ class PerpGridStrategy(PerpetualMarketMaker):
             post_only=True  # 強制 Post-Only，避免市價成交
         )
 
-        if isinstance(result, dict) and "error" in result:
-            logger.error("掛開空單失敗 (價格 %.4f): %s", price, result.get('error'))
+        if not result.success:
+            logger.error("掛開空單失敗 (價格 %.4f): %s", price, result.error_message)
             return False
 
-        primary_id, alias_ids = self._extract_order_identifiers(result)
+        result_data = result.data
+        result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
+        primary_id, alias_ids = self._extract_order_identifiers(result_dict)
         logger.info("成功掛開空單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, primary_id)
 
         # 使用新的記錄系統
@@ -1527,8 +1578,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
             post_only=True  # 強制 Post-Only
         )
 
-        if isinstance(result, dict) and "error" in result:
-            error_msg = result.get('error', '')
+        if not result.success:
+            error_msg = result.error_message or ''
             logger.error("掛平多單失敗: %s", error_msg)
 
             # 檢查是否是 post_only 導致的錯誤（價格會立即成交）
@@ -1550,8 +1601,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     reduce_only=reduce_only,
                     post_only=False  # 允許 taker 成交
                 )
-                if isinstance(result, dict) and "error" in result:
-                    logger.error("重試仍失敗: %s", result.get('error', ''))
+                if not result.success:
+                    logger.error("重試仍失敗: %s", result.error_message)
                     self._add_pending_close_order(open_price, quantity, 'long', retry_count)
                     return False
             else:
@@ -1560,8 +1611,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 return False
 
         # 使用新的記錄系統記錄平倉單
-        primary_id, alias_ids = self._extract_order_identifiers(result)
-        order_id = primary_id or result.get('id')
+        result_data = result.data
+        result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
+        primary_id, alias_ids = self._extract_order_identifiers(result_dict)
+        order_id = primary_id or (result_data.order_id if hasattr(result_data, 'order_id') else None)
         if order_id:
             self._record_close_order(order_id, open_price, quantity, 'long', aliases=alias_ids)
             
@@ -1671,8 +1724,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
             post_only=True  # 強制 Post-Only
         )
 
-        if isinstance(result, dict) and "error" in result:
-            error_msg = result.get('error', '')
+        if not result.success:
+            error_msg = result.error_message or ''
             logger.error("掛平空單失敗: %s", error_msg)
 
             # 檢查是否是 post_only 導致的錯誤（價格會立即成交）
@@ -1694,8 +1747,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     reduce_only=reduce_only,
                     post_only=False  # 允許 taker 成交
                 )
-                if isinstance(result, dict) and "error" in result:
-                    logger.error("重試仍失敗: %s", result.get('error', ''))
+                if not result.success:
+                    logger.error("重試仍失敗: %s", result.error_message)
                     self._add_pending_close_order(open_price, quantity, 'short', retry_count)
                     return False
             else:
@@ -1704,8 +1757,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 return False
 
         # 使用新的記錄系統記錄平倉單
-        primary_id, alias_ids = self._extract_order_identifiers(result)
-        order_id = primary_id or result.get('id')
+        result_data = result.data
+        result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
+        primary_id, alias_ids = self._extract_order_identifiers(result_dict)
+        order_id = primary_id or (result_data.order_id if hasattr(result_data, 'order_id') else None)
         if order_id:
             self._record_close_order(order_id, open_price, quantity, 'short', aliases=alias_ids)
             
@@ -1905,7 +1960,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
             # 一次性獲取所有必要數據，然後檢查並補充缺失的網格訂單
             current_price = self.get_current_price()
             try:
-                open_orders = self.client.get_open_orders(self.symbol) or []
+                open_orders_response = self.client.get_open_orders(self.symbol)
+                if open_orders_response.success:
+                    open_orders = open_orders_response.data if isinstance(open_orders_response.data, list) else []
+                else:
+                    open_orders = []
             except Exception as exc:
                 logger.warning("無法獲取現有訂單: %s", exc)
                 open_orders = []
@@ -1920,7 +1979,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         使用新的追蹤系統，只統計真正的開倉單。
         
         Args:
-            open_orders: 現有訂單列表
+            open_orders: 現有訂單列表（可以是 OrderInfo dataclass 列表或 dict 列表）
             
         Returns:
             {'Bid': {price: count}, 'Ask': {price: count}}
@@ -1928,15 +1987,21 @@ class PerpGridStrategy(PerpetualMarketMaker):
         long_open_counts: Dict[float, int] = defaultdict(int)  # 開多單
         short_open_counts: Dict[float, int] = defaultdict(int)  # 開空單
 
-        if isinstance(open_orders, dict) and open_orders.get('error'):
-            logger.warning("訂單列表包含錯誤: %s", open_orders['error'])
-            return {'Bid': {}, 'Ask': {}}
-
         for order in open_orders:
-            if not isinstance(order, dict):
+            # 支援 OrderInfo dataclass 或 dict
+            if hasattr(order, 'order_id'):
+                order_id = order.order_id
+                side_raw = str(order.side or '').upper()
+                price_raw = order.price
+                reduce_only = getattr(order, 'reduce_only', False)
+            elif isinstance(order, dict):
+                order_id = order.get('id') or order.get('orderId') or order.get('order_id')
+                side_raw = str(order.get('side', '')).upper()
+                price_raw = order.get('price')
+                reduce_only = order.get('reduceOnly', False) or order.get('reduce_only', False)
+            else:
                 continue
 
-            order_id = order.get('id') or order.get('orderId') or order.get('order_id')
             if not order_id:
                 continue
             
@@ -1946,13 +2011,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 continue
             
             # 檢查是否標記為 reduce_only（平倉單）
-            reduce_only = order.get('reduceOnly', False) or order.get('reduce_only', False)
             if reduce_only:
                 logger.debug("訂單 %s 標記為 reduce_only，不計入開倉單統計", order_id)
                 continue
-
-            side_raw = str(order.get('side', '')).upper()
-            price_raw = order.get('price')
             if price_raw is None:
                 continue
 
@@ -1995,7 +2056,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         if open_orders is None:
             try:
-                open_orders = self.client.get_open_orders(self.symbol) or []
+                open_orders_response = self.client.get_open_orders(self.symbol)
+                if open_orders_response.success:
+                    open_orders = open_orders_response.data if isinstance(open_orders_response.data, list) else []
+                else:
+                    open_orders = []
             except Exception as exc:
                 logger.warning("無法獲取現有訂單: %s", exc)
                 return

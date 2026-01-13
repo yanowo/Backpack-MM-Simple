@@ -139,8 +139,8 @@ class PerpetualMarketMaker(MarketMaker):
             # 直接查詢特定交易對的倉位
             result = self.client.get_positions(self.symbol)
 
-            if isinstance(result, dict) and "error" in result:
-                error_msg = result["error"]
+            if not result.success:
+                error_msg = result.error_message or ""
                 # 404 錯誤表示沒有倉位，這是正常情況
                 if "404" in error_msg or "RESOURCE_NOT_FOUND" in error_msg:
                     logger.debug("未找到 %s 的倉位記錄(404)，倉位為0", self.symbol)
@@ -149,19 +149,27 @@ class PerpetualMarketMaker(MarketMaker):
                     logger.info(f"result: {result}")
                     logger.error("查詢倉位失敗: %s", error_msg)
                     return 0.0
-                
-            if not isinstance(result, list):
-                logger.warning("倉位API返回格式異常: %s", type(result))
+            
+            positions = result.data
+            if not isinstance(positions, list):
+                logger.warning("倉位API返回格式異常: %s", type(positions))
                 return 0.0
                 
             # 如果返回空列表，説明沒有該交易對的倉位
-            if not result:
+            if not positions:
                 logger.debug("未找到 %s 的倉位記錄，倉位為0", self.symbol)
                 return 0.0
             
             # 取第一個倉位（因為已經按symbol過濾了）
-            position = result[0]
-            net_quantity = float(position.get("netQuantity", 0))
+            position = positions[0]
+            # 支援 PositionInfo dataclass
+            if hasattr(position, 'size'):
+                net_quantity = float(position.size or 0)
+                # 根據 side 調整正負
+                if hasattr(position, 'side') and position.side == 'SHORT':
+                    net_quantity = -abs(net_quantity)
+            else:
+                net_quantity = float(position.get("netQuantity", 0))
             
             logger.debug("從API獲取 %s 永續倉位: %s", self.symbol, net_quantity)
             return net_quantity
@@ -179,29 +187,34 @@ class PerpetualMarketMaker(MarketMaker):
             result = self.client.get_positions(self.symbol)
             
             # 如果特定symbol查詢失敗，嘗試查詢所有倉位
-            if isinstance(result, dict) and "error" in result:
-                logger.warning(f"特定symbol查詢失敗: {result['error']}")
+            if not result.success:
+                logger.warning(f"特定symbol查詢失敗: {result.error_message}")
                 logger.info("嘗試查詢所有倉位...")
                 result = self.client.get_positions()
                 
                 # 從所有倉位中篩選當前symbol
-                if isinstance(result, list):
-                    for pos in result:
-                        if pos.get('symbol') == self.symbol:
+                if result.success and isinstance(result.data, list):
+                    for pos in result.data:
+                        pos_symbol = pos.symbol if hasattr(pos, 'symbol') else pos.get('symbol')
+                        if pos_symbol == self.symbol:
                             logger.info(f"從所有倉位中找到 {self.symbol}")
-                            return pos
+                            # 轉換為字典格式
+                            if hasattr(pos, 'raw'):
+                                return pos.raw or {}
+                            return pos if isinstance(pos, dict) else {}
                     logger.warning(f"在所有倉位中未找到 {self.symbol}")
                     return {}
             
-            if not isinstance(result, list) or not result:
+            positions = result.data
+            if not isinstance(positions, list) or not positions:
                 logger.info("API返回空倉位列表")
                 return {}
             
-            position_data = result[0]
-            
-
-            
-            return position_data
+            position = positions[0]
+            # 轉換為字典格式
+            if hasattr(position, 'raw'):
+                return position.raw or {}
+            return position if isinstance(position, dict) else {}
             
         except Exception as e:
             logger.error(f"獲取倉位信息時發生錯誤: {e}")
@@ -469,11 +482,12 @@ class PerpetualMarketMaker(MarketMaker):
         )
 
         result = self.client.execute_order(order_details)
-        if isinstance(result, dict) and "error" in result:
-            logger.error(f"永續合約訂單失敗: {result['error']}, 訂單信息：{order_details}")
+        if not result.success:
+            logger.error(f"永續合約訂單失敗: {result.error_message}, 訂單信息：{order_details}")
         else:
             self.orders_placed += 1
-            logger.info("永續合約訂單提交成功: %s", result.get("id", "unknown"))
+            order_result = result.data
+            logger.info("永續合約訂單提交成功: %s", order_result.order_id if order_result else "unknown")
 
         return result
 
@@ -567,17 +581,16 @@ class PerpetualMarketMaker(MarketMaker):
             client_id=client_id,
         )
 
-        if isinstance(result, dict) and "error" in result:
+        if not result.success:
             logger.error(
-                "平倉失敗: %s | side=%s qty=%s price=%s type=%s reduceOnly=%s clientId=%s result=%s",
-                result.get("error"),
+                "平倉失敗: %s | side=%s qty=%s price=%s type=%s reduceOnly=%s clientId=%s",
+                result.error_message,
                 order_side,
                 format_balance(qty),
                 price if price is not None else "Market",
                 order_type,
                 True,
                 client_id or "",
-                result,
             )
             return False
 

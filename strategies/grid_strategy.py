@@ -148,16 +148,17 @@ class GridStrategy(MarketMaker):
     def _initialize_grid_prices(self) -> bool:
         """初始化網格價格點位"""
         # 強制使用REST API獲取準確的初始價格
-        ticker = self.client.get_ticker(self.symbol)
-        if isinstance(ticker, dict) and "error" in ticker:
-            logger.error("無法獲取當前價格: %s", ticker.get('error'))
+        ticker_response = self.client.get_ticker(self.symbol)
+        if not ticker_response.success:
+            logger.error("無法獲取當前價格: %s", ticker_response.error_message)
             return False
         
-        if "lastPrice" not in ticker:
-            logger.error("Ticker數據不完整: %s", ticker)
+        ticker = ticker_response.data
+        if ticker.last_price is None:
+            logger.error("Ticker數據不完整: %s", ticker_response.raw)
             return False
         
-        current_price = float(ticker['lastPrice'])
+        current_price = float(ticker.last_price)
         logger.info("從REST API獲取當前價格: %.4f", current_price)
         
         if not current_price or current_price <= 0:
@@ -328,39 +329,41 @@ class GridStrategy(MarketMaker):
 
             if has_batch_method:
                 logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
-                result = self.client.execute_order_batch(orders_to_place)
+                batch_response = self.client.execute_order_batch(orders_to_place)
 
-                if isinstance(result, dict) and "error" in result:
-                    logger.error("批量下單失敗: %s", result['error'])
+                if not batch_response.success:
+                    logger.error("批量下單失敗: %s", batch_response.error_message)
                     # 如果批量下單失敗，回退到逐個下單
                     logger.info("回退到逐個下單模式...")
                     for i, order in enumerate(orders_to_place):
                         price = float(order['price'])
                         side = order['side']
-                        result_single = self.client.execute_order(order)
+                        order_response = self.client.execute_order(order)
 
-                        if isinstance(result_single, dict) and "error" not in result_single:
-                            order_id = result_single.get('id')
+                        if order_response.success:
+                            order_result = order_response.data
+                            order_id = order_result.order_id
                             self._record_grid_order(order_id, price, side, self.order_quantity)
                             placed_orders += 1
                             logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
                         else:
-                            logger.error("掛單失敗: %s", result_single.get('error', 'unknown'))
+                            logger.error("掛單失敗: %s", order_response.error_message)
                 else:
                     # 批量下單成功，記錄所有訂單
-                    if isinstance(result, list):
+                    batch_result = batch_response.data
+                    if batch_result and batch_result.results:
                         # 創建原始訂單的映射表 (price, side) -> order
                         order_map = {}
                         for order in orders_to_place:
                             key = (float(order['price']), order['side'])
                             order_map[key] = order
 
-                        for order_result in result:
-                            if 'id' in order_result:
-                                order_id = order_result['id']
+                        for order_result in batch_result.results:
+                            if order_result.order_id:
+                                order_id = order_result.order_id
                                 # 從返回結果中獲取價格和方向
-                                result_price = float(order_result.get('price', 0))
-                                result_side = order_result.get('side', '')
+                                result_price = float(order_result.price) if order_result.price else 0
+                                result_side = order_result.side or ''
 
                                 # 查找對應的原始訂單
                                 key = (result_price, result_side)
@@ -376,7 +379,7 @@ class GridStrategy(MarketMaker):
                                     logger.warning("無法匹配訂單 %s，使用返回數據", order_id)
                                     price = result_price
                                     side = result_side
-                                    quantity = float(order_result.get('quantity', self.order_quantity))
+                                    quantity = float(order_result.quantity) if order_result.quantity else self.order_quantity
                                     self._record_grid_order(order_id, price, side, quantity)
                                     placed_orders += 1
                         logger.info("批量下單成功: %d 個訂單", placed_orders)
@@ -386,15 +389,16 @@ class GridStrategy(MarketMaker):
                 for i, order in enumerate(orders_to_place):
                     price = float(order['price'])
                     side = order['side']
-                    result_single = self.client.execute_order(order)
+                    order_response = self.client.execute_order(order)
 
-                    if isinstance(result_single, dict) and "error" not in result_single:
-                        order_id = result_single.get('id')
+                    if order_response.success:
+                        order_result = order_response.data
+                        order_id = order_result.order_id
                         self._record_grid_order(order_id, price, side, self.order_quantity)
                         placed_orders += 1
                         logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
                     else:
-                        logger.error("掛單失敗: %s", result_single.get('error', 'unknown'))
+                        logger.error("掛單失敗: %s", order_response.error_message)
 
         logger.info("網格初始化完成: 共放置 %d 個訂單", placed_orders)
         self.grid_initialized = True
@@ -447,13 +451,14 @@ class GridStrategy(MarketMaker):
         if self.auto_borrow_repay:
             order_details["autoBorrowRepay"] = True
 
-        result = self.client.execute_order(order_details)
+        order_response = self.client.execute_order(order_details)
 
-        if isinstance(result, dict) and "error" in result:
-            logger.error("掛買單失敗 (價格 %.4f): %s", price, result['error'])
+        if not order_response.success:
+            logger.error("掛買單失敗 (價格 %.4f): %s", price, order_response.error_message)
             return False
 
-        order_id = result.get('id')
+        order_result = order_response.data
+        order_id = order_result.order_id
         logger.info("成功掛買單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, order_id)
 
         # 記錄訂單信息
@@ -497,13 +502,14 @@ class GridStrategy(MarketMaker):
         if self.auto_borrow_repay:
             order_details["autoBorrowRepay"] = True
 
-        result = self.client.execute_order(order_details)
+        order_response = self.client.execute_order(order_details)
 
-        if isinstance(result, dict) and "error" in result:
-            logger.error("掛賣單失敗 (價格 %.4f): %s", price, result['error'])
+        if not order_response.success:
+            logger.error("掛賣單失敗 (價格 %.4f): %s", price, order_response.error_message)
             return False
 
-        order_id = result.get('id')
+        order_result = order_response.data
+        order_id = order_result.order_id
         logger.info("成功掛賣單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, order_id)
 
         # 記錄訂單信息
@@ -724,7 +730,8 @@ class GridStrategy(MarketMaker):
             current_price = self.get_current_price()
             balances = self.get_balance()
             try:
-                open_orders = self.client.get_open_orders(self.symbol) or []
+                orders_response = self.client.get_open_orders(self.symbol)
+                open_orders = orders_response.data if orders_response.success else []
             except Exception as exc:
                 logger.warning("無法獲取現有訂單: %s", exc)
                 open_orders = []
@@ -738,7 +745,7 @@ class GridStrategy(MarketMaker):
         """統計實際掛單數量（按價格/方向），從訂單列表中統計。
         
         Args:
-            open_orders: 現有訂單列表
+            open_orders: 現有訂單列表 (List[OrderInfo] 或 List[Dict])
             
         Returns:
             {'Bid': {price: count}, 'Ask': {price: count}}
@@ -746,16 +753,20 @@ class GridStrategy(MarketMaker):
         buy_counts: Dict[float, int] = defaultdict(int)
         sell_counts: Dict[float, int] = defaultdict(int)
 
-        if isinstance(open_orders, dict) and open_orders.get('error'):
-            logger.warning("訂單列表包含錯誤: %s", open_orders['error'])
+        if not open_orders:
             return {'Bid': {}, 'Ask': {}}
 
         for order in open_orders:
-            if not isinstance(order, dict):
+            # 支援 OrderInfo 或 Dict
+            if hasattr(order, 'side'):
+                side_raw = str(order.side or '').upper()
+                price_raw = order.price
+            elif isinstance(order, dict):
+                side_raw = str(order.get('side', '')).upper()
+                price_raw = order.get('price')
+            else:
                 continue
 
-            side_raw = str(order.get('side', '')).upper()
-            price_raw = order.get('price')
             if price_raw is None:
                 continue
 
@@ -792,7 +803,8 @@ class GridStrategy(MarketMaker):
 
         if open_orders is None:
             try:
-                open_orders = self.client.get_open_orders(self.symbol) or []
+                orders_response = self.client.get_open_orders(self.symbol)
+                open_orders = orders_response.data if orders_response.success else []
             except Exception as exc:
                 logger.warning("無法獲取現有訂單: %s", exc)
                 return

@@ -14,7 +14,23 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import requests
 
-from .base_client import BaseExchangeClient
+from .base_client import (
+    BaseExchangeClient,
+    ApiResponse,
+    OrderResult,
+    OrderInfo,
+    BalanceInfo,
+    CollateralInfo,
+    PositionInfo,
+    MarketInfo,
+    TickerInfo,
+    OrderBookInfo,
+    OrderBookLevel,
+    KlineInfo,
+    TradeInfo,
+    CancelResult,
+    BatchOrderResult,
+)
 from .proxy_utils import get_proxy_config
 from logger import setup_logger
 
@@ -1023,155 +1039,144 @@ class LighterClient(BaseExchangeClient):
         return None
 
     # ---- Public REST wrappers ---------------------------------------------------
-    def get_markets(self) -> List[Dict[str, Any]]:
+    def get_markets(self) -> ApiResponse:
         self._ensure_market_cache()
-        return [dict(value) for value in self._market_cache.values()]
+        markets = []
+        for value in self._market_cache.values():
+            markets.append(MarketInfo(
+                symbol=value.get("symbol", ""),
+                base_asset=value.get("base_asset", ""),
+                quote_asset=value.get("quote_asset", ""),
+                market_type=value.get("market_type"),
+                status=value.get("status"),
+                min_order_size=value.get("min_order_size"),
+                tick_size=value.get("tick_size"),
+                base_precision=value.get("base_precision"),
+                quote_precision=value.get("quote_precision"),
+                raw=value,
+            ))
+        return ApiResponse.ok(markets, raw=self._market_cache)
 
-    def get_market_limits(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def get_market_limits(self, symbol: str) -> ApiResponse:
         market = self._lookup_market(symbol)
         if market:
-            return dict(market)
+            market_info = MarketInfo(
+                symbol=symbol,
+                base_asset=market.get("base_asset", ""),
+                quote_asset=market.get("quote_asset", ""),
+                market_type=market.get("market_type"),
+                status=market.get("status"),
+                min_order_size=market.get("min_order_size"),
+                tick_size=market.get("tick_size"),
+                base_precision=market.get("base_precision"),
+                quote_precision=market.get("quote_precision"),
+                raw=market,
+            )
+            return ApiResponse.ok(market_info, raw=market)
 
-        markets_info = self.get_markets()
+        markets_response = self.get_markets()
+        if not markets_response.success:
+            return markets_response
+
+        markets_info = markets_response.data
         if isinstance(markets_info, list):
             normalized_symbol = self._normalize_symbol_key(symbol)
             for market_info in markets_info:
-                if not isinstance(market_info, dict):
+                if not isinstance(market_info, MarketInfo):
                     continue
 
-                entry_symbol = market_info.get("symbol") or market_info.get("symbolName")
+                entry_symbol = market_info.symbol
                 if not entry_symbol:
                     continue
 
                 if entry_symbol == symbol or self._normalize_symbol_key(entry_symbol) == normalized_symbol:
-                    base_asset = (
-                        market_info.get("base_asset")
-                        or market_info.get("baseSymbol")
-                        or market_info.get("baseToken")
-                        or market_info.get("baseAsset")
-                        or symbol.split("/")[0]
+                    # Found match, return existing market info with updated symbol
+                    result = MarketInfo(
+                        symbol=symbol,
+                        base_asset=market_info.base_asset,
+                        quote_asset=market_info.quote_asset,
+                        market_type=market_info.market_type,
+                        status=market_info.status,
+                        min_order_size=market_info.min_order_size,
+                        tick_size=market_info.tick_size,
+                        base_precision=market_info.base_precision,
+                        quote_precision=market_info.quote_precision,
+                        raw=market_info.raw,
                     )
-                    quote_asset = (
-                        market_info.get("quote_asset")
-                        or market_info.get("quoteSymbol")
-                        or market_info.get("quoteToken")
-                        or market_info.get("quoteAsset")
-                        or symbol.split("/")[-1]
-                    )
-
-                    base_precision = market_info.get("base_precision")
-                    quote_precision = market_info.get("quote_precision")
-
-                    for candidate in (
-                        "supported_size_decimals",
-                        "size_decimals",
-                        "base_precision_digits",
-                        "basePrecision",
-                    ):
-                        if base_precision is None and market_info.get(candidate) is not None:
-                            try:
-                                base_precision = int(market_info[candidate])
-                            except (TypeError, ValueError):
-                                pass
-
-                    for candidate in (
-                        "supported_price_decimals",
-                        "price_decimals",
-                        "quote_precision_digits",
-                        "pricePrecision",
-                    ):
-                        if quote_precision is None and market_info.get(candidate) is not None:
-                            try:
-                                quote_precision = int(market_info[candidate])
-                            except (TypeError, ValueError):
-                                pass
-
-                    if base_precision is None:
-                        base_precision = 3
-                    if quote_precision is None:
-                        quote_precision = 3
-
-                    min_order_size = (
-                        market_info.get("min_order_size")
-                        or market_info.get("min_base_amount")
-                        or market_info.get("minQuantity")
-                        or market_info.get("minTradeSize")
-                        or "0"
-                    )
-                    tick_size = (
-                        market_info.get("tick_size")
-                        or market_info.get("tickSize")
-                        or market_info.get("priceIncrement")
-                    )
-                    if tick_size is None:
-                        tick_size = self._infer_tick_size(int(quote_precision))
-
-                    return {
-                        "base_asset": base_asset,
-                        "quote_asset": quote_asset,
-                        "base_precision": int(base_precision),
-                        "quote_precision": int(quote_precision),
-                        "min_order_size": str(min_order_size),
-                        "tick_size": str(tick_size),
-                    }
+                    return ApiResponse.ok(result, raw=market_info.raw)
 
             logger.error("Unable to find market metadata for %s", symbol)
-            return None
+            return ApiResponse.error(f"Unable to find market metadata for {symbol}")
 
-        logger.error("Failed to retrieve market list when resolving %s: %s", symbol, markets_info)
-        return None
+        logger.error("Failed to retrieve market list when resolving %s", symbol)
+        return ApiResponse.error(f"Failed to retrieve market list when resolving {symbol}")
 
-    def get_order_book(self, symbol: str, limit: int = 50) -> Dict[str, Any]:
+    def get_order_book(self, symbol: str, limit: int = 50) -> ApiResponse:
         market = self._lookup_market(symbol)
         if not market:
-            return {"error": f"Unknown symbol {symbol}"}
+            return ApiResponse.error(f"Unknown symbol {symbol}")
 
         market_id = market.get("market_id")
         if market_id is None:
-            return {"error": f"Market id missing for symbol {symbol}"}
+            return ApiResponse.error(f"Market id missing for symbol {symbol}")
 
         payload = self.make_request(
             "GET",
             "/api/v1/orderBookOrders",
             params={"market_id": market_id, "limit": max(1, min(limit, 100))},
         )
-        if isinstance(payload, dict) and "error" in payload:
-            return payload
+        error = self._check_raw_error(payload)
+        if error:
+            return error
 
-        bids = self._convert_levels(payload.get("bids"))
-        asks = self._convert_levels(payload.get("asks"))
-        return {"symbol": symbol, "bids": bids, "asks": asks}
+        raw_bids = self._convert_levels(payload.get("bids"))
+        raw_asks = self._convert_levels(payload.get("asks"))
+        
+        bids = [OrderBookLevel(price=b[0], quantity=b[1]) for b in raw_bids]
+        asks = [OrderBookLevel(price=a[0], quantity=a[1]) for a in raw_asks]
+        
+        order_book = OrderBookInfo(
+            symbol=symbol,
+            bids=bids,
+            asks=asks,
+            raw=payload,
+        )
+        return ApiResponse.ok(order_book, raw=payload)
 
-    def get_ticker(self, symbol: str) -> Dict[str, Any]:
-        book = self.get_order_book(symbol, limit=50)
-        if "error" in book:
-            return book
+    def get_ticker(self, symbol: str) -> ApiResponse:
+        book_response = self.get_order_book(symbol, limit=50)
+        if not book_response.success:
+            return book_response
 
-        bids = book.get("bids", [])
-        asks = book.get("asks", [])
+        book = book_response.data
+        bids = book.bids if book else []
+        asks = book.asks if book else []
 
-        best_bid = bids[0][0] if bids else None
-        best_ask = asks[0][0] if asks else None
+        best_bid = bids[0].price if bids else None
+        best_ask = asks[0].price if asks else None
 
         market = self._lookup_market(symbol)
         last_price = market.get("last_price") if market else None
         if last_price is None:
             last_price = best_bid or best_ask
 
-        return {
-            "symbol": symbol,
-            "bidPrice": f"{best_bid:.10f}" if best_bid is not None else None,
-            "askPrice": f"{best_ask:.10f}" if best_ask is not None else None,
-            "lastPrice": f"{last_price:.10f}" if last_price is not None else None,
-        }
+        ticker = TickerInfo(
+            symbol=symbol,
+            bid_price=best_bid,
+            ask_price=best_ask,
+            last_price=last_price,
+            raw={"symbol": symbol, "bidPrice": best_bid, "askPrice": best_ask, "lastPrice": last_price},
+        )
+        return ApiResponse.ok(ticker, raw=ticker.raw)
 
-    def get_order_book_snapshot(self, symbol: str, limit: int = 50) -> Dict[str, Any]:
+    def get_order_book_snapshot(self, symbol: str, limit: int = 50) -> ApiResponse:
         return self.get_order_book(symbol, limit)
 
-    def get_balance(self) -> Dict[str, Any]:
+    def get_balance(self) -> ApiResponse:
         account = self._fetch_account_details()
-        if isinstance(account, dict) and "error" in account:
-            return account
+        error = self._check_raw_error(account)
+        if error:
+            return error
 
         available = self._safe_float(account.get("available_balance")) or 0.0
         collateral = self._safe_float(account.get("collateral")) or 0.0
@@ -1179,62 +1184,53 @@ class LighterClient(BaseExchangeClient):
         total = available + locked
 
         # Lighter使用USDC作為統一抵押品，同時提供USD/USDT別名以兼容不同策略
-        balance_info = {
-            "asset": "USDC",
-            "available": available,
-            "locked": locked,
-            "total": total,
-            "collateral": collateral,
-        }
+        balances = []
+        for asset in ["USDC", "USD", "USDT"]:
+            balances.append(BalanceInfo(
+                asset=asset,
+                available=available,
+                locked=locked,
+                total=total,
+                raw=account,
+            ))
+        
+        return ApiResponse.ok(balances, raw=account)
 
-        return {
-            "USDC": balance_info,
-            "USD": balance_info,   # 別名，指向同一數據
-            "USDT": balance_info,  # 別名，指向同一數據
-        }
-
-    def get_collateral(self, subaccount_id: Optional[str] = None) -> Dict[str, Any]:
+    def get_collateral(self, subaccount_id: Optional[str] = None) -> ApiResponse:
         account = self._fetch_account_details()
-        if isinstance(account, dict) and "error" in account:
-            return account
+        error = self._check_raw_error(account)
+        if error:
+            return error
 
         collateral = self._safe_float(account.get("collateral")) or 0.0
         available = self._safe_float(account.get("available_balance")) or 0.0
         total_asset_value = self._safe_float(account.get("total_asset_value"))
         cross_asset_value = self._safe_float(account.get("cross_asset_value"))
 
-        response: Dict[str, Any] = {
-            "totalCollateral": collateral,
-            "availableCollateral": available,
-            "assets": [
-                {
-                    "symbol": "USDC",
-                    "totalQuantity": collateral,
-                    "availableQuantity": available,
-                }
-            ],
-        }
-        if total_asset_value is not None:
-            response["totalAssetValue"] = total_asset_value
-        if cross_asset_value is not None:
-            response["crossAssetValue"] = cross_asset_value
-        return response
+        collateral_info = CollateralInfo(
+            asset="USDC",
+            total_collateral=collateral,
+            free_collateral=available,
+            account_value=total_asset_value,
+            raw=account,
+        )
+        return ApiResponse.ok(collateral_info, raw=account)
 
-    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> ApiResponse:
         """批量執行訂單
 
         Args:
             orders_details: List of order detail dictionaries
 
         Returns:
-            List of order results or error dict
+            ApiResponse with BatchOrderResult
         """
         signer = self._ensure_signer_client()
         if not signer:
-            return {"error": "Signer client is not configured"}
+            return ApiResponse.error("Signer client is not configured")
 
         if not orders_details:
-            return {"error": "Empty order list"}
+            return ApiResponse.error("Empty order list")
 
         # 預處理所有訂單
         processed_orders = []
@@ -1287,17 +1283,17 @@ class LighterClient(BaseExchangeClient):
             # 處理市價單
             if scaled_price is None:
                 if order_type == SimpleSignerClient.ORDER_TYPE_MARKET:
-                    book = self.get_order_book(symbol, limit=1)
+                    book_response = self.get_order_book(symbol, limit=1)
                     reference_price: Optional[float] = None
-                    if isinstance(book, dict) and "error" not in book:
+                    if book_response.success and book_response.data:
                         if is_ask:
-                            bids = book.get("bids") or []
+                            bids = book_response.data.bids or []
                             if bids:
-                                reference_price = float(bids[0][0]) * 0.999
+                                reference_price = float(bids[0].price) * 0.999
                         else:
-                            asks = book.get("asks") or []
+                            asks = book_response.data.asks or []
                             if asks:
-                                reference_price = float(asks[0][0]) * 1.001
+                                reference_price = float(asks[0].price) * 1.001
                     if reference_price is None:
                         reference_price = market.get("last_price")
                     if reference_price is None:
@@ -1381,22 +1377,22 @@ class LighterClient(BaseExchangeClient):
             })
 
         if not processed_orders:
-            return {"error": "No valid orders to submit"}
+            return ApiResponse.error("No valid orders to submit")
 
         # 批量簽名並發送訂單
         tx_payloads, tx_response, error = signer.create_order_batch(processed_orders)
 
         if error:
-            return {"error": error}
+            return ApiResponse.error(error)
 
         if not tx_response or tx_response.get("code") != 200:
             message = tx_response.get("message") if tx_response else "unknown error"
-            return {"error": f"Batch orders rejected: {message}", "response": tx_response}
+            return ApiResponse.error(f"Batch orders rejected: {message}", raw=tx_response)
 
         # 構建返回結果
         results = []
         for i, order in enumerate(processed_orders):
-            result = {
+            raw_result = {
                 "id": str(order["client_order_index"]),
                 "clientOrderIndex": order["client_order_index"],
                 "symbol": order["symbol"],
@@ -1404,31 +1400,46 @@ class LighterClient(BaseExchangeClient):
                 "price": order["original_price"],
                 "quantity": order["original_quantity"],
                 "status": "pending",
+                "txHash": tx_response.get("tx_hash") if tx_response else None,
             }
-            # 如果有 tx_hash，添加到結果中
-            if tx_response:
-                result["txHash"] = tx_response.get("tx_hash")
-            results.append(result)
+            results.append(OrderResult(
+                success=True,
+                order_id=str(order["client_order_index"]),
+                client_order_id=str(order["client_order_index"]),
+                symbol=order["symbol"],
+                side="Ask" if order["is_ask"] else "Bid",
+                price=order["original_price"],
+                size=order["original_quantity"],
+                status="pending",
+                raw=raw_result,
+            ))
 
         logger.info("批量下單成功: %d 個訂單", len(results))
-        return results
+        batch_result = BatchOrderResult(
+            success=True,
+            orders=results,
+            failed_count=0,
+            errors=[],
+            raw=tx_response,
+        )
+        return ApiResponse.ok(batch_result, raw=tx_response)
 
-    def execute_order(self, order_details: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_order(self, order_details: Dict[str, Any]) -> ApiResponse:
         signer = self._ensure_signer_client()
         if not signer:
-            return {"error": "Signer client is not configured"}
+            return ApiResponse.error("Signer client is not configured")
 
         symbol = order_details.get("symbol")
         if not symbol:
-            return {"error": "Order symbol is required"}
+            return ApiResponse.error("Order symbol is required")
 
         market = self._lookup_market(symbol)
         if not market:
-            return {"error": f"Unknown symbol {symbol}"}
+            return ApiResponse.error(f"Unknown symbol {symbol}")
 
         market_id = market.get("market_id")
         if market_id is None:
-            return {"error": f"Market id missing for {symbol}"}
+            return ApiResponse.error(f"Market id missing for {symbol}")
 
         base_precision = int(market.get("base_precision", 3))
         quote_precision = int(market.get("quote_precision", 3))
@@ -1451,35 +1462,35 @@ class LighterClient(BaseExchangeClient):
         price_value = order_details.get("price")
         quantity_value = order_details.get("quantity") or order_details.get("size")
         if quantity_value is None:
-            return {"error": "Both price and quantity are required"}
+            return ApiResponse.error("Both price and quantity are required")
 
         scaled_price = self._scale_to_int(price_value, quote_precision)
         scaled_quantity = self._scale_to_int(quantity_value, base_precision)
 
         if scaled_price is None:
             if order_type == SimpleSignerClient.ORDER_TYPE_MARKET:
-                book = self.get_order_book(symbol, limit=1)
+                book_response = self.get_order_book(symbol, limit=1)
                 reference_price: Optional[float] = None
-                if isinstance(book, dict) and "error" not in book:
+                if book_response.success and book_response.data:
                     if is_ask:
-                        bids = book.get("bids") or []
+                        bids = book_response.data.bids or []
                         if bids:
-                            reference_price = float(bids[0][0]) * 0.999
+                            reference_price = float(bids[0].price) * 0.999
                     else:
-                        asks = book.get("asks") or []
+                        asks = book_response.data.asks or []
                         if asks:
-                            reference_price = float(asks[0][0]) * 1.001
+                            reference_price = float(asks[0].price) * 1.001
                 if reference_price is None:
                     reference_price = market.get("last_price")
                 if reference_price is None:
-                    return {"error": "Market price unavailable for market order"}
+                    return ApiResponse.error("Market price unavailable for market order")
                 price_value = reference_price
                 scaled_price = self._scale_to_int(price_value, quote_precision)
             else:
-                return {"error": "Invalid price format"}
+                return ApiResponse.error("Invalid price format")
 
         if scaled_price is None or scaled_quantity is None:
-            return {"error": "Invalid price or quantity format"}
+            return ApiResponse.error("Invalid price or quantity format")
         min_quote_value = float(market.get("min_quote_value") or 0.0)
         quantity_float = float(quantity_value)
         # 最小下單金額 10u
@@ -1490,9 +1501,7 @@ class LighterClient(BaseExchangeClient):
         required_base = math.ceil(required_base * precision_multiplier) / precision_multiplier
         effective_min_quantity = max(min_order_size, required_base)
         if quantity_float < effective_min_quantity:
-            return {
-                "error": f"Quantity {quantity_float} below minimum {effective_min_quantity}",
-            }
+            return ApiResponse.error(f"Quantity {quantity_float} below minimum {effective_min_quantity}")
 
         time_in_force_raw = (order_details.get("timeInForce") or order_details.get("time_in_force") or "GTC").upper()
         post_only = bool(order_details.get("postOnly") or order_details.get("post_only"))
@@ -1518,7 +1527,7 @@ class LighterClient(BaseExchangeClient):
         else:
             scaled_trigger_price = self._scale_to_int(trigger_price_raw, quote_precision)
             if scaled_trigger_price is None:
-                return {"error": "Invalid trigger price"}
+                return ApiResponse.error("Invalid trigger price")
 
         expiry_raw = order_details.get("orderExpiry") or order_details.get("order_expiry")
         default_expiry = (
@@ -1551,29 +1560,37 @@ class LighterClient(BaseExchangeClient):
         )
 
         if error:
-            return {"error": error}
+            return ApiResponse.error(error)
 
         if not tx_response or tx_response.get("code") != 200:
             message = tx_response.get("message") if tx_response else "unknown error"
-            return {"error": f"Order rejected: {message}", "response": tx_response}
+            return ApiResponse.error(f"Order rejected: {message}", raw=tx_response)
 
-        open_orders = self.get_open_orders(symbol)
-        if isinstance(open_orders, list):
-            for order in open_orders:
-                candidate = (
-                    order.get("clientOrderIndex")
-                    or order.get("orderIndex")
-                    or order.get("id")
-                    or order.get("orderId")
-                )
+        # Try to find order in open orders to get more details
+        open_orders_response = self.get_open_orders(symbol)
+        if open_orders_response.success and isinstance(open_orders_response.data, list):
+            for order in open_orders_response.data:
+                candidate = order.client_order_id or order.order_id
                 try:
                     if candidate is not None and int(candidate) == int(client_order_index):
-                        order["txHash"] = tx_response.get("tx_hash")
-                        return order
+                        # Found matching order, update with tx_hash
+                        raw_order = order.raw if order.raw else {}
+                        raw_order["txHash"] = tx_response.get("tx_hash")
+                        return ApiResponse.ok(OrderResult(
+                            order_id=order.order_id,
+                            client_order_id=str(client_order_index),
+                            symbol=symbol,
+                            side="Ask" if is_ask else "Bid",
+                            price=order.price,
+                            quantity=order.quantity,
+                            status=order.status or "pending",
+                            raw=raw_order,
+                        ), raw=raw_order)
                 except (TypeError, ValueError):
                     continue
 
-        return {
+        # Return basic order result if not found in open orders
+        raw_result = {
             "id": str(client_order_index),
             "clientOrderIndex": client_order_index,
             "symbol": symbol,
@@ -1583,25 +1600,37 @@ class LighterClient(BaseExchangeClient):
             "status": "pending",
             "txHash": tx_response.get("tx_hash") if tx_response else None,
         }
+        order_result = OrderResult(
+            success=True,
+            order_id=str(client_order_index),
+            client_order_id=str(client_order_index),
+            symbol=symbol,
+            side="Ask" if is_ask else "Bid",
+            price=self._safe_float(price_value),
+            size=self._safe_float(quantity_value),
+            status="pending",
+            raw=raw_result,
+        )
+        return ApiResponse.ok(order_result, raw=raw_result)
 
-    def get_open_orders(self, symbol: Optional[str] = None) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    def get_open_orders(self, symbol: Optional[str] = None) -> ApiResponse:
         if not symbol:
-            return {"error": "Symbol is required"}
+            return ApiResponse.error("Symbol is required")
 
         if self.account_index is None:
-            return {"error": "Account index is not configured"}
+            return ApiResponse.error("Account index is not configured")
 
         market = self._lookup_market(symbol)
         if not market:
-            return {"error": f"Unknown symbol {symbol}"}
+            return ApiResponse.error(f"Unknown symbol {symbol}")
 
         market_id = market.get("market_id")
         if market_id is None:
-            return {"error": f"Market id missing for {symbol}"}
+            return ApiResponse.error(f"Market id missing for {symbol}")
 
         auth = self._get_auth_token()
         if auth is None:
-            return {"error": "Unable to generate auth token"}
+            return ApiResponse.error("Unable to generate auth token")
 
         payload = self.make_request(
             "GET",
@@ -1613,75 +1642,96 @@ class LighterClient(BaseExchangeClient):
             },
             headers={"authorization": auth},
         )
-        if isinstance(payload, dict) and "error" in payload:
-            return payload
+        error = self._check_raw_error(payload)
+        if error:
+            return error
 
         source = payload.get("orders") if isinstance(payload, dict) else None
-        orders: List[Dict[str, Any]] = []
+        orders: List[OrderInfo] = []
         if isinstance(source, list):
             for entry in source:
                 if isinstance(entry, dict):
-                    orders.append(self._normalize_order_record(entry, symbol))
-        return orders
+                    normalized = self._normalize_order_record(entry, symbol)
+                    size_val = normalized.get("quantity")
+                    filled_val = normalized.get("executedQty")
+                    orders.append(OrderInfo(
+                        order_id=normalized.get("id"),
+                        client_order_id=normalized.get("clientOrderId"),
+                        symbol=normalized.get("symbol"),
+                        side=normalized.get("side"),
+                        price=normalized.get("price"),
+                        size=size_val,
+                        filled_size=filled_val,
+                        remaining_size=size_val - filled_val if size_val and filled_val else size_val,
+                        status=normalized.get("status"),
+                        order_type=normalized.get("type"),
+                        time_in_force=normalized.get("timeInForce"),
+                        created_at=normalized.get("timestamp"),
+                        raw=normalized,
+                    ))
+        return ApiResponse.ok(orders, raw=payload)
 
-    def cancel_all_orders(self, symbol: str) -> Dict[str, Any]:
-        open_orders = self.get_open_orders(symbol)
-        if isinstance(open_orders, dict) and "error" in open_orders:
-            return open_orders
+    def cancel_all_orders(self, symbol: str) -> ApiResponse:
+        open_orders_response = self.get_open_orders(symbol)
+        if not open_orders_response.success:
+            return open_orders_response
 
+        open_orders = open_orders_response.data
         if not isinstance(open_orders, list):
-            return {"error": "Unexpected open orders payload"}
+            return ApiResponse.error("Unexpected open orders payload")
 
         cancelled = 0
         errors: List[str] = []
         for order in open_orders:
-            identifier = (
-                order.get("clientOrderIndex")
-                or order.get("orderIndex")
-                or order.get("orderId")
-                or order.get("id")
-            )
+            identifier = order.client_order_id or order.order_id
             if identifier is None:
                 continue
             result = self.cancel_order(str(identifier), symbol)
-            if isinstance(result, dict) and "error" in result:
-                errors.append(result["error"])
+            if not result.success:
+                errors.append(result.error_message or "Unknown error")
             else:
                 cancelled += 1
 
-        response: Dict[str, Any] = {"cancelled": cancelled}
+        raw_response = {"cancelled": cancelled}
         if errors:
-            response["errors"] = errors
-        return response
+            raw_response["errors"] = errors
+        
+        cancel_result = CancelResult(
+            success=cancelled > 0 or len(errors) == 0,
+            cancelled_count=cancelled,
+            error_message="; ".join(errors) if errors else None,
+            raw=raw_response,
+        )
+        return ApiResponse.ok(cancel_result, raw=raw_response)
 
-    def cancel_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
+    def cancel_order(self, order_id: str, symbol: str) -> ApiResponse:
         signer = self._ensure_signer_client()
         if not signer:
-            return {"error": "Signer client is not configured"}
+            return ApiResponse.error("Signer client is not configured")
 
         market = self._lookup_market(symbol)
         if not market:
-            return {"error": f"Unknown symbol {symbol}"}
+            return ApiResponse.error(f"Unknown symbol {symbol}")
 
         market_id = market.get("market_id")
         if market_id is None:
-            return {"error": f"Market id missing for {symbol}"}
+            return ApiResponse.error(f"Market id missing for {symbol}")
 
         order_index = self._as_int(order_id)
         if order_index is None:
-            open_orders = self.get_open_orders(symbol)
-            if isinstance(open_orders, list):
-                for order in open_orders:
-                    if str(order.get("id")) == str(order_id) or str(order.get("orderId")) == str(order_id):
-                        candidate = order.get("clientOrderIndex") or order.get("orderIndex")
+            open_orders_response = self.get_open_orders(symbol)
+            if open_orders_response.success and isinstance(open_orders_response.data, list):
+                for order in open_orders_response.data:
+                    if str(order.order_id) == str(order_id):
+                        candidate = order.client_order_id or order.order_id
                         order_index = self._as_int(candidate)
                         if order_index is not None:
                             break
-            elif isinstance(open_orders, dict) and "error" in open_orders:
-                return open_orders
+            elif not open_orders_response.success:
+                return open_orders_response
 
         if order_index is None:
-            return {"error": f"Unable to resolve order index for {order_id}"}
+            return ApiResponse.error(f"Unable to resolve order index for {order_id}")
 
         tx_payload, tx_response, error = signer.cancel_order(
             market_index=int(market_id),
@@ -1689,13 +1739,13 @@ class LighterClient(BaseExchangeClient):
         )
 
         if error:
-            return {"error": error}
+            return ApiResponse.error(error)
 
         if not tx_response or tx_response.get("code") != 200:
             message = tx_response.get("message") if tx_response else "unknown error"
-            return {"error": f"Cancel order failed: {message}"}
+            return ApiResponse.error(f"Cancel order failed: {message}")
 
-        return {
+        raw_result = {
             "id": str(order_index),
             "orderId": str(order_index),
             "symbol": symbol,
@@ -1703,27 +1753,34 @@ class LighterClient(BaseExchangeClient):
             "status": "cancelled",
             "payload": tx_payload,
         }
+        cancel_result = CancelResult(
+            success=True,
+            order_id=str(order_index),
+            cancelled_count=1,
+            raw=raw_result,
+        )
+        return ApiResponse.ok(cancel_result, raw=raw_result)
 
     def get_fill_history(
         self,
         symbol: Optional[str] = None,
         limit: int = 100,
-    ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    ) -> ApiResponse:
         if self.account_index is None:
-            return {"error": "Account index is not configured"}
+            return ApiResponse.error("Account index is not configured")
 
         market_id: Optional[int] = None
         if symbol:
             market = self._lookup_market(symbol)
             if not market:
-                return {"error": f"Unknown symbol {symbol}"}
+                return ApiResponse.error(f"Unknown symbol {symbol}")
             market_id = market.get("market_id")
             if market_id is None:
-                return {"error": f"Market id missing for {symbol}"}
+                return ApiResponse.error(f"Market id missing for {symbol}")
 
         auth = self._get_auth_token()
         if auth is None:
-            return {"error": "Unable to generate auth token"}
+            return ApiResponse.error("Unable to generate auth token")
 
         params: Dict[str, Any] = {
             "sort_by": "timestamp",
@@ -1741,25 +1798,39 @@ class LighterClient(BaseExchangeClient):
             params=params,
             headers={"authorization": auth},
         )
-        if isinstance(payload, dict) and "error" in payload:
-            return payload
+        error = self._check_raw_error(payload)
+        if error:
+            return error
 
         trades = payload.get("trades") if isinstance(payload, dict) else None
-        records: List[Dict[str, Any]] = []
+        records: List[TradeInfo] = []
         if isinstance(trades, list):
             for entry in trades:
                 if isinstance(entry, dict):
-                    records.append(self._normalize_trade_record(entry))
-        return records
+                    normalized = self._normalize_trade_record(entry)
+                    records.append(TradeInfo(
+                        trade_id=normalized.get("trade_id"),
+                        order_id=normalized.get("order_id"),
+                        symbol=symbol,
+                        side=normalized.get("side"),
+                        price=normalized.get("price"),
+                        quantity=normalized.get("size"),
+                        fee=normalized.get("fee"),
+                        fee_asset=normalized.get("fee_asset"),
+                        is_maker=normalized.get("is_maker"),
+                        timestamp=normalized.get("timestamp"),
+                        raw=normalized,
+                    ))
+        return ApiResponse.ok(records, raw=payload)
 
-    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> List[Dict[str, Any]]:
+    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> ApiResponse:
         market = self._lookup_market(symbol)
         if not market:
-            return []
+            return ApiResponse.error(f"Unknown symbol {symbol}")
 
         market_id = market.get("market_id")
         if market_id is None:
-            return []
+            return ApiResponse.error(f"Market id missing for {symbol}")
 
         interval_seconds = {
             "1m": 60,
@@ -1784,35 +1855,36 @@ class LighterClient(BaseExchangeClient):
                 "count_back": max(limit, 1),
             },
         )
-        if isinstance(payload, dict) and "error" in payload:
-            return []
+        error = self._check_raw_error(payload)
+        if error:
+            return error
 
         items = payload.get("candlesticks") if isinstance(payload, dict) else None
-        klines: List[Dict[str, Any]] = []
+        klines: List[KlineInfo] = []
         if isinstance(items, list):
             for candle in items:
                 if isinstance(candle, dict):
-                    klines.append(
-                        {
-                            "open_time": candle.get("timestamp"),
-                            "close_time": candle.get("timestamp"),
-                            "open": self._safe_float(candle.get("open")),
-                            "high": self._safe_float(candle.get("high")),
-                            "low": self._safe_float(candle.get("low")),
-                            "close": self._safe_float(candle.get("close")),
-                            "volume": self._safe_float(candle.get("volume0")),
-                            "quote_volume": self._safe_float(candle.get("volume1")),
-                        }
-                    )
-        return klines
+                    klines.append(KlineInfo(
+                        open_time=candle.get("timestamp"),
+                        close_time=candle.get("timestamp"),
+                        open_price=self._safe_float(candle.get("open")),
+                        high_price=self._safe_float(candle.get("high")),
+                        low_price=self._safe_float(candle.get("low")),
+                        close_price=self._safe_float(candle.get("close")),
+                        volume=self._safe_float(candle.get("volume0")),
+                        quote_volume=self._safe_float(candle.get("volume1")),
+                        raw=candle,
+                    ))
+        return ApiResponse.ok(klines, raw=payload)
 
-    def get_positions(self, symbol: Optional[str] = None) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    def get_positions(self, symbol: Optional[str] = None) -> ApiResponse:
         account = self._fetch_account_details()
-        if isinstance(account, dict) and "error" in account:
-            return account
+        error = self._check_raw_error(account)
+        if error:
+            return error
 
         positions = account.get("positions", [])
-        results: List[Dict[str, Any]] = []
+        results: List[PositionInfo] = []
         target_key = self._normalize_symbol_key(symbol) if symbol else None
         if isinstance(positions, list):
             for position in positions:
@@ -1823,8 +1895,20 @@ class LighterClient(BaseExchangeClient):
                     pos_symbol = record.get("symbol")
                     if not pos_symbol or self._normalize_symbol_key(pos_symbol) != target_key:
                         continue
-                results.append(record)
-        return results
+                results.append(PositionInfo(
+                    symbol=record.get("symbol"),
+                    side=record.get("side"),
+                    size=record.get("size"),
+                    entry_price=record.get("entryPrice"),
+                    mark_price=None,
+                    liquidation_price=record.get("liquidationPrice"),
+                    unrealized_pnl=record.get("unrealizedPnl"),
+                    realized_pnl=record.get("realizedPnl"),
+                    leverage=None,
+                    margin_mode=record.get("marginMode"),
+                    raw=record,
+                ))
+        return ApiResponse.ok(results, raw=account)
 
     # ---- Normalisation helpers -------------------------------------------------
     def _convert_levels(self, levels: Optional[Sequence[Dict[str, Any]]]) -> List[List[float]]:

@@ -23,7 +23,26 @@ except ImportError:
     HAS_ZKLINK = False
     zk_sdk = None
 
-from .base_client import BaseExchangeClient
+from .base_client import (
+    BaseExchangeClient,
+    ApiResponse,
+    OrderResult,
+    OrderInfo,
+    BalanceInfo,
+    CollateralInfo,
+    PositionInfo,
+    MarketInfo,
+    TickerInfo,
+    OrderBookInfo,
+    OrderBookLevel,
+    KlineInfo,
+    TradeInfo,
+    CancelResult,
+    BatchOrderResult,
+    safe_float,
+    safe_decimal,
+    safe_int,
+)
 from .proxy_utils import get_proxy_config
 from logger import setup_logger
 
@@ -107,16 +126,18 @@ class ApexClient(BaseExchangeClient):
         if self._symbol_cache and self._market_info_cache and self._cross_symbol_cache:
             return
 
-        info = self.get_markets()
-        if isinstance(info, dict) and info.get("error"):
-            logger.error("獲取交易對列表失敗: %s", info["error"])
+        response = self.get_markets()
+        if not response.success:
+            logger.error("獲取交易對列表失敗: %s", response.error_message)
             self._symbol_cache = {}
             self._market_info_cache = {}
             self._cross_symbol_cache = {}
             return
 
         # APEX Omni v3 API returns contracts in contractConfig.perpetualContract
-        data = info.get("data", {}) if isinstance(info, dict) else {}
+        # response.raw 是原始字典數據
+        raw_data = response.raw or {}
+        data = raw_data.get("data", {}) if isinstance(raw_data, dict) else {}
         contracts: List[Dict[str, Any]] = []
 
         # v3 structure: data.contractConfig.perpetualContract
@@ -242,35 +263,39 @@ class ApexClient(BaseExchangeClient):
             return
 
         # Use /api/v3/symbols endpoint for config data (most reliable)
-        result = self.get_markets()
-        if isinstance(result, dict) and "error" not in result:
-            data = result.get("data", {})
-
-            # v3 structure: data.contractConfig.perpetualContract
-            perpetual_contracts = []
-            assets = []
-
-            contract_config = data.get("contractConfig", {})
-            if contract_config:
-                perp_contracts = contract_config.get("perpetualContract", [])
-                if perp_contracts:
-                    perpetual_contracts.extend(perp_contracts)
-                    logger.debug(f"從 contractConfig 讀取 {len(perp_contracts)} 個合約配置")
-                config_assets = contract_config.get("assets", [])
-                if config_assets:
-                    assets.extend(config_assets)
-
-            self._config_data = {
-                "contractConfig": {
-                    "perpetualContract": perpetual_contracts,
-                    "assets": assets,
-                },
-                "raw": data
-            }
-            logger.debug(f"配置數據已緩存: {len(perpetual_contracts)} 個合約, {len(assets)} 個資產")
-        else:
-            logger.error("獲取配置資料失敗: %s", result.get("error", "unknown") if result else "unknown")
+        response = self.get_markets()
+        
+        # get_markets 返回 ApiResponse，需要正確處理
+        if not response.success:
+            logger.error("獲取配置資料失敗: %s", response.error_message or "unknown")
             self._config_data = {}
+            return
+        
+        # 從 ApiResponse.raw 獲取原始數據
+        data = response.raw.get("data", {}) if isinstance(response.raw, dict) else {}
+
+        # v3 structure: data.contractConfig.perpetualContract
+        perpetual_contracts = []
+        assets = []
+
+        contract_config = data.get("contractConfig", {})
+        if contract_config:
+            perp_contracts = contract_config.get("perpetualContract", [])
+            if perp_contracts:
+                perpetual_contracts.extend(perp_contracts)
+                logger.debug(f"從 contractConfig 讀取 {len(perp_contracts)} 個合約配置")
+            config_assets = contract_config.get("assets", [])
+            if config_assets:
+                assets.extend(config_assets)
+
+        self._config_data = {
+            "contractConfig": {
+                "perpetualContract": perpetual_contracts,
+                "assets": assets,
+            },
+            "raw": data
+        }
+        logger.debug(f"配置數據已緩存: {len(perpetual_contracts)} 個合約, {len(assets)} 個資產")
 
     def _sign_order(self, symbol: str, side: str, size: str, price: str, client_id: str) -> Optional[str]:
         """Sign order using zkLink SDK.
@@ -547,12 +572,15 @@ class ApexClient(BaseExchangeClient):
 
         return {"error": "達到最大重試次數"}
 
-    def get_deposit_address(self, blockchain: str) -> Dict[str, Any]:
-        return {"error": "請使用 APEX 網頁界面獲取充值地址"}
+    def get_deposit_address(self, blockchain: str) -> ApiResponse:
+        return ApiResponse.error("請使用 APEX 網頁界面獲取充值地址")
 
-    def get_balance(self) -> Dict[str, Any]:
-        balances: Dict[str, Dict[str, Any]] = {}
-
+    def get_balance(self) -> ApiResponse:
+        """獲取帳戶餘額。
+        
+        Returns:
+            ApiResponse with List[BalanceInfo]
+        """
         # 獲取 account-balance 的 totalEquityValue（可用保證金）
         balance_result = self.make_request(
             "GET",
@@ -575,35 +603,45 @@ class ApexClient(BaseExchangeClient):
         )
 
         if isinstance(account_result, dict) and "error" in account_result:
-            return account_result
+            return ApiResponse.error(
+                account_result.get("error", "Unknown error"),
+                raw=account_result
+            )
 
         data = account_result.get("data", {})
         contract_wallets = data.get("contractWallets", [])
-
+        
+        balances: List[BalanceInfo] = []
+        
         if contract_wallets:
             wallet = contract_wallets[0]
-            wallet_balance = float(wallet.get("balance", 0))
+            wallet_balance = safe_float(wallet.get("balance", 0))
             token = wallet.get("token", "USDC")
 
-            balances[token] = {
-                "available": total_equity,  # totalEquityValue = 可用保證金
-                "locked": max(wallet_balance - total_equity, 0.0),  # 使用中
-                "total": wallet_balance,  # contractWallets.balance = 錢包餘額
-                "asset": token,
-                "raw": data,
-            }
+            balances.append(BalanceInfo(
+                asset=token,
+                available=total_equity,
+                locked=max(wallet_balance - total_equity, 0.0),
+                total=wallet_balance,
+                raw=data,
+            ))
         else:
-            balances["USDC"] = {
-                "available": total_equity,
-                "locked": 0.0,
-                "total": total_equity,
-                "asset": "USDC",
-                "raw": data,
-            }
+            balances.append(BalanceInfo(
+                asset="USDC",
+                available=total_equity,
+                locked=0.0,
+                total=total_equity,
+                raw=data,
+            ))
 
-        return balances
+        return ApiResponse.ok(balances, raw=account_result)
 
-    def get_collateral(self, subaccount_id: Optional[str] = None) -> Dict[str, Any]:
+    def get_collateral(self, subaccount_id: Optional[str] = None) -> ApiResponse:
+        """獲取抵押品資訊。
+        
+        Returns:
+            ApiResponse with CollateralInfo
+        """
         result = self.make_request(
             "GET",
             "/api/v3/account",
@@ -612,56 +650,65 @@ class ApexClient(BaseExchangeClient):
         )
 
         if isinstance(result, dict) and "error" in result:
-            return result
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
 
         data = result.get("data", {})
 
         # 從 contractWallets 獲取合約錢包餘額
         contract_wallets = data.get("contractWallets", [])
-        total_balance = "0"
+        total_balance = safe_decimal(0)
         token = "USDC"
         if contract_wallets:
             wallet = contract_wallets[0]
-            total_balance = wallet.get("balance", "0")
+            total_balance = safe_decimal(wallet.get("balance", "0"))
             token = wallet.get("token", "USDC")
 
         # 從 contractAccount 獲取費率信息
         contract_account = data.get("contractAccount", {})
 
-        return {
-            "totalCollateral": total_balance,
-            "availableCollateral": total_balance,  # 合約錢包餘額
-            "initialMargin": "0",
-            "maintenanceMargin": "0",
-            "token": token,
-            "makerFeeRate": contract_account.get("makerFeeRate", "0"),
-            "takerFeeRate": contract_account.get("takerFeeRate", "0"),
-            "raw": data
-        }
+        collateral = CollateralInfo(
+            asset=token,
+            total_collateral=total_balance,
+            free_collateral=total_balance,
+            initial_margin=safe_decimal(0),
+            maintenance_margin=safe_decimal(0),
+            raw=data,
+        )
 
-    def execute_order(self, order_details: Dict[str, Any]) -> Dict[str, Any]:
+        return ApiResponse.ok(collateral, raw=result)
+
+    def execute_order(self, order_details: Dict[str, Any]) -> ApiResponse:
+        """執行訂單。
+        
+        Returns:
+            ApiResponse with OrderResult
+        """
         symbol = order_details.get("symbol")
         if not symbol:
-            return {"error": "缺少交易對", "status_code": 400}
+            return ApiResponse.error("缺少交易對")
 
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
+            suggestions = self._find_symbol_suggestions(symbol)
+            message = f"無法解析交易對: {symbol}"
+            if suggestions:
+                message += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(message)
 
         side = order_details.get("side")
         if not side:
-            return {"error": "缺少買賣方向"}
+            return ApiResponse.error("缺少買賣方向")
 
         if side.lower() in {"bid", "buy"}:
             normalized_side = "BUY"
         elif side.lower() in {"ask", "sell"}:
             normalized_side = "SELL"
         else:
-            return {"error": f"不支持的方向: {side}"}
+            return ApiResponse.error(f"不支持的方向: {side}")
 
         order_type = order_details.get("orderType") or order_details.get("type")
         if not order_type:
-            return {"error": "缺少訂單類型"}
+            return ApiResponse.error("缺少訂單類型")
 
         # Map order types to APEX format
         type_mapping = {
@@ -707,9 +754,9 @@ class ApexClient(BaseExchangeClient):
         # APEX 的市價單實際上也需要價格參數（用於計算 limitFee 和簽名）
         # 如果是市價單且沒有提供價格，則獲取當前市場價格
         if normalized_type == "MARKET" and price is None:
-            ticker = self.get_ticker(symbol)
-            if isinstance(ticker, dict) and "lastPrice" in ticker:
-                market_price = float(ticker["lastPrice"])
+            ticker_response = self.get_ticker(symbol)
+            if ticker_response.success and ticker_response.data:
+                market_price = ticker_response.data.last_price
                 # 市價買單用較高價格，市價賣單用較低價格（確保能成交）
                 slippage = 0.01  # 1% 滑點容忍
                 if normalized_side == "BUY":
@@ -718,7 +765,7 @@ class ApexClient(BaseExchangeClient):
                     price = market_price * (1 - slippage)
                 logger.debug("市價單使用參考價格: %.4f (市場價: %.4f)", price, market_price)
             else:
-                return {"error": "無法獲取市場價格，市價單需要價格參考"}
+                return ApiResponse.error("無法獲取市場價格，市價單需要價格參考")
         
         # 確保價格符合 tickSize 精度要求
         if price is not None:
@@ -781,7 +828,7 @@ class ApexClient(BaseExchangeClient):
         if zk_signature:
             payload["signature"] = zk_signature
         else:
-            return {"error": "無法生成 zkKey 簽名。請前往 https://omni.apex.exchange/keyManagement 點擊 'Omni Key' 獲取 zk_seeds 並添加到配置中"}
+            return ApiResponse.error("無法生成 zkKey 簽名。請前往 https://omni.apex.exchange/keyManagement 點擊 'Omni Key' 獲取 zk_seeds 並添加到配置中")
 
         result = self.make_request(
             "POST",
@@ -794,24 +841,50 @@ class ApexClient(BaseExchangeClient):
         if isinstance(result, dict):
             # Check for error in response (can be 'error' or 'code' field)
             if "error" in result:
-                return result
+                return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
             if result.get("code") and result.get("code") != 0:
-                return {"error": result.get("msg", f"Order failed with code {result.get('code')}"), "details": result}
+                return ApiResponse.error(
+                    result.get("msg", f"Order failed with code {result.get('code')}"),
+                    raw=result
+                )
 
-        return self._normalize_order_fields(result.get("data", result))
+        data = result.get("data", result)
+        normalized = self._normalize_order_fields(data)
+        
+        order_result = OrderResult(
+            success=True,
+            order_id=str(normalized.get("id", normalized.get("orderId", ""))),
+            client_order_id=normalized.get("clientId", client_id),
+            symbol=resolved_symbol,
+            side=normalized.get("side", normalized_side),
+            order_type=normalized.get("type", normalized_type),
+            price=safe_decimal(normalized.get("price", price)),
+            size=safe_decimal(normalized.get("size", quantity)),
+            status=normalized.get("status", "NEW"),
+            raw=data,
+        )
+        
+        return ApiResponse.ok(order_result, raw=result)
 
-    def get_open_orders(self, symbol: Optional[str] = None) -> Any:
+    def get_open_orders(self, symbol: Optional[str] = None) -> ApiResponse:
         """Get all open orders.
         
         Note: APEX API v3/open-orders returns all open orders without symbol filter.
         Client-side filtering is applied if symbol is specified.
+        
+        Returns:
+            ApiResponse with List[OrderInfo]
         """
         # Resolve symbol for client-side filtering if provided
         filter_symbol = None
         if symbol:
             filter_symbol = self._resolve_symbol(symbol)
             if not filter_symbol:
-                return self._unknown_symbol_error(symbol)
+                suggestions = self._find_symbol_suggestions(symbol)
+                message = f"無法解析交易對: {symbol}"
+                if suggestions:
+                    message += f"。可能的交易對: {', '.join(suggestions)}"
+                return ApiResponse.error(message)
 
         result = self.make_request(
             "GET",
@@ -821,7 +894,7 @@ class ApexClient(BaseExchangeClient):
         )
 
         if isinstance(result, dict) and "error" in result:
-            return result
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
 
         # Handle different response formats
         # API returns: {"data": [{order1}, {order2}, ...]}
@@ -834,23 +907,45 @@ class ApexClient(BaseExchangeClient):
             else:
                 orders = data.get("orders", [])
 
-        normalized: List[Dict[str, Any]] = []
+        order_list: List[OrderInfo] = []
         for item in orders:
             # Client-side filtering by symbol if specified
             if filter_symbol:
                 order_symbol = item.get("symbol", "")
                 if order_symbol != filter_symbol:
                     continue
-            normalized.append(self._normalize_order_fields(dict(item)))
-        return normalized
+            
+            normalized = self._normalize_order_fields(dict(item))
+            size_val = safe_decimal(normalized.get("size", normalized.get("quantity")))
+            filled_val = safe_decimal(normalized.get("filledQty", normalized.get("filledSize", 0)))
+            order_info = OrderInfo(
+                order_id=str(normalized.get("id", normalized.get("orderId", ""))),
+                client_order_id=normalized.get("clientId"),
+                symbol=normalized.get("symbol", ""),
+                side=normalized.get("side", ""),
+                order_type=normalized.get("type", ""),
+                price=safe_decimal(normalized.get("price")),
+                size=size_val,
+                filled_size=filled_val,
+                remaining_size=size_val - filled_val if size_val and filled_val else size_val,
+                status=normalized.get("status", ""),
+                created_at=normalized.get("createdAt"),
+                raw=item,
+            )
+            order_list.append(order_info)
+        
+        return ApiResponse.ok(order_list, raw=result)
 
-    def cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+    def cancel_all_orders(self, symbol: Optional[str] = None) -> ApiResponse:
         """Cancel all open orders for a symbol or all symbols.
         
         Args:
             symbol: Optional symbol to cancel orders for (e.g., "BTC-USDC").
                    If None, cancels all open orders.
                    Can also be comma-separated for multiple symbols (e.g., "BTC-USDC,ETH-USDC").
+        
+        Returns:
+            ApiResponse with CancelResult
         """
         data: Dict[str, Any] = {}
         
@@ -862,14 +957,22 @@ class ApexClient(BaseExchangeClient):
                 for s in symbols:
                     resolved = self._resolve_symbol(s)
                     if not resolved:
-                        return self._unknown_symbol_error(s)
+                        suggestions = self._find_symbol_suggestions(s)
+                        message = f"無法解析交易對: {s}"
+                        if suggestions:
+                            message += f"。可能的交易對: {', '.join(suggestions)}"
+                        return ApiResponse.error(message)
                     resolved_symbols.append(resolved)
                 # API expects format: "BTC-USDC,ETH-USDC"
                 data["symbol"] = ",".join(resolved_symbols)
             else:
                 resolved_symbol = self._resolve_symbol(symbol)
                 if not resolved_symbol:
-                    return self._unknown_symbol_error(symbol)
+                    suggestions = self._find_symbol_suggestions(symbol)
+                    message = f"無法解析交易對: {symbol}"
+                    if suggestions:
+                        message += f"。可能的交易對: {', '.join(suggestions)}"
+                    return ApiResponse.error(message)
                 # Use original symbol format (e.g., BTC-USDC), NOT crossSymbolName
                 data["symbol"] = resolved_symbol
 
@@ -880,14 +983,27 @@ class ApexClient(BaseExchangeClient):
             data=data if data else None,
             retry_count=self.max_retries,
         )
-        return result
+        
+        if isinstance(result, dict) and "error" in result:
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
+        
+        cancel_result = CancelResult(
+            success=True,
+            order_id=None,
+            error_message=None,
+            raw=result,
+        )
+        return ApiResponse.ok(cancel_result, raw=result)
 
-    def cancel_order(self, order_id: str, symbol: Optional[str] = None) -> Dict[str, Any]:
+    def cancel_order(self, order_id: str, symbol: Optional[str] = None) -> ApiResponse:
         """Cancel a single order by order ID.
         
         Args:
             order_id: The order ID to cancel.
             symbol: Optional symbol (not required by API, kept for compatibility).
+        
+        Returns:
+            ApiResponse with CancelResult
         """
         result = self.make_request(
             "POST",
@@ -899,23 +1015,45 @@ class ApexClient(BaseExchangeClient):
 
         if isinstance(result, dict):
             if "error" in result:
-                return result
+                return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
             if result.get("code") and result.get("code") != 0:
-                return {"error": result.get("msg", f"Cancel failed with code {result.get('code')}"), "details": result}
+                return ApiResponse.error(
+                    result.get("msg", f"Cancel failed with code {result.get('code')}"),
+                    raw=result
+                )
             # API returns: {"data": "123456"} where data is the order ID
             data = result.get("data", result)
-            if isinstance(data, str):
-                return {"success": True, "orderId": data}
-            if isinstance(data, dict):
-                return self._normalize_order_fields(data)
-            return {"success": True, "data": data}
+            cancelled_id = data if isinstance(data, str) else str(data.get("id", order_id)) if isinstance(data, dict) else order_id
+            
+            cancel_result = CancelResult(
+                success=True,
+                order_id=cancelled_id,
+                cancelled_count=1,
+                raw=result,
+            )
+            return ApiResponse.ok(cancel_result, raw=result)
 
-        return {"success": True}
+        cancel_result = CancelResult(
+            success=True,
+            order_id=order_id,
+            cancelled_count=1,
+            raw=result,
+        )
+        return ApiResponse.ok(cancel_result, raw=result)
 
-    def get_ticker(self, symbol: str) -> Dict[str, Any]:
+    def get_ticker(self, symbol: str) -> ApiResponse:
+        """獲取行情報價。
+        
+        Returns:
+            ApiResponse with TickerInfo
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
+            suggestions = self._find_symbol_suggestions(symbol)
+            message = f"無法解析交易對: {symbol}"
+            if suggestions:
+                message += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(message)
 
         # Ticker API requires crossSymbolName format (e.g., BTCUSDT instead of BTC-USDT)
         self._ensure_symbol_cache()
@@ -929,7 +1067,7 @@ class ApexClient(BaseExchangeClient):
         )
 
         if isinstance(result, dict) and "error" in result:
-            return result
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
 
         data = result.get("data", result)
 
@@ -939,46 +1077,111 @@ class ApexClient(BaseExchangeClient):
                 data = data[0]
             else:
                 # Fallback: get price from orderbook
-                orderbook = self.get_order_book(resolved_symbol, limit=1)
-                if not isinstance(orderbook, dict) or "error" in orderbook:
-                    return {"error": f"無法獲取 {resolved_symbol} 的價格數據，APEX API 返回空數據"}
+                orderbook_response = self.get_order_book(resolved_symbol, limit=1)
+                if not orderbook_response.success:
+                    return ApiResponse.error(f"無法獲取 {resolved_symbol} 的價格數據，APEX API 返回空數據")
 
-                bids = orderbook.get("bids", [])
-                asks = orderbook.get("asks", [])
-
-                if bids and asks:
-                    best_bid = float(bids[0][0])
-                    best_ask = float(asks[0][0])
+                orderbook = orderbook_response.data
+                if orderbook.bids and orderbook.asks:
+                    best_bid = float(orderbook.bids[0].price)
+                    best_ask = float(orderbook.asks[0].price)
                     mid_price = (best_bid + best_ask) / 2
-                    return {"lastPrice": str(mid_price), "symbol": resolved_symbol}
+                    
+                    ticker = TickerInfo(
+                        symbol=resolved_symbol,
+                        last_price=mid_price,
+                        raw={"lastPrice": str(mid_price), "symbol": resolved_symbol},
+                    )
+                    return ApiResponse.ok(ticker, raw=result)
                 else:
-                    return {"error": f"無法獲取 {resolved_symbol} 的價格數據，訂單簿為空"}
+                    return ApiResponse.error(f"無法獲取 {resolved_symbol} 的價格數據，訂單簿為空")
 
         # Normalize to standard format
-        if "lastPrice" not in data and "price" in data:
-            data["lastPrice"] = data["price"]
+        last_price = safe_float(data.get("lastPrice", data.get("price")))
+        
+        ticker = TickerInfo(
+            symbol=resolved_symbol,
+            last_price=last_price,
+            bid_price=safe_float(data.get("bestBid")),
+            ask_price=safe_float(data.get("bestAsk")),
+            volume_24h=safe_float(data.get("volume24h", data.get("volume"))),
+            high_24h=safe_float(data.get("high24h", data.get("highPrice"))),
+            low_24h=safe_float(data.get("low24h", data.get("lowPrice"))),
+            raw=data,
+        )
 
-        return data
+        return ApiResponse.ok(ticker, raw=result)
 
-    def get_markets(self) -> Dict[str, Any]:
-        return self.make_request(
+    def get_markets(self) -> ApiResponse:
+        """獲取市場資訊。
+        
+        Returns:
+            ApiResponse with List[MarketInfo]
+        """
+        result = self.make_request(
             "GET",
             "/api/v3/symbols",
             retry_count=self.max_retries,
         )
+        
+        if isinstance(result, dict) and "error" in result:
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
+        
+        data = result.get("data", {})
+        contract_config = data.get("contractConfig", {})
+        contracts = contract_config.get("perpetualContract", [])
+        
+        markets: List[MarketInfo] = []
+        for item in contracts:
+            symbol = item.get("symbol", "")
+            parts = symbol.split("-")
+            base_asset = parts[0] if len(parts) > 0 else symbol
+            quote_asset = parts[1] if len(parts) > 1 else "USDT"
+            
+            market = MarketInfo(
+                symbol=symbol,
+                base_asset=base_asset,
+                quote_asset=quote_asset,
+                market_type="PERP",
+                status="TRADING",
+                min_order_size=safe_decimal(item.get("minOrderSize", "0.001")),
+                tick_size=safe_decimal(item.get("tickSize", "0.1")),
+                raw=item,
+            )
+            markets.append(market)
+        
+        return ApiResponse.ok(markets, raw=result)
 
-    def get_server_time(self) -> Dict[str, Any]:
-        """Get server time to check clock sync."""
-        return self.make_request(
+    def get_server_time(self) -> ApiResponse:
+        """Get server time to check clock sync.
+        
+        Returns:
+            ApiResponse with server time dict
+        """
+        result = self.make_request(
             "GET",
             "/api/v3/time",
             retry_count=self.max_retries,
         )
+        
+        if isinstance(result, dict) and "error" in result:
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
+        
+        return ApiResponse.ok(result, raw=result)
 
-    def get_order_book(self, symbol: str, limit: int = 20) -> Dict[str, Any]:
+    def get_order_book(self, symbol: str, limit: int = 20) -> ApiResponse:
+        """獲取訂單簿。
+        
+        Returns:
+            ApiResponse with OrderBookInfo
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
+            suggestions = self._find_symbol_suggestions(symbol)
+            message = f"無法解析交易對: {symbol}"
+            if suggestions:
+                message += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(message)
 
         # Depth API requires crossSymbolName format (e.g., BTCUSDT instead of BTC-USDT)
         self._ensure_symbol_cache()
@@ -992,62 +1195,113 @@ class ApexClient(BaseExchangeClient):
         )
 
         if isinstance(result, dict) and "error" in result:
-            return result
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
 
         data = result.get("data", result)
-        bids = data.get("b", data.get("bids", []))
-        asks = data.get("a", data.get("asks", []))
+        bids_raw = data.get("b", data.get("bids", []))
+        asks_raw = data.get("a", data.get("asks", []))
 
         # Handle null data from API
-        if bids is None:
-            bids = []
-        if asks is None:
-            asks = []
+        if bids_raw is None:
+            bids_raw = []
+        if asks_raw is None:
+            asks_raw = []
 
         # Check if orderbook is empty
-        if not bids and not asks:
-            return {"error": f"APEX API 返回空訂單簿數據 (symbol: {resolved_symbol})，請確認交易對是否有流動性", "bids": [], "asks": []}
+        if not bids_raw and not asks_raw:
+            return ApiResponse.error(
+                f"APEX API 返回空訂單簿數據 (symbol: {resolved_symbol})，請確認交易對是否有流動性",
+                raw=result
+            )
 
         # Sort bids descending, asks ascending
         try:
-            bids = sorted(bids, key=lambda level: float(level[0]), reverse=True)
-            asks = sorted(asks, key=lambda level: float(level[0]))
+            bids_raw = sorted(bids_raw, key=lambda level: float(level[0]), reverse=True)
+            asks_raw = sorted(asks_raw, key=lambda level: float(level[0]))
         except (ValueError, TypeError, IndexError):
             pass
 
-        return {"bids": bids, "asks": asks}
+        # Convert to OrderBookLevel
+        bids = [OrderBookLevel(price=safe_decimal(b[0]), quantity=safe_decimal(b[1])) for b in bids_raw]
+        asks = [OrderBookLevel(price=safe_decimal(a[0]), quantity=safe_decimal(a[1])) for a in asks_raw]
+        
+        orderbook = OrderBookInfo(
+            symbol=resolved_symbol,
+            bids=bids,
+            asks=asks,
+            raw=data,
+        )
+        
+        return ApiResponse.ok(orderbook, raw=result)
 
-    def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100, page: int = 0) -> Any:
+    def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100, page: int = 0) -> ApiResponse:
         """獲取成交歷史（已成交的訂單）
 
         Args:
             symbol: 交易對符號 (如 BTC-USDT)，使用原始格式
             limit: 返回數量限制，預設 100
             page: 頁碼，從 0 開始
-
+        
         Returns:
-            成交歷史列表，格式為 {"orders": [...], "totalSize": N}
+            ApiResponse with List[TradeInfo]
         """
         params = {"limit": limit, "page": page}
+        resolved_symbol = None
         if symbol:
             resolved_symbol = self._resolve_symbol(symbol)
             if not resolved_symbol:
-                return self._unknown_symbol_error(symbol)
+                suggestions = self._find_symbol_suggestions(symbol)
+                message = f"無法解析交易對: {symbol}"
+                if suggestions:
+                    message += f"。可能的交易對: {', '.join(suggestions)}"
+                return ApiResponse.error(message)
             # fills API 需要原始格式 (BTC-USDT)，不是 crossSymbolName (BTCUSDT)
             params["symbol"] = resolved_symbol
 
-        return self.make_request(
+        result = self.make_request(
             "GET",
             "/api/v3/fills",
             instruction=True,
             params=params,
             retry_count=self.max_retries,
         )
+        
+        if isinstance(result, dict) and "error" in result:
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
+        
+        data = result.get("data", result)
+        orders = data.get("orders", []) if isinstance(data, dict) else data if isinstance(data, list) else []
+        
+        trades: List[TradeInfo] = []
+        for item in orders:
+            trade = TradeInfo(
+                trade_id=str(item.get("id", item.get("orderId", ""))),
+                order_id=str(item.get("orderId", "")),
+                symbol=item.get("symbol", resolved_symbol or ""),
+                side=item.get("side", ""),
+                price=safe_decimal(item.get("price")),
+                size=safe_decimal(item.get("size", item.get("quantity"))),
+                fee=safe_decimal(item.get("fee", 0)),
+                timestamp=item.get("createdAt"),
+                raw=item,
+            )
+            trades.append(trade)
+        
+        return ApiResponse.ok(trades, raw=result)
 
-    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> Any:
+    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> ApiResponse:
+        """獲取 K 線數據。
+        
+        Returns:
+            ApiResponse with List[KlineInfo]
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
+            suggestions = self._find_symbol_suggestions(symbol)
+            message = f"無法解析交易對: {symbol}"
+            if suggestions:
+                message += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(message)
 
         # Klines API requires crossSymbolName format (e.g., BTCUSDT instead of BTC-USDT)
         self._ensure_symbol_cache()
@@ -1071,24 +1325,68 @@ class ApexClient(BaseExchangeClient):
             "limit": limit
         }
 
-        return self.make_request(
+        result = self.make_request(
             "GET",
             "/api/v3/klines",
             params=params,
             retry_count=self.max_retries,
         )
+        
+        if isinstance(result, dict) and "error" in result:
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
+        
+        data = result.get("data", result)
+        klines_raw = data if isinstance(data, list) else []
+        
+        klines: List[KlineInfo] = []
+        for item in klines_raw:
+            # APEX kline format: [open_time, open, high, low, close, volume, close_time]
+            if isinstance(item, list) and len(item) >= 6:
+                kline = KlineInfo(
+                    open_time=safe_int(item[0]),
+                    open=safe_decimal(item[1]),
+                    high=safe_decimal(item[2]),
+                    low=safe_decimal(item[3]),
+                    close=safe_decimal(item[4]),
+                    volume=safe_decimal(item[5]),
+                    close_time=safe_int(item[6]) if len(item) > 6 else None,
+                    raw=item,
+                )
+                klines.append(kline)
+            elif isinstance(item, dict):
+                kline = KlineInfo(
+                    open_time=safe_int(item.get("openTime", item.get("t"))),
+                    open=safe_decimal(item.get("open", item.get("o"))),
+                    high=safe_decimal(item.get("high", item.get("h"))),
+                    low=safe_decimal(item.get("low", item.get("l"))),
+                    close=safe_decimal(item.get("close", item.get("c"))),
+                    volume=safe_decimal(item.get("volume", item.get("v"))),
+                    close_time=safe_int(item.get("closeTime")),
+                    raw=item,
+                )
+                klines.append(kline)
+        
+        return ApiResponse.ok(klines, raw=result)
 
-    def get_market_limits(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def get_market_limits(self, symbol: str) -> ApiResponse:
+        """獲取交易對限制資訊。
+        
+        Returns:
+            ApiResponse with MarketInfo
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            self._unknown_symbol_error(symbol)
-            return None
+            suggestions = self._find_symbol_suggestions(symbol)
+            message = f"無法解析交易對: {symbol}"
+            if suggestions:
+                message += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(message)
 
         self._ensure_symbol_cache()
         symbol_info = self._market_info_cache.get(resolved_symbol)
         if not symbol_info:
             logger.error("交易所返回的資料中找不到交易對 %s", resolved_symbol)
-            return None
+            return ApiResponse.error(f"交易所返回的資料中找不到交易對 {resolved_symbol}")
 
         # Parse symbol (e.g., BTC-USDT -> base=BTC, quote=USDT)
         parts = resolved_symbol.split("-")
@@ -1104,19 +1402,27 @@ class ApexClient(BaseExchangeClient):
         step_size = str(symbol_info.get("stepSize", "0.001"))
         tick_size = str(symbol_info.get("tickSize", "0.1"))
 
-        return {
-            "symbol": resolved_symbol,
-            "base_asset": base_asset,
-            "quote_asset": quote_asset,
-            "market_type": "PERP",
-            "status": "TRADING",
-            "min_order_size": symbol_info.get("minOrderSize", "0.001"),
-            "tick_size": tick_size,
-            "base_precision": get_decimal_places(step_size),
-            "quote_precision": get_decimal_places(tick_size),
-        }
+        market = MarketInfo(
+            symbol=resolved_symbol,
+            base_asset=base_asset,
+            quote_asset=quote_asset,
+            market_type="PERP",
+            status="TRADING",
+            min_order_size=safe_decimal(symbol_info.get("minOrderSize", "0.001")),
+            tick_size=safe_decimal(tick_size),
+            base_precision=get_decimal_places(step_size),
+            quote_precision=get_decimal_places(tick_size),
+            raw=symbol_info,
+        )
+        
+        return ApiResponse.ok(market)
 
-    def get_positions(self, symbol: Optional[str] = None) -> Any:
+    def get_positions(self, symbol: Optional[str] = None) -> ApiResponse:
+        """獲取持倉資訊。
+        
+        Returns:
+            ApiResponse with List[PositionInfo]
+        """
         result = self.make_request(
             "GET",
             "/api/v3/account",
@@ -1125,21 +1431,23 @@ class ApexClient(BaseExchangeClient):
         )
 
         if isinstance(result, dict) and "error" in result:
-            return result
+            return ApiResponse.error(result.get("error", "Unknown error"), raw=result)
 
         data = result.get("data", {})
         # APEX 使用 "positions" 而不是 "openPositions"
         positions_raw = data.get("positions", data.get("openPositions", []))
 
-        normalized: List[Dict[str, Any]] = []
+        filter_symbol = None
+        if symbol:
+            filter_symbol = self._resolve_symbol(symbol)
+
+        positions: List[PositionInfo] = []
         for item in positions_raw:
             item_symbol = item.get("symbol", "")
 
             # Filter by symbol if specified
-            if symbol:
-                resolved = self._resolve_symbol(symbol)
-                if resolved and item_symbol != resolved:
-                    continue
+            if filter_symbol and item_symbol != filter_symbol:
+                continue
 
             raw_size = item.get("size", "0") or "0"
             try:
@@ -1171,18 +1479,15 @@ class ApexClient(BaseExchangeClient):
             # netQuantity: 多頭為正，空頭為負
             net_qty = abs(pos_dec) if mapped_side == "LONG" else -abs(pos_dec)
 
-            normalized.append({
-                "symbol": item_symbol,
-                "side": mapped_side,
-                "positionSide": mapped_side,
-                "netQuantity": self._decimal_to_str(net_qty),
-                "longQuantity": self._decimal_to_str(long_dec),
-                "shortQuantity": self._decimal_to_str(short_dec),
-                "size": self._decimal_to_str(abs(pos_dec)),
-                "entryPrice": entry_price,
-                "pnlUnrealized": unrealized,
-                "unrealizedPnl": unrealized,
-                "raw": item,
-            })
+            position = PositionInfo(
+                symbol=item_symbol,
+                side=mapped_side,
+                size=abs(pos_dec),
+                entry_price=safe_decimal(entry_price),
+                unrealized_pnl=safe_decimal(unrealized),
+                leverage=safe_decimal(item.get("leverage")),
+                raw=item,
+            )
+            positions.append(position)
 
-        return normalized
+        return ApiResponse.ok(positions, raw=result)

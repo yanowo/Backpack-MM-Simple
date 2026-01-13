@@ -7,16 +7,32 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Set
 from decimal import Decimal, InvalidOperation
-from decimal import Decimal, InvalidOperation
 from urllib.parse import urlencode
 
 import requests
 
-from .base_client import BaseExchangeClient
+from .base_client import (
+    BaseExchangeClient,
+    ApiResponse,
+    OrderResult,
+    OrderInfo,
+    BalanceInfo,
+    CollateralInfo,
+    PositionInfo,
+    MarketInfo,
+    TickerInfo,
+    OrderBookInfo,
+    OrderBookLevel,
+    KlineInfo,
+    TradeInfo,
+    CancelResult,
+    BatchOrderResult,
+)
 from .proxy_utils import get_proxy_config
 from logger import setup_logger
 
 logger = setup_logger("api.aster_client")
+
 
 
 class AsterClient(BaseExchangeClient):
@@ -86,14 +102,16 @@ class AsterClient(BaseExchangeClient):
         if self._symbol_cache and self._market_info_cache:
             return
 
-        info = self.get_markets()
-        if isinstance(info, dict) and info.get("error"):
-            logger.error("獲取交易對列表失敗: %s", info["error"])
+        response = self.get_markets()
+        if not response.success:
+            logger.error("獲取交易對列表失敗: %s", response.error_message)
             self._symbol_cache = {}
             self._market_info_cache = {}
             return
 
-        symbols = info.get("symbols", []) if isinstance(info, dict) else []
+        # response.data 是 List[MarketInfo]，response.raw 是原始字典
+        raw_data = response.raw or {}
+        symbols = raw_data.get("symbols", []) if isinstance(raw_data, dict) else []
         cache: Dict[str, str] = {}
         market_cache: Dict[str, Dict[str, Any]] = {}
         for item in symbols:
@@ -252,11 +270,17 @@ class AsterClient(BaseExchangeClient):
                 return {"error": f"請求失敗: {exc}"}
         return {"error": "達到最大重試次數"}
 
-    def get_deposit_address(self, blockchain: str) -> Dict[str, Any]:
-        return {"error": "Aster Futures 不支持通過此API獲取充值地址"}
+    def get_deposit_address(self, blockchain: str) -> ApiResponse:
+        """Aster Futures 不支持此功能"""
+        return ApiResponse.error("Aster Futures 不支持通過此API獲取充值地址")
 
-    def get_balance(self) -> Dict[str, Any]:
-        result = self.make_request(
+    def get_balance(self) -> ApiResponse:
+        """獲取賬户餘額
+        
+        Returns:
+            ApiResponse with data: List[BalanceInfo]
+        """
+        raw = self.make_request(
             "GET",
             "/fapi/v2/balance",
             api_key=self.api_key,
@@ -264,26 +288,36 @@ class AsterClient(BaseExchangeClient):
             instruction=True,
             retry_count=self.max_retries,
         )
-        if isinstance(result, dict) and "error" in result:
-            return result
-        balances: Dict[str, Dict[str, Any]] = {}
-        for item in result:
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        balances = []
+        for item in raw:
             asset = item.get("asset")
             if not asset:
                 continue
-            available = float(item.get("availableBalance", 0))
-            total = float(item.get("balance", 0))
-            locked = max(total - available, 0.0)
-            balances[asset] = {
-                "available": available,
-                "locked": locked,
-                "total": total,
-                "raw": item,
-            }
-        return balances
+            available = self.safe_decimal(item.get("availableBalance"), Decimal("0"))
+            total = self.safe_decimal(item.get("balance"), Decimal("0"))
+            locked = max(total - available, Decimal("0"))
+            balances.append(BalanceInfo(
+                asset=asset,
+                available=available,
+                locked=locked,
+                total=total,
+                raw=item
+            ))
+        
+        return ApiResponse.ok(balances, raw=raw)
 
-    def get_collateral(self, subaccount_id: Optional[str] = None) -> Dict[str, Any]:
-        result = self.make_request(
+    def get_collateral(self, subaccount_id: Optional[str] = None) -> ApiResponse:
+        """獲取抵押品信息
+        
+        Returns:
+            ApiResponse with data: List[CollateralInfo]
+        """
+        raw = self.make_request(
             "GET",
             "/fapi/v4/account",
             api_key=self.api_key,
@@ -291,45 +325,56 @@ class AsterClient(BaseExchangeClient):
             instruction=True,
             retry_count=self.max_retries,
         )
-        if isinstance(result, dict) and "error" in result and "assets" not in result:
-            return result
-        assets_payload = []
-        for item in result.get("assets", []):
-            symbol = item.get("asset")
-            if not symbol:
+        
+        if isinstance(raw, dict) and "error" in raw and "assets" not in raw:
+            return self._parse_raw_to_error(raw)
+        
+        collaterals = []
+        for item in raw.get("assets", []):
+            asset = item.get("asset")
+            if not asset:
                 continue
-            assets_payload.append(
-                {
-                    "symbol": symbol,
-                    "totalQuantity": item.get("marginBalance", "0"),
-                    "availableQuantity": item.get("availableBalance", "0"),
-                    "walletBalance": item.get("walletBalance", "0"),
-                    "unrealizedPnl": item.get("unrealizedProfit", "0"),
-                }
-            )
-        return {"assets": assets_payload, "raw": result}
+            collaterals.append(CollateralInfo(
+                asset=asset,
+                total_collateral=self.safe_decimal(item.get("marginBalance"), Decimal("0")),
+                free_collateral=self.safe_decimal(item.get("availableBalance"), Decimal("0")),
+                account_value=self.safe_decimal(item.get("walletBalance")),
+                unrealized_pnl=self.safe_decimal(item.get("unrealizedProfit")),
+                raw=item
+            ))
+        
+        return ApiResponse.ok(collaterals, raw=raw)
 
-    def execute_order(self, order_details: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_order(self, order_details: Dict[str, Any]) -> ApiResponse:
+        """執行訂單
+        
+        Returns:
+            ApiResponse with data: OrderResult
+        """
         symbol = order_details.get("symbol")
         if not symbol:
-            return {"error": "缺少交易對", "status_code": 400}
+            return ApiResponse.error("缺少交易對")
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
+            suggestions = self._find_symbol_suggestions(symbol)
+            msg = f"無法解析交易對: {symbol}"
+            if suggestions:
+                msg += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(msg)
 
         side = order_details.get("side")
         if not side:
-            return {"error": "缺少買賣方向"}
+            return ApiResponse.error("缺少買賣方向")
         if side.lower() in {"bid", "buy"}:
             normalized_side = "BUY"
         elif side.lower() in {"ask", "sell"}:
             normalized_side = "SELL"
         else:
-            return {"error": f"不支持的方向: {side}"}
+            return ApiResponse.error(f"不支持的方向: {side}")
 
         order_type = order_details.get("orderType") or order_details.get("type")
         if not order_type:
-            return {"error": "缺少訂單類型"}
+            return ApiResponse.error("缺少訂單類型")
         normalized_type = order_type.upper()
 
         payload: Dict[str, Any] = {"symbol": resolved_symbol, "side": normalized_side, "type": normalized_type}
@@ -339,7 +384,6 @@ class AsterClient(BaseExchangeClient):
         time_in_force = order_details.get("timeInForce")
         
         if normalized_type == "LIMIT":
-            # postOnly 模式使用 GTX（Good Till Crossing）- 無法成為掛單方就撤銷
             if post_only:
                 payload["timeInForce"] = "GTX"
             else:
@@ -378,7 +422,7 @@ class AsterClient(BaseExchangeClient):
         else:
             payload["newOrderRespType"] = "RESULT"
 
-        result = self.make_request(
+        raw = self.make_request(
             "POST",
             "/fapi/v1/order",
             api_key=self.api_key,
@@ -387,11 +431,34 @@ class AsterClient(BaseExchangeClient):
             params=payload,
             retry_count=self.max_retries,
         )
-        if isinstance(result, dict) and "error" in result:
-            return result
-        return self._normalize_order_fields(result)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return ApiResponse(
+                success=False,
+                data=OrderResult(success=False, error_message=error.error_message, raw=raw),
+                error_message=error.error_message,
+                raw=raw
+            )
+        
+        order_result = OrderResult(
+            success=True,
+            order_id=str(raw.get("orderId", "")),
+            client_order_id=raw.get("clientOrderId"),
+            symbol=raw.get("symbol"),
+            side="Bid" if raw.get("side", "").upper() == "BUY" else "Ask",
+            order_type=raw.get("type"),
+            size=self.safe_decimal(raw.get("origQty")),
+            price=self.safe_decimal(raw.get("price")),
+            filled_size=self.safe_decimal(raw.get("executedQty")),
+            status=raw.get("status"),
+            created_at=self.safe_int(raw.get("updateTime")),
+            raw=raw
+        )
+        
+        return ApiResponse.ok(order_result, raw=raw)
 
-    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> Any:
+    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> ApiResponse:
         """批量執行訂單
 
         Aster 批量下單限制：每批最多 5 個訂單
@@ -400,10 +467,10 @@ class AsterClient(BaseExchangeClient):
             orders_details: 訂單詳情列表
 
         Returns:
-            成功訂單列表或錯誤信息
+            ApiResponse with data: BatchOrderResult
         """
         if not orders_details:
-            return {"error": "訂單列表為空"}
+            return ApiResponse.error("訂單列表為空")
 
         # Aster 限制每批最多 5 個訂單
         if len(orders_details) > 5:
@@ -411,8 +478,8 @@ class AsterClient(BaseExchangeClient):
 
         # 將訂單拆分為多批（每批最多 5 個）
         batch_size = 5
-        all_results = []
-        all_errors = []
+        all_results: List[OrderResult] = []
+        all_errors: List[str] = []
 
         for batch_start in range(0, len(orders_details), batch_size):
             batch = orders_details[batch_start:batch_start + batch_size]
@@ -424,19 +491,19 @@ class AsterClient(BaseExchangeClient):
                 symbol = order_details.get("symbol")
                 if not symbol:
                     logger.warning("跳過無效訂單: 缺少交易對")
-                    all_errors.append({"error": "缺少交易對", "order": order_details})
+                    all_errors.append("缺少交易對")
                     continue
 
                 resolved_symbol = self._resolve_symbol(symbol)
                 if not resolved_symbol:
                     logger.warning("跳過無效訂單: 未知交易對 %s", symbol)
-                    all_errors.append({"error": f"未知交易對: {symbol}", "order": order_details})
+                    all_errors.append(f"未知交易對: {symbol}")
                     continue
 
                 side = order_details.get("side")
                 if not side:
                     logger.warning("跳過無效訂單: 缺少買賣方向")
-                    all_errors.append({"error": "缺少買賣方向", "order": order_details})
+                    all_errors.append("缺少買賣方向")
                     continue
 
                 # 標準化方向
@@ -446,13 +513,13 @@ class AsterClient(BaseExchangeClient):
                     normalized_side = "SELL"
                 else:
                     logger.warning("跳過無效訂單: 不支持的方向 %s", side)
-                    all_errors.append({"error": f"不支持的方向: {side}", "order": order_details})
+                    all_errors.append(f"不支持的方向: {side}")
                     continue
 
                 order_type = order_details.get("orderType") or order_details.get("type")
                 if not order_type:
                     logger.warning("跳過無效訂單: 缺少訂單類型")
-                    all_errors.append({"error": "缺少訂單類型", "order": order_details})
+                    all_errors.append("缺少訂單類型")
                     continue
 
                 normalized_type = order_type.upper()
@@ -469,7 +536,6 @@ class AsterClient(BaseExchangeClient):
                 time_in_force = order_details.get("timeInForce")
                 
                 if normalized_type == "LIMIT":
-                    # postOnly 模式使用 GTX（Good Till Crossing）
                     if post_only:
                         order_payload["timeInForce"] = "GTX"
                     else:
@@ -483,7 +549,7 @@ class AsterClient(BaseExchangeClient):
                     order_payload["quantity"] = str(quantity)
                 else:
                     logger.warning("跳過無效訂單: 缺少數量")
-                    all_errors.append({"error": "缺少數量", "order": order_details})
+                    all_errors.append("缺少數量")
                     continue
 
                 # 添加價格（限價單）
@@ -520,7 +586,7 @@ class AsterClient(BaseExchangeClient):
             logger.info("發送批量訂單請求: %d 個訂單", len(batch_orders))
 
             # Aster/Binance Futures API 要求 batchOrders 作為 JSON 字符串
-            result = self.make_request(
+            raw = self.make_request(
                 "POST",
                 "/fapi/v1/batchOrders",
                 api_key=self.api_key,
@@ -531,48 +597,60 @@ class AsterClient(BaseExchangeClient):
             )
 
             # 處理響應
-            if isinstance(result, list):
-                for item in result:
+            if isinstance(raw, list):
+                for item in raw:
                     if isinstance(item, dict):
                         # 檢查是否是錯誤
                         if "code" in item and "msg" in item:
-                            all_errors.append(item)
+                            all_errors.append(str(item.get("msg", "Unknown error")))
                             logger.warning("批量下單部分失敗: %s", item.get("msg"))
                         else:
                             # 成功的訂單
-                            normalized_order = self._normalize_order_fields(dict(item))
-                            all_results.append(normalized_order)
+                            all_results.append(OrderResult(
+                                success=True,
+                                order_id=str(item.get("orderId", "")),
+                                client_order_id=item.get("clientOrderId"),
+                                symbol=item.get("symbol"),
+                                side="Bid" if item.get("side", "").upper() == "BUY" else "Ask",
+                                order_type=item.get("type"),
+                                size=self.safe_decimal(item.get("origQty")),
+                                price=self.safe_decimal(item.get("price")),
+                                status=item.get("status"),
+                                raw=item
+                            ))
                 logger.info("批量下單完成: %d 成功, %d 失敗", len(all_results), len(all_errors))
-            elif isinstance(result, dict) and "error" in result:
-                # 整個批次失敗
-                logger.error("批量下單失敗: %s", result["error"])
-                all_errors.append({"error": result["error"], "batch": batch_orders})
+            elif isinstance(raw, dict) and "error" in raw:
+                logger.error("批量下單失敗: %s", raw["error"])
+                all_errors.append(str(raw["error"]))
 
-        # 返回結果
-        if all_results:
-            # 有成功的訂單
-            if all_errors:
-                # 部分成功
-                return {
-                    "orders": all_results,
-                    "errors": all_errors,
-                    "partial_success": True
-                }
-            else:
-                # 全部成功
-                return all_results
-        else:
-            # 全部失敗
-            return {"error": "批量下單全部失敗", "errors": all_errors}
+        batch_result = BatchOrderResult(
+            success=len(all_results) > 0,
+            orders=all_results,
+            failed_count=len(all_errors),
+            errors=all_errors,
+            raw=None
+        )
+        
+        return ApiResponse.ok(batch_result) if all_results else ApiResponse.error("批量下單全部失敗", raw={"errors": all_errors})
 
-    def get_open_orders(self, symbol: Optional[str] = None) -> Any:
+    def get_open_orders(self, symbol: Optional[str] = None) -> ApiResponse:
+        """獲取未成交訂單
+        
+        Returns:
+            ApiResponse with data: List[OrderInfo]
+        """
         params: Dict[str, Any] = {}
         if symbol:
             resolved_symbol = self._resolve_symbol(symbol)
             if not resolved_symbol:
-                return self._unknown_symbol_error(symbol)
+                suggestions = self._find_symbol_suggestions(symbol)
+                msg = f"無法解析交易對: {symbol}"
+                if suggestions:
+                    msg += f"。可能的交易對: {', '.join(suggestions)}"
+                return ApiResponse.error(msg)
             params["symbol"] = resolved_symbol
-        result = self.make_request(
+        
+        raw = self.make_request(
             "GET",
             "/fapi/v1/openOrders",
             api_key=self.api_key,
@@ -581,19 +659,47 @@ class AsterClient(BaseExchangeClient):
             params=params,
             retry_count=self.max_retries,
         )
-        if isinstance(result, dict) and "error" in result:
-            return result
-        normalized: List[Dict[str, Any]] = []
-        for item in result:
-            normalized.append(self._normalize_order_fields(dict(item)))
-        return normalized
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        orders = []
+        for item in raw:
+            orders.append(OrderInfo(
+                order_id=str(item.get("orderId", "")),
+                symbol=item.get("symbol"),
+                side="Bid" if item.get("side", "").upper() == "BUY" else "Ask",
+                order_type=item.get("type"),
+                size=self.safe_decimal(item.get("origQty"), Decimal("0")),
+                price=self.safe_decimal(item.get("price")),
+                status=item.get("status"),
+                filled_size=self.safe_decimal(item.get("executedQty"), Decimal("0")),
+                remaining_size=self.safe_decimal(item.get("origQty"), Decimal("0")) - self.safe_decimal(item.get("executedQty"), Decimal("0")),
+                client_order_id=item.get("clientOrderId"),
+                created_at=self.safe_int(item.get("time")),
+                time_in_force=item.get("timeInForce"),
+                reduce_only=item.get("reduceOnly", False),
+                raw=item
+            ))
+        
+        return ApiResponse.ok(orders, raw=raw)
 
-    def cancel_all_orders(self, symbol: str) -> Dict[str, Any]:
-        """取消指定交易對的所有訂單"""
+    def cancel_all_orders(self, symbol: str) -> ApiResponse:
+        """取消指定交易對的所有訂單
+        
+        Returns:
+            ApiResponse with data: CancelResult
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
-        result = self.make_request(
+            suggestions = self._find_symbol_suggestions(symbol)
+            msg = f"無法解析交易對: {symbol}"
+            if suggestions:
+                msg += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(msg)
+        
+        raw = self.make_request(
             "DELETE",
             "/fapi/v1/allOpenOrders",
             api_key=self.api_key,
@@ -602,15 +708,34 @@ class AsterClient(BaseExchangeClient):
             params={"symbol": resolved_symbol},
             retry_count=self.max_retries,
         )
-        if isinstance(result, list):
-            return [self._normalize_order_fields(dict(item)) for item in result]
-        return result
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return ApiResponse(
+                success=False,
+                data=CancelResult(success=False, error_message=error.error_message, raw=raw),
+                error_message=error.error_message,
+                raw=raw
+            )
+        
+        cancelled_count = len(raw) if isinstance(raw, list) else 1
+        return ApiResponse.ok(CancelResult(success=True, cancelled_count=cancelled_count, raw=raw), raw=raw)
 
-    def cancel_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
+    def cancel_order(self, order_id: str, symbol: str) -> ApiResponse:
+        """取消指定訂單
+        
+        Returns:
+            ApiResponse with data: CancelResult
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
-        result = self.make_request(
+            suggestions = self._find_symbol_suggestions(symbol)
+            msg = f"無法解析交易對: {symbol}"
+            if suggestions:
+                msg += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(msg)
+        
+        raw = self.make_request(
             "DELETE",
             "/fapi/v1/order",
             api_key=self.api_key,
@@ -619,63 +744,171 @@ class AsterClient(BaseExchangeClient):
             params={"symbol": resolved_symbol, "orderId": order_id},
             retry_count=self.max_retries,
         )
-        if isinstance(result, dict) and "error" in result:
-            return result
-        return self._normalize_order_fields(result)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return ApiResponse(
+                success=False,
+                data=CancelResult(success=False, order_id=order_id, error_message=error.error_message, raw=raw),
+                error_message=error.error_message,
+                raw=raw
+            )
+        
+        return ApiResponse.ok(CancelResult(success=True, order_id=order_id, cancelled_count=1, raw=raw), raw=raw)
 
-    def get_ticker(self, symbol: str) -> Dict[str, Any]:
+    def get_ticker(self, symbol: str) -> ApiResponse:
+        """獲取行情信息
+        
+        Returns:
+            ApiResponse with data: TickerInfo
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
-        result = self.make_request(
+            suggestions = self._find_symbol_suggestions(symbol)
+            msg = f"無法解析交易對: {symbol}"
+            if suggestions:
+                msg += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(msg)
+        
+        raw = self.make_request(
             "GET",
             "/fapi/v1/ticker/24hr",
             params={"symbol": resolved_symbol},
             retry_count=self.max_retries,
         )
-        if isinstance(result, dict) and "error" in result:
-            return result
-        if isinstance(result, dict) and "lastPrice" not in result:
-            result["lastPrice"] = result.get("close", result.get("price"))
-        return result
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        ticker = TickerInfo(
+            symbol=resolved_symbol,
+            last_price=self.safe_decimal(raw.get("lastPrice") or raw.get("close") or raw.get("price")),
+            bid_price=self.safe_decimal(raw.get("bidPrice")),
+            ask_price=self.safe_decimal(raw.get("askPrice")),
+            bid_size=self.safe_decimal(raw.get("bidQty")),
+            ask_size=self.safe_decimal(raw.get("askQty")),
+            volume_24h=self.safe_decimal(raw.get("volume")),
+            turnover_24h=self.safe_decimal(raw.get("quoteVolume")),
+            high_24h=self.safe_decimal(raw.get("highPrice")),
+            low_24h=self.safe_decimal(raw.get("lowPrice")),
+            change_percent_24h=self.safe_decimal(raw.get("priceChangePercent")),
+            raw=raw
+        )
+        
+        return ApiResponse.ok(ticker, raw=raw)
 
-    def get_markets(self) -> Dict[str, Any]:
-        return self.make_request(
+    def get_markets(self) -> ApiResponse:
+        """獲取所有交易對信息
+        
+        Returns:
+            ApiResponse with data: List[MarketInfo]
+        """
+        raw = self.make_request(
             "GET",
             "/fapi/v1/exchangeInfo",
             retry_count=self.max_retries,
         )
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        markets = []
+        for item in raw.get("symbols", []):
+            filters = {f.get("filterType"): f for f in item.get("filters", [])}
+            price_filter = filters.get("PRICE_FILTER", {})
+            lot_size_filter = filters.get("LOT_SIZE", {})
+            
+            markets.append(MarketInfo(
+                symbol=item.get("symbol"),
+                base_asset=item.get("baseAsset"),
+                quote_asset=item.get("quoteAsset"),
+                market_type=item.get("contractType", "PERP"),
+                status=item.get("status"),
+                min_order_size=self.safe_decimal(lot_size_filter.get("minQty"), Decimal("0")),
+                tick_size=self.safe_decimal(price_filter.get("tickSize"), Decimal("0.00000001")),
+                base_precision=item.get("quantityPrecision", item.get("baseAssetPrecision", 6)),
+                quote_precision=item.get("pricePrecision", item.get("quotePrecision", 6)),
+                raw=item
+            ))
+        
+        return ApiResponse.ok(markets, raw=raw)
 
-    def get_order_book(self, symbol: str, limit: int = 20) -> Dict[str, Any]:
+    def get_order_book(self, symbol: str, limit: int = 20) -> ApiResponse:
+        """獲取訂單簿
+        
+        Returns:
+            ApiResponse with data: OrderBookInfo
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
-        result = self.make_request(
+            suggestions = self._find_symbol_suggestions(symbol)
+            msg = f"無法解析交易對: {symbol}"
+            if suggestions:
+                msg += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(msg)
+        
+        raw = self.make_request(
             "GET",
             "/fapi/v1/depth",
             params={"symbol": resolved_symbol, "limit": limit},
             retry_count=self.max_retries,
         )
-        if isinstance(result, dict) and "error" in result:
-            return result
-        bids = result.get("bids", [])
-        asks = result.get("asks", [])
-        try:
-            bids = sorted(bids, key=lambda level: float(level[0]))
-        except (ValueError, TypeError):
-            pass
-        result["bids"] = bids
-        result["asks"] = asks
-        return result
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        bids = []
+        for level in raw.get("bids", []):
+            if isinstance(level, (list, tuple)) and len(level) >= 2:
+                bids.append(OrderBookLevel(
+                    price=self.safe_decimal(level[0], Decimal("0")),
+                    quantity=self.safe_decimal(level[1], Decimal("0"))
+                ))
+        
+        asks = []
+        for level in raw.get("asks", []):
+            if isinstance(level, (list, tuple)) and len(level) >= 2:
+                asks.append(OrderBookLevel(
+                    price=self.safe_decimal(level[0], Decimal("0")),
+                    quantity=self.safe_decimal(level[1], Decimal("0"))
+                ))
+        
+        # 排序
+        bids.sort(key=lambda x: x.price, reverse=True)
+        asks.sort(key=lambda x: x.price)
+        
+        order_book = OrderBookInfo(
+            symbol=resolved_symbol,
+            bids=bids,
+            asks=asks,
+            timestamp=self.safe_int(raw.get("T")),
+            sequence=self.safe_int(raw.get("lastUpdateId")),
+            raw=raw
+        )
+        
+        return ApiResponse.ok(order_book, raw=raw)
 
-    def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100) -> Any:
-        params = {"limit": limit}
+    def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100) -> ApiResponse:
+        """獲取成交歷史
+        
+        Returns:
+            ApiResponse with data: List[TradeInfo]
+        """
+        params: Dict[str, Any] = {"limit": limit}
         if symbol:
             resolved_symbol = self._resolve_symbol(symbol)
             if not resolved_symbol:
-                return self._unknown_symbol_error(symbol)
+                suggestions = self._find_symbol_suggestions(symbol)
+                msg = f"無法解析交易對: {symbol}"
+                if suggestions:
+                    msg += f"。可能的交易對: {', '.join(suggestions)}"
+                return ApiResponse.error(msg)
             params["symbol"] = resolved_symbol
-        return self.make_request(
+        
+        raw = self.make_request(
             "GET",
             "/fapi/v1/userTrades",
             api_key=self.api_key,
@@ -684,53 +917,129 @@ class AsterClient(BaseExchangeClient):
             params=params,
             retry_count=self.max_retries,
         )
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        trades = []
+        for item in raw:
+            trades.append(TradeInfo(
+                trade_id=str(item.get("id", "")),
+                order_id=str(item.get("orderId", "")),
+                symbol=item.get("symbol"),
+                side="Bid" if item.get("side", "").upper() == "BUY" else "Ask",
+                size=self.safe_decimal(item.get("qty"), Decimal("0")),
+                price=self.safe_decimal(item.get("price"), Decimal("0")),
+                fee=self.safe_decimal(item.get("commission")),
+                fee_asset=item.get("commissionAsset"),
+                timestamp=self.safe_int(item.get("time")),
+                is_maker=item.get("maker"),
+                raw=item
+            ))
+        
+        return ApiResponse.ok(trades, raw=raw)
 
-    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> Any:
+    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> ApiResponse:
+        """獲取K線數據
+        
+        Returns:
+            ApiResponse with data: List[KlineInfo]
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            return self._unknown_symbol_error(symbol)
+            suggestions = self._find_symbol_suggestions(symbol)
+            msg = f"無法解析交易對: {symbol}"
+            if suggestions:
+                msg += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(msg)
+        
         params = {"symbol": resolved_symbol, "interval": interval, "limit": limit}
-        return self.make_request(
+        raw = self.make_request(
             "GET",
             "/fapi/v1/klines",
             params=params,
             retry_count=self.max_retries,
         )
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        klines = []
+        for item in raw:
+            if isinstance(item, (list, tuple)) and len(item) >= 6:
+                klines.append(KlineInfo(
+                    open_time=self.safe_int(item[0], 0),
+                    close_time=self.safe_int(item[6], 0) if len(item) > 6 else self.safe_int(item[0], 0),
+                    open_price=self.safe_decimal(item[1], Decimal("0")),
+                    high_price=self.safe_decimal(item[2], Decimal("0")),
+                    low_price=self.safe_decimal(item[3], Decimal("0")),
+                    close_price=self.safe_decimal(item[4], Decimal("0")),
+                    volume=self.safe_decimal(item[5], Decimal("0")),
+                    quote_volume=self.safe_decimal(item[7]) if len(item) > 7 else None,
+                    trades_count=self.safe_int(item[8]) if len(item) > 8 else None,
+                    raw=item
+                ))
+        
+        return ApiResponse.ok(klines, raw=raw)
 
-    def get_market_limits(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def get_market_limits(self, symbol: str) -> ApiResponse:
+        """獲取市場限制信息
+        
+        Returns:
+            ApiResponse with data: MarketInfo
+        """
         resolved_symbol = self._resolve_symbol(symbol)
         if not resolved_symbol:
-            self._unknown_symbol_error(symbol)
-            return None
+            suggestions = self._find_symbol_suggestions(symbol)
+            msg = f"無法解析交易對: {symbol}"
+            if suggestions:
+                msg += f"。可能的交易對: {', '.join(suggestions)}"
+            return ApiResponse.error(msg)
 
         self._ensure_symbol_cache()
         symbol_info = self._market_info_cache.get(resolved_symbol)
         if not symbol_info:
-            logger.error("交易所返回的資料中找不到交易對 %s", resolved_symbol)
-            return None
+            return ApiResponse.error(f"交易所返回的資料中找不到交易對 {resolved_symbol}")
+        
         filters = {f.get("filterType"): f for f in symbol_info.get("filters", [])}
         price_filter = filters.get("PRICE_FILTER", {})
         lot_size_filter = filters.get("LOT_SIZE", {})
-        return {
-            "symbol": resolved_symbol,
-            "base_asset": symbol_info.get("baseAsset"),
-            "quote_asset": symbol_info.get("quoteAsset"),
-            "market_type": symbol_info.get("contractType", "PERP"),
-            "status": symbol_info.get("status"),
-            "min_order_size": lot_size_filter.get("minQty", "0"),
-            "tick_size": price_filter.get("tickSize", "0.00000001"),
-            "base_precision": symbol_info.get("quantityPrecision", symbol_info.get("baseAssetPrecision", 6)),
-            "quote_precision": symbol_info.get("pricePrecision", symbol_info.get("quotePrecision", 6)),
-        }
+        
+        market_info = MarketInfo(
+            symbol=resolved_symbol,
+            base_asset=symbol_info.get("baseAsset"),
+            quote_asset=symbol_info.get("quoteAsset"),
+            market_type=symbol_info.get("contractType", "PERP"),
+            status=symbol_info.get("status"),
+            min_order_size=self.safe_decimal(lot_size_filter.get("minQty"), Decimal("0")),
+            tick_size=self.safe_decimal(price_filter.get("tickSize"), Decimal("0.00000001")),
+            base_precision=symbol_info.get("quantityPrecision", symbol_info.get("baseAssetPrecision", 6)),
+            quote_precision=symbol_info.get("pricePrecision", symbol_info.get("quotePrecision", 6)),
+            raw=symbol_info
+        )
+        
+        return ApiResponse.ok(market_info, raw=symbol_info)
 
-    def get_positions(self, symbol: Optional[str] = None) -> Any:
+    def get_positions(self, symbol: Optional[str] = None) -> ApiResponse:
+        """獲取持倉信息
+        
+        Returns:
+            ApiResponse with data: List[PositionInfo]
+        """
         params: Dict[str, Any] = {}
         if symbol:
             resolved_symbol = self._resolve_symbol(symbol)
             if not resolved_symbol:
-                return self._unknown_symbol_error(symbol)
+                suggestions = self._find_symbol_suggestions(symbol)
+                msg = f"無法解析交易對: {symbol}"
+                if suggestions:
+                    msg += f"。可能的交易對: {', '.join(suggestions)}"
+                return ApiResponse.error(msg)
             params["symbol"] = resolved_symbol
-        result = self.make_request(
+        
+        raw = self.make_request(
             "GET",
             "/fapi/v2/positionRisk",
             api_key=self.api_key,
@@ -739,46 +1048,37 @@ class AsterClient(BaseExchangeClient):
             params=params,
             retry_count=self.max_retries,
         )
-        if isinstance(result, dict) and "error" in result:
-            return result
-        normalized: List[Dict[str, Any]] = []
-        for item in result:
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        positions = []
+        for item in raw:
             raw_amt = item.get("positionAmt", "0") or "0"
             try:
                 pos_dec = Decimal(str(raw_amt))
             except (InvalidOperation, TypeError):
                 pos_dec = Decimal("0")
-            pos_amt = float(pos_dec)
 
-            if pos_amt > 0:
-                mapped_side = "LONG"
-            elif pos_amt < 0:
-                mapped_side = "SHORT"
+            if pos_dec > 0:
+                side = "LONG"
+            elif pos_dec < 0:
+                side = "SHORT"
             else:
-                mapped_side = "FLAT"
+                side = "FLAT"
 
-            long_dec = pos_dec if pos_dec > 0 else Decimal("0")
-            short_dec = -pos_dec if pos_dec < 0 else Decimal("0")
-            mark_price = item.get("markPrice")
-            entry_price = item.get("entryPrice")
-            unrealized = item.get("unRealizedProfit")
-            position_side = item.get("positionSide") or mapped_side
-
-            normalized.append(
-                {
-                    "symbol": item.get("symbol"),
-                    "side": mapped_side,
-                    "positionSide": position_side,
-                    "netQuantity": self._decimal_to_str(pos_dec),
-                    "longQuantity": self._decimal_to_str(long_dec),
-                    "shortQuantity": self._decimal_to_str(short_dec),
-                    "size": self._decimal_to_str(abs(pos_dec)),
-                    "entryPrice": entry_price,
-                    "markPrice": mark_price,
-                    "pnlUnrealized": unrealized,
-                    "unrealizedPnl": unrealized,
-                    "leverage": item.get("leverage"),
-                    "raw": item,
-                }
-            )
-        return normalized
+            positions.append(PositionInfo(
+                symbol=item.get("symbol"),
+                side=side,
+                size=abs(pos_dec),
+                entry_price=self.safe_decimal(item.get("entryPrice")),
+                mark_price=self.safe_decimal(item.get("markPrice")),
+                liquidation_price=self.safe_decimal(item.get("liquidationPrice")),
+                unrealized_pnl=self.safe_decimal(item.get("unRealizedProfit")),
+                leverage=self.safe_decimal(item.get("leverage")),
+                margin_mode="CROSS" if item.get("marginType") == "cross" else "ISOLATED",
+                raw=item
+            ))
+        
+        return ApiResponse.ok(positions, raw=raw)

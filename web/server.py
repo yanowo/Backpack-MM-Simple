@@ -538,16 +538,36 @@ def collect_strategy_stats():
 
                 if client:
                     # 獲取普通餘額
-                    balances = client.get_balance()
+                    balances_response = client.get_balance()
 
                     # 初始化報價資產餘額變量
                     quote_balance = 0.0
                     quote_collateral_balance = 0.0
 
-                    # 檢查是否有錯誤
-                    has_error = isinstance(balances, dict) and "error" in balances and balances.get("error")
+                    # 檢查是否有錯誤 - 使用新的 ApiResponse 模式
+                    has_error = not balances_response.success
 
-                    if not has_error and isinstance(balances, dict):
+                    if not has_error:
+                        # 支援 List[BalanceInfo] dataclass 或 dict
+                        balances_data = balances_response.data
+                        
+                        # 如果是 List[BalanceInfo]，轉換為 dict 格式
+                        if isinstance(balances_data, list) and balances_data and hasattr(balances_data[0], 'asset'):
+                            # 是 BalanceInfo 列表，轉換為 {asset: {available, locked, total}} 格式
+                            balances = {}
+                            for b in balances_data:
+                                balances[b.asset] = {
+                                    'available': float(b.available) if b.available else 0,
+                                    'locked': float(b.locked) if b.locked else 0,
+                                    'total': float(b.total) if b.total else 0,
+                                }
+                        elif hasattr(balances_response, 'raw') and balances_response.raw:
+                            # 使用原始 dict 響應
+                            balances = balances_response.raw
+                        elif isinstance(balances_data, dict):
+                            balances = balances_data
+                        else:
+                            balances = {}
                         # 確定報價資產的鍵名（處理不同交易所的命名差異）
                         quote_asset_key = current_strategy.quote_asset
 
@@ -596,32 +616,51 @@ def collect_strategy_stats():
                         # 對於 Backpack，還需要獲取抵押品餘額
                         if current_strategy.exchange.lower() == 'backpack':
                             try:
-                                collateral = client.get_collateral()
-                                if isinstance(collateral, dict) and "error" in collateral:
-                                    logger.warning(f"獲取 Backpack 抵押品餘額失敗: {collateral.get('error')}")
-                                elif isinstance(collateral, dict):
-                                    collateral_assets = collateral.get('assets') or collateral.get('collateral', [])
-
-                                    if collateral_assets:
-                                        # 遍歷抵押品資產，查找報價資產
-                                        for item in collateral_assets:
-                                            symbol = item.get('symbol', '')
-                                            if symbol in possible_quote_keys:
+                                collateral_response = client.get_collateral()
+                                if not collateral_response.success:
+                                    logger.warning(f"獲取 Backpack 抵押品餘額失敗: {collateral_response.error_message}")
+                                else:
+                                    collateral_data = collateral_response.data
+                                    
+                                    # 支援 List[CollateralInfo] dataclass 或 dict
+                                    if isinstance(collateral_data, list) and collateral_data and hasattr(collateral_data[0], 'asset'):
+                                        # 是 CollateralInfo 列表，直接遍歷
+                                        for c in collateral_data:
+                                            if c.asset in possible_quote_keys:
                                                 try:
-                                                    # 使用 totalQuantity（包含借貸中的資產）
-                                                    total_quantity = float(item.get('totalQuantity', 0))
+                                                    total_quantity = float(c.total_collateral) if c.total_collateral else 0
                                                     if total_quantity > 0:
                                                         quote_collateral_balance += total_quantity
                                                 except (ValueError, TypeError) as e:
                                                     logger.error(f"轉換抵押品餘額失敗: {e}")
+                                    else:
+                                        # 使用原始 dict 響應
+                                        if hasattr(collateral_response, 'raw') and collateral_response.raw:
+                                            collateral = collateral_response.raw
+                                        elif isinstance(collateral_data, dict):
+                                            collateral = collateral_data
+                                        else:
+                                            collateral = {}
+                                        collateral_assets = collateral.get('assets') or collateral.get('collateral', [])
+
+                                        if collateral_assets:
+                                            # 遍歷抵押品資產，查找報價資產
+                                            for item in collateral_assets:
+                                                symbol = item.get('symbol', '')
+                                                if symbol in possible_quote_keys:
+                                                    try:
+                                                        # 使用 totalQuantity（包含借貸中的資產）
+                                                        total_quantity = float(item.get('totalQuantity', 0))
+                                                        if total_quantity > 0:
+                                                            quote_collateral_balance += total_quantity
+                                                    except (ValueError, TypeError) as e:
+                                                        logger.error(f"轉換抵押品餘額失敗: {e}")
                             except Exception as e:
                                 logger.warning(f"獲取 Backpack 抵押品餘額時出錯: {e}")
 
                     else:
-                        if has_error:
-                            logger.error(f"[{current_strategy.exchange}] 獲取餘額返回錯誤: {balances.get('error')}")
-                        else:
-                            logger.error(f"[{current_strategy.exchange}] 獲取餘額返回格式不正確: type={type(balances)}")
+                        # has_error = True
+                        logger.error(f"[{current_strategy.exchange}] 獲取餘額返回錯誤: {balances_response.error_message}")
 
                     # 計算總餘額（普通餘額 + 抵押品餘額）
                     total_quote_balance = quote_balance + quote_collateral_balance
