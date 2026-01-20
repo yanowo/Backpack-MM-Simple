@@ -603,18 +603,25 @@ class MarketMaker:
                     return []
                 # 如果是 List[TradeInfo]，直接轉換
                 if hasattr(response.data[0], 'trade_id'):
-                    return [{
-                        'fill_id': t.trade_id,
-                        'order_id': t.order_id,
-                        'symbol': t.symbol,
-                        'side': t.side,
-                        'price': float(t.price) if t.price is not None else None,
-                        'quantity': float(t.size) if t.size is not None else None,  # TradeInfo 使用 size
-                        'fee': float(t.fee) if t.fee is not None else 0.0,  # fee 可以是 0，不能用 if t.fee 判斷
-                        'fee_asset': t.fee_asset,
-                        'is_maker': t.is_maker,
-                        'timestamp': t.timestamp,
-                    } for t in response.data]
+                    result = []
+                    for t in response.data:
+                        # 從 raw 中提取 clientId（APEX 用 clientId 追蹤訂單）
+                        raw = t.raw if hasattr(t, 'raw') and t.raw else {}
+                        client_id = raw.get('clientId') or raw.get('client_id') or raw.get('clientOrderId')
+                        result.append({
+                            'fill_id': t.trade_id,
+                            'order_id': t.order_id,
+                            'client_id': str(client_id) if client_id else None,  # 從 raw 提取 clientId
+                            'symbol': t.symbol,
+                            'side': t.side,
+                            'price': float(t.price) if t.price is not None else None,
+                            'quantity': float(t.size) if t.size is not None else None,  # TradeInfo 使用 size
+                            'fee': float(t.fee) if t.fee is not None else 0.0,  # fee 可以是 0，不能用 if t.fee 判斷
+                            'fee_asset': t.fee_asset,
+                            'is_maker': t.is_maker,
+                            'timestamp': t.timestamp,
+                        })
+                    return result
             data = response.raw
         else:
             data = response

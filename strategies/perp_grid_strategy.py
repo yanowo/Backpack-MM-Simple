@@ -232,7 +232,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
             return None
 
         if normalized in self.order_alias_map:
-            return self.order_alias_map[normalized]
+            resolved = self.order_alias_map[normalized]
+            return resolved
 
         for primary, info in self.grid_orders_by_id.items():
             alias_ids = info.get('alias_ids') if isinstance(info, dict) else None
