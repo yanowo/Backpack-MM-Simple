@@ -258,16 +258,25 @@ class BPClient(BaseExchangeClient):
         instruction = "orderExecute"
       
         # 根據實際請求體產生簽名參數，確保完全一致
+        # 同時預處理 order_details，確保數值格式統一
         params = {}
+        processed_order = {}
         for key, value in order_details.items():
             if value is None:
                 continue
             if isinstance(value, bool):
                 params[key] = str(value).lower()
+                processed_order[key] = value  # 布爾值保持原樣，API 需要真正的 boolean
+            elif isinstance(value, (int, float)):
+                # 數值轉為字符串用於簽名和請求體
+                str_value = str(value)
+                params[key] = str_value
+                processed_order[key] = str_value  # API 期望價格和數量是字符串
             else:
                 params[key] = str(value)
+                processed_order[key] = value
 
-        raw = self.make_request("POST", endpoint, self.api_key, self.secret_key, instruction, params, order_details)
+        raw = self.make_request("POST", endpoint, self.api_key, self.secret_key, instruction, params, processed_order)
         
         error = self._check_raw_error(raw)
         if error:
@@ -403,15 +412,29 @@ class BPClient(BaseExchangeClient):
         endpoint = f"/api/{API_VERSION}/orders"
         instruction = "orderExecute"  # 每個訂單使用 orderExecute 指令
 
-        # 請求體直接是訂單數組，不需要包裝在 {orders: ...} 中
-        data = orders_list
+        # 預處理訂單，確保數值格式統一（與 execute_order 保持一致）
+        processed_orders = []
+        for order in orders_list:
+            processed_order = {}
+            for key, value in order.items():
+                if value is None:
+                    continue
+                if isinstance(value, bool):
+                    processed_order[key] = value  # 布爾值保持原樣
+                elif isinstance(value, (int, float)):
+                    processed_order[key] = str(value)  # 數值轉為字符串
+                else:
+                    processed_order[key] = value
+            processed_orders.append(processed_order)
+
+        # 請求體使用預處理後的訂單
+        data = processed_orders
 
         # 構建簽名參數字符串
-        # 根據文檔：為每個訂單構建 instruction=orderExecute&param1=value1&param2=value2...
-        # 然後將所有訂單的參數字符串拼接起來
+        # 使用預處理後的訂單，確保簽名和請求體格式一致
         param_strings = []
 
-        for order in orders_list:
+        for order in processed_orders:
             # 按字母順序排序訂單參數
             sorted_params = sorted(order.items())
 
@@ -422,7 +445,7 @@ class BPClient(BaseExchangeClient):
             for key, value in sorted_params:
                 if value is None:
                     continue
-                # 布爾值轉換為小寫字符串
+                # 布爾值轉換為小寫字符串（用於簽名）
                 if isinstance(value, bool):
                     order_params.append(f"{key}={str(value).lower()}")
                 else:

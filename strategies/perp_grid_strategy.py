@@ -481,6 +481,65 @@ class PerpGridStrategy(PerpetualMarketMaker):
         logger.debug("移除平倉單記錄: 開倉價格=%.4f, ID=%s", open_price, normalized_id)
         return close_info
     
+    def _cancel_conflicting_open_order_at_price(self, price: float, close_side: str) -> bool:
+        """取消平倉價格上的衝突開倉單
+        
+        當要在某個價格掛平倉單時，如果該價格已有同向開倉單，
+        Backpack 的 reduceOnly 會失敗（因為會與開倉單抵消而非真正減倉）。
+        此方法會檢查並取消該價格上的開倉單。
+        
+        Args:
+            price: 平倉單的目標價格
+            close_side: 平倉單的方向 ('Bid' 表示平空, 'Ask' 表示平多)
+            
+        Returns:
+            是否有取消訂單（True=有取消, False=無需取消）
+        """
+        # 平空單是 Bid，會與同價格的開多單（Bid）衝突
+        # 平多單是 Ask，會與同價格的開空單（Ask）衝突
+        if close_side == 'Bid':
+            # 平空單，檢查是否有開多單
+            orders_at_price = self.open_long_orders.get(price, {})
+            order_type_name = "開多單"
+            open_side = 'Bid'  # 開多單的方向
+        else:
+            # 平多單，檢查是否有開空單
+            orders_at_price = self.open_short_orders.get(price, {})
+            order_type_name = "開空單"
+            open_side = 'Ask'  # 開空單的方向
+        
+        if not orders_at_price:
+            return False
+        
+        # 取消該價格上的所有開倉單
+        cancelled_any = False
+        for order_id in list(orders_at_price.keys()):
+            order_info = orders_at_price[order_id]
+            logger.info(
+                "發現衝突%s在價格 %.4f (ID=%s)，先取消以便掛平倉單",
+                order_type_name, price, order_id
+            )
+            
+            try:
+                cancel_result = self.client.cancel_order(order_id, self.symbol)
+                if cancel_result.success:
+                    logger.info("成功取消衝突%s: ID=%s", order_type_name, order_id)
+                    # 移除本地記錄（使用開倉單的方向）
+                    self._remove_open_order(order_id, price, open_side)
+                    cancelled_any = True
+                else:
+                    # 取消失敗，可能訂單已不存在
+                    logger.warning(
+                        "取消衝突%s失敗: ID=%s, 錯誤=%s",
+                        order_type_name, order_id, cancel_result.error_message
+                    )
+                    # 仍然嘗試移除本地記錄（訂單可能已成交或被取消）
+                    self._remove_open_order(order_id, price, open_side)
+            except Exception as e:
+                logger.error("取消衝突%s時發生異常: %s", order_type_name, e)
+        
+        return cancelled_any
+    
     # ==================== 新的核心方法：基於訂單狀態的處理 ====================
     
     def _handle_open_order_filled(
@@ -1542,6 +1601,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         logger.info("開多成交後在價格 %.4f 掛平多單 (開倉價格: %.4f)", next_price, open_price)
 
+        # 檢查並取消平倉價格上的衝突開倉單（Backpack reduceOnly 限制）
+        # 平多單是 Ask，會與同價格的開空單衝突
+        if self.exchange == 'backpack':
+            self._cancel_conflicting_open_order_at_price(next_price, 'Ask')
+
         # APEX 是 zkLink L2 架構，持倉更新有延遲
         # 對於網格策略，我們知道剛才開多成交了，所以直接掛平倉單
         # 不需要查詢 API 持倉（因為可能還沒更新）
@@ -1688,6 +1752,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
             )
 
         logger.info("開空成交後在價格 %.4f 掛平空單 (開倉價格: %.4f)", next_price, open_price)
+
+        # 檢查並取消平倉價格上的衝突開倉單（Backpack reduceOnly 限制）
+        # 平空單是 Bid，會與同價格的開多單衝突
+        if self.exchange == 'backpack':
+            self._cancel_conflicting_open_order_at_price(next_price, 'Bid')
 
         # APEX 是 zkLink L2 架構，持倉更新有延遲
         # 對於網格策略，我們知道剛才開空成交了，所以直接掛平倉單
