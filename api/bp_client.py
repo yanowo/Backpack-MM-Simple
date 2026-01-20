@@ -478,9 +478,6 @@ class BPClient(BaseExchangeClient):
         }
 
         # 執行請求（使用自定義頭，不通過 make_request）
-        import json
-        import requests
-
         retry_count = 3
         for attempt in range(retry_count):
             try:

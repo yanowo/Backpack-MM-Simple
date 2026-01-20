@@ -3,6 +3,7 @@ CLI命令模塊，提供命令行交互功能
 """
 import time
 import os
+import traceback
 from typing import Optional
 from datetime import datetime
 
