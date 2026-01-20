@@ -1389,12 +1389,74 @@ class LighterClient(BaseExchangeClient):
             message = tx_response.get("message") if tx_response else "unknown error"
             return ApiResponse.error(f"Batch orders rejected: {message}", raw=tx_response)
 
+        # 獲取 open orders 以獲取真正的交易所訂單 ID
+        # clientOrderIndex 和交易所的 order_id 是不同的，成交歷史返回的是交易所 order_id
+        client_to_exchange_id: Dict[int, str] = {}
+        if processed_orders:
+            symbol_for_lookup = processed_orders[0]["symbol"]
+            # 添加短暫延遲，等待訂單出現在 open orders 中
+            import time
+            time.sleep(0.3)
+            
+            # 嘗試多次獲取 open orders（最多重試 3 次）
+            for attempt in range(3):
+                open_orders_response = self.get_open_orders(symbol_for_lookup)
+                if open_orders_response.success and isinstance(open_orders_response.data, list):
+                    for order in open_orders_response.data:
+                        # 從 raw 中獲取 clientOrderIndex
+                        raw = order.raw if order.raw else {}
+                        client_idx = raw.get("clientOrderIndex") or raw.get("client_order_index") or order.client_order_id
+                        exchange_id = order.order_id
+                        if client_idx is not None and exchange_id is not None:
+                            try:
+                                client_to_exchange_id[int(client_idx)] = str(exchange_id)
+                            except (TypeError, ValueError):
+                                pass
+                
+                # 檢查是否已經找到了所有訂單的映射
+                found_count = sum(1 for o in processed_orders if o["client_order_index"] in client_to_exchange_id)
+                if found_count >= len(processed_orders):
+                    break
+                if attempt < 2:
+                    time.sleep(0.2)  # 如果沒找到全部，再等待一下
+            
+            logger.info("訂單 ID 映射: 找到 %d/%d 個映射, 映射表=%s", 
+                       len(client_to_exchange_id), len(processed_orders), client_to_exchange_id)
+            
+            # 如果從 open orders 沒有找到全部映射，嘗試從最近成交歷史獲取
+            # 這處理訂單立即成交的情況
+            if len(client_to_exchange_id) < len(processed_orders):
+                logger.info("部分訂單可能已成交，嘗試從成交歷史獲取 order_id 映射")
+                trades_response = self.get_fill_history(symbol_for_lookup, limit=20)
+                if trades_response.success and isinstance(trades_response.data, list):
+                    for trade in trades_response.data:
+                        # 從 trade 中獲取 order_id（這是交易所 ID）
+                        raw = trade.raw if hasattr(trade, 'raw') and trade.raw else {}
+                        order_id = trade.order_id or raw.get("order_id")
+                        # 嘗試匹配價格和數量來建立映射
+                        if order_id:
+                            for po in processed_orders:
+                                if po["client_order_index"] not in client_to_exchange_id:
+                                    # 比較價格（允許小誤差）
+                                    trade_price = trade.price if hasattr(trade, 'price') else raw.get("price")
+                                    if trade_price and abs(float(trade_price) - po["original_price"]) < 0.01:
+                                        client_to_exchange_id[po["client_order_index"]] = str(order_id)
+                                        logger.info("從成交歷史映射: clientOrderIndex=%d -> order_id=%s (價格=%.2f)",
+                                                   po["client_order_index"], order_id, trade_price)
+                                        break
+
         # 構建返回結果
         results = []
         for i, order in enumerate(processed_orders):
+            client_order_index = order["client_order_index"]
+            # 嘗試從映射中獲取交易所 order_id
+            exchange_order_id = client_to_exchange_id.get(client_order_index, str(client_order_index))
+            
             raw_result = {
-                "id": str(order["client_order_index"]),
-                "clientOrderIndex": order["client_order_index"],
+                "id": exchange_order_id,  # 使用交易所 order_id
+                "order_id": exchange_order_id,  # 交易所訂單 ID（成交歷史用這個）
+                "clientOrderIndex": client_order_index,  # 客戶端訂單索引
+                "client_order_index": client_order_index,
                 "symbol": order["symbol"],
                 "side": "Ask" if order["is_ask"] else "Bid",
                 "price": order["original_price"],
@@ -1404,8 +1466,8 @@ class LighterClient(BaseExchangeClient):
             }
             results.append(OrderResult(
                 success=True,
-                order_id=str(order["client_order_index"]),
-                client_order_id=str(order["client_order_index"]),
+                order_id=exchange_order_id,  # 使用交易所 order_id
+                client_order_id=str(client_order_index),  # 保留 clientOrderIndex 作為 client_order_id
                 symbol=order["symbol"],
                 side="Ask" if order["is_ask"] else "Bid",
                 price=order["original_price"],
@@ -1566,26 +1628,32 @@ class LighterClient(BaseExchangeClient):
             message = tx_response.get("message") if tx_response else "unknown error"
             return ApiResponse.error(f"Order rejected: {message}", raw=tx_response)
 
-        # Try to find order in open orders to get more details
+        # Try to find order in open orders to get exchange order_id
+        # Lighter 的成交歷史返回交易所 order_id，不是 clientOrderIndex
         open_orders_response = self.get_open_orders(symbol)
         if open_orders_response.success and isinstance(open_orders_response.data, list):
             for order in open_orders_response.data:
-                candidate = order.client_order_id or order.order_id
+                # 優先從 raw 中獲取 clientOrderIndex
+                raw = order.raw if order.raw else {}
+                candidate = raw.get("clientOrderIndex") or raw.get("client_order_index") or order.client_order_id
                 try:
                     if candidate is not None and int(candidate) == int(client_order_index):
-                        # Found matching order, update with tx_hash
-                        raw_order = order.raw if order.raw else {}
-                        raw_order["txHash"] = tx_response.get("tx_hash")
+                        # Found matching order, use exchange order_id
+                        exchange_order_id = order.order_id
+                        raw["txHash"] = tx_response.get("tx_hash")
+                        # 添加 order_id 和 client_order_index 到 raw
+                        raw["order_id"] = exchange_order_id
+                        raw["client_order_index"] = client_order_index
                         return ApiResponse.ok(OrderResult(
-                            order_id=order.order_id,
-                            client_order_id=str(client_order_index),
+                            order_id=exchange_order_id,  # 使用交易所訂單 ID
+                            client_order_id=str(client_order_index),  # 保留 clientOrderIndex
                             symbol=symbol,
                             side="Ask" if is_ask else "Bid",
                             price=order.price,
-                            quantity=order.quantity,
+                            size=order.quantity,
                             status=order.status or "pending",
-                            raw=raw_order,
-                        ), raw=raw_order)
+                            raw=raw,
+                        ), raw=raw)
                 except (TypeError, ValueError):
                     continue
 
@@ -2113,14 +2181,20 @@ class LighterClient(BaseExchangeClient):
         fee_source = "api_not_provided"
         fee_asset = None
 
-        order_identifier = (
-            trade.get("order_id")
-            or trade.get("orderId")
-            or trade.get("order_index")
-            or trade.get("orderIndex")
-            or trade.get("ask_id")
-            or trade.get("bid_id")
-        )
+        # 根據當前用戶的交易方向選擇正確的 order_id
+        # 如果用戶是 Bid 方（買入），使用 bid_id
+        # 如果用戶是 Ask 方（賣出），使用 ask_id
+        if side == "Bid":
+            order_identifier = trade.get("bid_id") or trade.get("order_id")
+        elif side == "Ask":
+            order_identifier = trade.get("ask_id") or trade.get("order_id")
+        else:
+            order_identifier = (
+                trade.get("order_id")
+                or trade.get("orderId")
+                or trade.get("ask_id")
+                or trade.get("bid_id")
+            )
 
         timestamp = trade.get("timestamp") or trade.get("time")
 

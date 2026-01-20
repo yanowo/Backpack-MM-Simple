@@ -266,9 +266,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
     def _extract_order_identifiers(self, order_data: Any) -> Tuple[Optional[str], List[str]]:
         if isinstance(order_data, dict):
             alias_ids: List[str] = []
+            # 收集所有可能的訂單 ID
             candidate_keys = [
+                'order_id', 'orderId', 'id',  # 交易所訂單 ID 優先
                 'clientOrderIndex', 'client_order_index', 'orderIndex', 'order_index',
-                'id', 'orderId', 'order_id', 'clientOrderId', 'client_order_id',
+                'clientOrderId', 'client_order_id',
                 'clientId', 'client_id'
             ]
             for key in candidate_keys:
@@ -277,7 +279,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     alias_ids.append(normalized)
 
             primary = None
+            # 優先使用交易所 order_id 作為主要 ID（因為成交歷史返回的是交易所 ID）
             priority_keys = [
+                'order_id', 'orderId', 'id',  # 交易所訂單 ID 優先
                 'clientOrderIndex', 'client_order_index', 'orderIndex', 'order_index',
                 'clientId', 'client_id'
             ]
@@ -1315,7 +1319,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         )
         # APEX: client_id 是下單時生成的 UUID，用於追蹤
         client_id = fill_info.get('client_id') or fill_info.get('clientId') or fill_info.get('clientOrderId')
-        
+
         side = fill_info.get('side')
         quantity_raw = fill_info.get('quantity')
         price_raw = fill_info.get('price')
