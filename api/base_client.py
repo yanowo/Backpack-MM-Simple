@@ -2,49 +2,96 @@
 
 This module isolates shared abstractions so concrete exchange clients (Backpack, xx, etc.)
 can implement a consistent interface.
+
+標準化返回格式說明：
+====================
+所有交易所客戶端的公開方法統一返回 ApiResponse 對象，包含：
+- success: bool - 請求是否成功
+- data: Optional[Any] - 成功時的數據（使用標準化的 dataclass）
+- error_code: Optional[str] - 錯誤碼
+- error_message: Optional[str] - 錯誤信息
+
+使用範例：
+---------
+response = client.get_balance()
+if response.success:
+    for balance in response.data:  # List[BalanceInfo]
+        print(f"{balance.asset}: {balance.available}")
+else:
+    print(f"錯誤: {response.error_message}")
 """
 from __future__ import annotations
-from dataclasses import dataclass
-from decimal import Decimal
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional, List, Union
 import asyncio
 from abc import ABC, abstractmethod
 import functools
 
 
+# ==================== 標準化數據類 ====================
+
 @dataclass
 class OrderResult:
     """標準化訂單執行結果"""
     success: bool
     order_id: Optional[str] = None
+    client_order_id: Optional[str] = None
+    symbol: Optional[str] = None
     side: Optional[str] = None
+    order_type: Optional[str] = None
     size: Optional[Decimal] = None
     price: Optional[Decimal] = None
+    filled_size: Optional[Decimal] = None
+    status: Optional[str] = None
+    created_at: Optional[int] = None
     error_message: Optional[str] = None
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
 
 @dataclass
 class OrderInfo:
     """標準化訂單信息"""
     order_id: str
+    symbol: str
     side: str
+    order_type: str
     size: Decimal
-    price: Decimal
+    price: Optional[Decimal]
     status: str
     filled_size: Decimal
     remaining_size: Decimal
+    client_order_id: Optional[str] = None
+    created_at: Optional[int] = None
+    updated_at: Optional[int] = None
+    time_in_force: Optional[str] = None
+    post_only: bool = False
+    reduce_only: bool = False
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
 
 @dataclass
 class TickerInfo:
     """標準化行情信息"""
     symbol: str
-    last_price: Decimal
+    last_price: Optional[Decimal] = None
     bid_price: Optional[Decimal] = None
     ask_price: Optional[Decimal] = None
+    bid_size: Optional[Decimal] = None
+    ask_size: Optional[Decimal] = None
+    mark_price: Optional[Decimal] = None
+    index_price: Optional[Decimal] = None
     volume_24h: Optional[Decimal] = None
+    turnover_24h: Optional[Decimal] = None
+    high_24h: Optional[Decimal] = None
+    low_24h: Optional[Decimal] = None
     change_24h: Optional[Decimal] = None
+    change_percent_24h: Optional[Decimal] = None
+    open_interest: Optional[Decimal] = None
+    funding_rate: Optional[Decimal] = None
+    next_funding_time: Optional[int] = None
     timestamp: Optional[int] = None
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
 
 @dataclass
@@ -54,6 +101,20 @@ class BalanceInfo:
     available: Decimal
     locked: Decimal
     total: Decimal
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+
+@dataclass
+class CollateralInfo:
+    """標準化抵押品信息（永續合約）"""
+    asset: str
+    total_collateral: Decimal
+    free_collateral: Decimal
+    initial_margin: Optional[Decimal] = None
+    maintenance_margin: Optional[Decimal] = None
+    account_value: Optional[Decimal] = None
+    unrealized_pnl: Optional[Decimal] = None
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
 
 @dataclass
@@ -64,8 +125,13 @@ class PositionInfo:
     size: Decimal
     entry_price: Optional[Decimal] = None
     mark_price: Optional[Decimal] = None
+    liquidation_price: Optional[Decimal] = None
     unrealized_pnl: Optional[Decimal] = None
+    realized_pnl: Optional[Decimal] = None
     margin: Optional[Decimal] = None
+    leverage: Optional[Decimal] = None
+    margin_mode: Optional[str] = None  # "CROSS", "ISOLATED"
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
 
 @dataclass
@@ -77,9 +143,15 @@ class MarketInfo:
     market_type: str  # "SPOT", "PERP", "FUTURE"
     status: str
     min_order_size: Decimal
-    tick_size: Decimal
-    base_precision: int
-    quote_precision: int
+    max_order_size: Optional[Decimal] = None
+    tick_size: Decimal = Decimal("0.00000001")
+    step_size: Optional[Decimal] = None
+    base_precision: int = 8
+    quote_precision: int = 8
+    min_notional: Optional[Decimal] = None
+    maker_fee: Optional[Decimal] = None
+    taker_fee: Optional[Decimal] = None
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
 
 @dataclass
@@ -96,6 +168,32 @@ class OrderBookInfo:
     bids: List[OrderBookLevel]
     asks: List[OrderBookLevel]
     timestamp: Optional[int] = None
+    sequence: Optional[int] = None
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+    @property
+    def best_bid(self) -> Optional[OrderBookLevel]:
+        """獲取最佳買價"""
+        return self.bids[0] if self.bids else None
+
+    @property
+    def best_ask(self) -> Optional[OrderBookLevel]:
+        """獲取最佳賣價"""
+        return self.asks[0] if self.asks else None
+
+    @property
+    def mid_price(self) -> Optional[Decimal]:
+        """獲取中間價"""
+        if self.best_bid and self.best_ask:
+            return (self.best_bid.price + self.best_ask.price) / 2
+        return None
+
+    @property
+    def spread(self) -> Optional[Decimal]:
+        """獲取價差"""
+        if self.best_bid and self.best_ask:
+            return self.best_ask.price - self.best_bid.price
+        return None
 
 
 @dataclass
@@ -109,31 +207,93 @@ class KlineInfo:
     close_price: Decimal
     volume: Decimal
     quote_volume: Optional[Decimal] = None
+    trades_count: Optional[int] = None
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
 
 @dataclass
 class TradeInfo:
-    """標準化交易信息"""
+    """標準化成交信息"""
     trade_id: str
-    order_id: str
+    order_id: Optional[str]
     symbol: str
     side: str
     size: Decimal
     price: Decimal
-    fee: Decimal
-    fee_asset: str
-    timestamp: int
-    is_maker: bool
+    fee: Optional[Decimal] = None
+    fee_asset: Optional[str] = None
+    timestamp: Optional[int] = None
+    is_maker: Optional[bool] = None
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
 
-# 統一的響應格式
+@dataclass
+class DepositAddressInfo:
+    """標準化充值地址信息"""
+    address: str
+    blockchain: str
+    tag: Optional[str] = None  # memo/tag for some chains
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+
+@dataclass
+class CancelResult:
+    """標準化取消訂單結果"""
+    success: bool
+    order_id: Optional[str] = None
+    cancelled_count: int = 0
+    error_message: Optional[str] = None
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+
+@dataclass
+class BatchOrderResult:
+    """標準化批量訂單結果"""
+    success: bool
+    orders: List[OrderResult] = field(default_factory=list)
+    failed_count: int = 0
+    errors: List[str] = field(default_factory=list)
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+
+# ==================== 統一響應格式 ====================
+
 @dataclass
 class ApiResponse:
-    """標準化API響應格式"""
+    """標準化API響應格式
+    
+    所有交易所客戶端方法統一返回此格式。
+    
+    Attributes:
+        success: 請求是否成功
+        data: 成功時的數據（標準化 dataclass 或其列表）
+        error_code: 錯誤碼（可選）
+        error_message: 錯誤信息（可選）
+        raw: 原始響應數據（用於調試）
+    
+    Example:
+        # 檢查響應
+        response = client.get_balance()
+        if response.success:
+            balances = response.data  # List[BalanceInfo]
+        else:
+            logger.error(f"Error: {response.error_message}")
+    """
     success: bool
     data: Optional[Any] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    raw: Optional[Any] = field(default=None, repr=False)
+
+    @classmethod
+    def ok(cls, data: Any, raw: Any = None) -> "ApiResponse":
+        """創建成功響應"""
+        return cls(success=True, data=data, raw=raw)
+
+    @classmethod
+    def error(cls, message: str, code: Optional[str] = None, raw: Any = None) -> "ApiResponse":
+        """創建錯誤響應"""
+        return cls(success=False, error_message=message, error_code=code, raw=raw)
 
 
 def query_retry(max_retries: int = 3, delay: float = 1.0, default_return=None):
@@ -312,3 +472,148 @@ class BaseExchangeClient(ABC):
             data=raw_data if success else None,
             error_message=error_message
         )
+
+    @staticmethod
+    def is_error_response(response: Any) -> bool:
+        """檢查 API 響應是否為錯誤
+
+        統一的錯誤檢測方法，支持所有交易所的響應格式。
+
+        Args:
+            response: API 響應數據
+
+        Returns:
+            bool: 如果是錯誤響應返回 True
+        """
+        if response is None:
+            return True
+        if isinstance(response, dict):
+            return "error" in response
+        return False
+
+    @staticmethod
+    def get_error_message(response: Any) -> Optional[str]:
+        """從 API 響應中提取錯誤信息
+
+        Args:
+            response: API 響應數據
+
+        Returns:
+            錯誤信息字符串，如果沒有錯誤則返回 None
+        """
+        if response is None:
+            return "Empty response"
+        if isinstance(response, dict) and "error" in response:
+            return str(response["error"])
+        return None
+
+    @staticmethod
+    def extract_field(response: Any, *keys: str, default: Any = None) -> Any:
+        """從 API 響應中安全提取字段
+
+        支持多個可能的字段名稱，用於處理不同交易所的字段命名差異。
+
+        Args:
+            response: API 響應數據
+            *keys: 可能的字段名稱列表
+            default: 默認值
+
+        Returns:
+            提取的字段值，如果未找到則返回默認值
+
+        Example:
+            # 從 ticker 響應中提取最新價格
+            price = client.extract_field(ticker, "lastPrice", "last_price", "price", default=0.0)
+        """
+        if not isinstance(response, dict):
+            return default
+
+        # 檢查頂層
+        for key in keys:
+            if key in response and response[key] not in (None, ""):
+                return response[key]
+
+        # 檢查 data 節點（部分交易所會包裝在 data 中）
+        data = response.get("data")
+        if isinstance(data, dict):
+            for key in keys:
+                if key in data and data[key] not in (None, ""):
+                    return data[key]
+
+        return default
+
+    @staticmethod
+    def safe_float(value: Any, default: float = 0.0) -> float:
+        """安全地將值轉換為浮點數
+
+        Args:
+            value: 要轉換的值
+            default: 轉換失敗時的默認值
+
+        Returns:
+            轉換後的浮點數
+        """
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def safe_decimal(value: Any, default: Optional[Decimal] = None) -> Optional[Decimal]:
+        """安全地將值轉換為 Decimal
+
+        Args:
+            value: 要轉換的值
+            default: 轉換失敗時的默認值
+
+        Returns:
+            轉換後的 Decimal 或默認值
+        """
+        if value is None:
+            return default
+        if isinstance(value, Decimal):
+            return value
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return default
+
+    @staticmethod
+    def safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+        """安全地將值轉換為整數
+
+        Args:
+            value: 要轉換的值
+            default: 轉換失敗時的默認值
+
+        Returns:
+            轉換後的整數或默認值
+        """
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _parse_raw_to_error(self, raw: Any) -> ApiResponse:
+        """從原始響應解析錯誤"""
+        if raw is None:
+            return ApiResponse.error("Empty response", raw=raw)
+        if isinstance(raw, dict) and "error" in raw:
+            return ApiResponse.error(str(raw["error"]), raw=raw)
+        return ApiResponse.error("Unknown error", raw=raw)
+
+    def _check_raw_error(self, raw: Any) -> Optional[ApiResponse]:
+        """檢查原始響應是否包含錯誤，如果有則返回錯誤響應，否則返回 None"""
+        if self.is_error_response(raw):
+            return self._parse_raw_to_error(raw)
+        return None
+
+
+# 模組級別的工具函數（從 BaseExchangeClient 導出）
+safe_float = BaseExchangeClient.safe_float
+safe_decimal = BaseExchangeClient.safe_decimal
+safe_int = BaseExchangeClient.safe_int

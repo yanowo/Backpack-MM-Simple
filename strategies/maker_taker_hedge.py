@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from logger import setup_logger
 from strategies.market_maker import MarketMaker, format_balance
 from strategies.perp_market_maker import PerpetualMarketMaker
-from utils.helpers import round_to_precision, round_to_tick_size
+from utils.helpers import round_to_precision, round_to_tick_size, format_quantity
 
 logger = setup_logger("maker_taker_hedge")
 
@@ -92,15 +92,15 @@ class _MakerTakerHedgeMixin:
                 quantity=buy_qty,
             )
             result = self._submit_order(buy_order, slot="limit")
-            if isinstance(result, dict) and "error" in result:
-                logger.error(f"買單掛單失敗: {result['error']}")
+            if not result.success:
+                logger.error(f"買單掛單失敗: {result.error_message}")
             else:
                 logger.info(
                     "買單已掛出: 價格 %s, 數量 %s",
                     format_balance(buy_price),
                     format_balance(buy_qty),
                 )
-                self.active_buy_orders.append(result)
+                self.active_buy_orders.append(result.raw)
                 self.orders_placed += 1
 
         if sell_qty >= self.min_order_size:
@@ -110,15 +110,15 @@ class _MakerTakerHedgeMixin:
                 quantity=sell_qty,
             )
             result = self._submit_order(sell_order, slot="limit")
-            if isinstance(result, dict) and "error" in result:
-                logger.error(f"賣單掛單失敗: {result['error']}")
+            if not result.success:
+                logger.error(f"賣單掛單失敗: {result.error_message}")
             else:
                 logger.info(
                     "賣單已掛出: 價格 %s, 數量 %s",
                     format_balance(sell_price),
                     format_balance(sell_qty),
                 )
-                self.active_sell_orders.append(result)
+                self.active_sell_orders.append(result.raw)
                 self.orders_placed += 1
 
     def _determine_order_sizes(self, buy_price: float, ask_price: float) -> Tuple[Optional[float], Optional[float]]:
@@ -306,7 +306,7 @@ class _MakerTakerHedgeMixin:
 
             order = {
                 "orderType": "Market",
-                "quantity": str(remaining_quantity),
+                "quantity": format_quantity(remaining_quantity, self.base_precision),
                 "side": attempt_side,
                 "symbol": self.symbol,
             }
@@ -338,13 +338,14 @@ class _MakerTakerHedgeMixin:
                 attempt,
             )
             result = self._submit_order(order, slot="market")
-            if isinstance(result, dict) and "error" in result:
-                logger.error(f"市價對沖失敗: {result['error']}")
+            if not result.success:
+                logger.error(f"市價對沖失敗: {result.error_message}")
                 # 對沖失敗，強制同步 API 校正本地追蹤
                 self._sync_position_from_api()
                 return None
 
-            logger.info("市價對沖訂單已提交: %s", result.get("id", "未知ID"))
+            order_result = result.data
+            logger.info("市價對沖訂單已提交: %s", order_result.order_id if order_result else "未知ID")
 
             # 計算預期倉位變化：Ask(賣出)=-quantity, Bid(買入)=+quantity
             expected_change = -remaining_quantity if attempt_side == "Ask" else remaining_quantity
@@ -473,22 +474,33 @@ class _MakerTakerHedgeMixin:
         """
         try:
             if isinstance(self, PerpetualMarketMaker):
-                positions = self._request_positions()
+                positions_response = self._request_positions()
                 
-                if isinstance(positions, dict) and "error" in positions:
-                    error_msg = positions.get("error", "")
+                if not positions_response.success:
+                    error_msg = positions_response.error_message or ""
                     if "404" in str(error_msg) or "RESOURCE_NOT_FOUND" in str(error_msg):
                         logger.debug("無倉位記錄，當前倉位為0")
                         return 0.0
                     logger.error(f"獲取倉位失敗: {error_msg}")
                     return None
 
+                positions = positions_response.data
                 if isinstance(positions, list):
                     if not positions:
                         logger.debug("無倉位記錄，當前倉位為0")
                         return 0.0
                         
                     position = positions[0]
+                    # 支援 PositionInfo dataclass
+                    if hasattr(position, 'size'):
+                        size_value = float(position.size or 0)
+                        # 根據 side 決定正負號：LONG=正, SHORT=負
+                        if hasattr(position, 'side'):
+                            if position.side == "SHORT":
+                                size_value = -size_value
+                            # LONG 或 FLAT 保持原值
+                        return size_value
+                    # 後備：字典格式
                     for field in ["netQuantity", "size", "position_size", "amount"]:
                         if field in position:
                             return float(position[field] or 0)
@@ -598,7 +610,7 @@ class _MakerTakerHedgeMixin:
         order = {
             "orderType": "Limit",
             "price": str(round_to_tick_size(price, self.tick_size)),
-            "quantity": str(round_to_precision(quantity, self.base_precision)),
+            "quantity": format_quantity(round_to_precision(quantity, self.base_precision), self.base_precision),
             "side": side,
             "symbol": self.symbol,
             "timeInForce": "GTC",

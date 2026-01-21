@@ -4,11 +4,29 @@ API請求客户端模塊
 import json
 import time
 import requests
+from decimal import Decimal
 from typing import Dict, Any, Iterable, List, Optional, Tuple
 from .auth import create_signature
 from config import API_URL, API_VERSION, DEFAULT_WINDOW
 from logger import setup_logger
-from .base_client import BaseExchangeClient
+from .base_client import (
+    BaseExchangeClient,
+    ApiResponse,
+    OrderResult,
+    OrderInfo,
+    BalanceInfo,
+    CollateralInfo,
+    PositionInfo,
+    MarketInfo,
+    TickerInfo,
+    OrderBookInfo,
+    OrderBookLevel,
+    KlineInfo,
+    TradeInfo,
+    DepositAddressInfo,
+    CancelResult,
+    BatchOrderResult,
+)
 from .proxy_utils import get_proxy_config
 
 logger = setup_logger("api.client")
@@ -144,46 +162,153 @@ class BPClient(BaseExchangeClient):
         return {"error": "達到最大重試次數"}
 
     # 各API端點函數
-    def get_deposit_address(self, blockchain):
-        """獲取存款地址"""
+    def get_deposit_address(self, blockchain: str) -> ApiResponse:
+        """獲取存款地址
+        
+        Returns:
+            ApiResponse with data: DepositAddressInfo
+        """
         endpoint = f"/wapi/{API_VERSION}/capital/deposit/address"
         instruction = "depositAddressQuery"
         params = {"blockchain": blockchain}
-        return self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
+        raw = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        address_info = DepositAddressInfo(
+            address=raw.get("address", ""),
+            blockchain=blockchain,
+            tag=raw.get("tag") or raw.get("memo"),
+            raw=raw
+        )
+        return ApiResponse.ok(address_info, raw=raw)
 
-    def get_balance(self):
-        """獲取賬户餘額"""
+    def get_balance(self) -> ApiResponse:
+        """獲取賬户餘額
+        
+        Returns:
+            ApiResponse with data: List[BalanceInfo]
+        """
         endpoint = f"/api/{API_VERSION}/capital"
         instruction = "balanceQuery"
-        return self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction)
+        raw = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        balances = []
+        # Backpack 返回格式: {"USDC": {"available": "100", "locked": "10", "staked": "0"}, ...}
+        if isinstance(raw, dict):
+            for asset, data in raw.items():
+                if isinstance(data, dict):
+                    available = self.safe_decimal(data.get("available"), Decimal("0"))
+                    locked = self.safe_decimal(data.get("locked"), Decimal("0"))
+                    balances.append(BalanceInfo(
+                        asset=asset,
+                        available=available,
+                        locked=locked,
+                        total=available + locked,
+                        raw=data
+                    ))
+        
+        return ApiResponse.ok(balances, raw=raw)
 
-    def get_collateral(self, subaccount_id=None):
-        """獲取抵押品資產"""
+    def get_collateral(self, subaccount_id: Optional[str] = None) -> ApiResponse:
+        """獲取抵押品資產
+        
+        Returns:
+            ApiResponse with data: List[CollateralInfo]
+        """
         endpoint = f"/api/{API_VERSION}/capital/collateral"
         params = {}
         if subaccount_id is not None:
             params["subaccountId"] = str(subaccount_id)
         instruction = "collateralQuery" if self.api_key and self.secret_key else None
-        return self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
+        raw = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        collaterals = []
+        if isinstance(raw, dict):
+            for asset, data in raw.items():
+                if isinstance(data, dict):
+                    total = self.safe_decimal(data.get("total") or data.get("available"), Decimal("0"))
+                    free = self.safe_decimal(data.get("available"), Decimal("0"))
+                    collaterals.append(CollateralInfo(
+                        asset=asset,
+                        total_collateral=total,
+                        free_collateral=free,
+                        raw=data
+                    ))
+        
+        return ApiResponse.ok(collaterals, raw=raw)
 
-    def execute_order(self, order_details):
-        """執行訂單"""
+    def execute_order(self, order_details: Dict[str, Any]) -> ApiResponse:
+        """執行訂單
+        
+        Returns:
+            ApiResponse with data: OrderResult
+        """
         endpoint = f"/api/{API_VERSION}/order"
         instruction = "orderExecute"
       
         # 根據實際請求體產生簽名參數，確保完全一致
+        # 同時預處理 order_details，確保數值格式統一
         params = {}
+        processed_order = {}
         for key, value in order_details.items():
             if value is None:
                 continue
             if isinstance(value, bool):
                 params[key] = str(value).lower()
+                processed_order[key] = value  # 布爾值保持原樣，API 需要真正的 boolean
+            elif isinstance(value, (int, float)):
+                # 數值轉為字符串用於簽名和請求體
+                str_value = str(value)
+                params[key] = str_value
+                processed_order[key] = str_value  # API 期望價格和數量是字符串
             else:
                 params[key] = str(value)
+                processed_order[key] = value
 
-        return self.make_request("POST", endpoint, self.api_key, self.secret_key, instruction, params, order_details)
+        raw = self.make_request("POST", endpoint, self.api_key, self.secret_key, instruction, params, processed_order)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return ApiResponse(
+                success=False,
+                data=OrderResult(
+                    success=False,
+                    error_message=error.error_message,
+                    raw=raw
+                ),
+                error_message=error.error_message,
+                raw=raw
+            )
+        
+        order_result = OrderResult(
+            success=True,
+            order_id=raw.get("id") or raw.get("orderId"),
+            client_order_id=raw.get("clientId"),
+            symbol=raw.get("symbol"),
+            side=raw.get("side"),
+            order_type=raw.get("orderType"),
+            size=self.safe_decimal(raw.get("quantity")),
+            price=self.safe_decimal(raw.get("price")),
+            filled_size=self.safe_decimal(raw.get("executedQuantity")),
+            status=raw.get("status"),
+            created_at=self.safe_int(raw.get("createdAt")),
+            raw=raw
+        )
+        
+        return ApiResponse.ok(order_result, raw=raw)
 
-    def execute_order_batch(self, orders_list, max_batch_size=50):
+    def execute_order_batch(self, orders_list: List[Dict[str, Any]], max_batch_size: int = 50) -> ApiResponse:
         """批量執行訂單
 
         Args:
@@ -191,20 +316,22 @@ class BPClient(BaseExchangeClient):
             max_batch_size: 單次批量下單的最大訂單數量，默認50個
 
         Returns:
-            批量訂單結果
+            ApiResponse with data: BatchOrderResult
         """
         # 如果訂單數量超過限制，分批處理
         if len(orders_list) > max_batch_size:
             logger.info(f"訂單數量 {len(orders_list)} 超過單次限制 {max_batch_size}，將分批下單")
             all_results = []
+            all_errors = []
+            
             for i in range(0, len(orders_list), max_batch_size):
                 batch = orders_list[i:i + max_batch_size]
                 logger.info(f"處理第 {i//max_batch_size + 1} 批，共 {len(batch)} 個訂單")
                 result = self._execute_order_batch_internal(batch)
 
                 if isinstance(result, dict) and "error" in result:
-                    # 如果某批次失敗，返回錯誤
-                    return result
+                    all_errors.append(result["error"])
+                    continue
 
                 if isinstance(result, list):
                     logger.debug(f"第 {i//max_batch_size + 1} 批返回 {len(result)} 個訂單結果")
@@ -215,13 +342,62 @@ class BPClient(BaseExchangeClient):
 
                 # 批次之間添加短暫延遲，避免速率限制
                 if i + max_batch_size < len(orders_list):
-                    import time
                     time.sleep(0.5)
 
             logger.info(f"所有批次完成，共返回 {len(all_results)} 個訂單結果")
-            return all_results
+            
+            # 轉換為 OrderResult 列表
+            order_results = []
+            for raw in all_results:
+                order_results.append(OrderResult(
+                    success=True,
+                    order_id=raw.get("id") or raw.get("orderId"),
+                    client_order_id=raw.get("clientId"),
+                    symbol=raw.get("symbol"),
+                    side=raw.get("side"),
+                    order_type=raw.get("orderType"),
+                    size=self.safe_decimal(raw.get("quantity")),
+                    price=self.safe_decimal(raw.get("price")),
+                    status=raw.get("status"),
+                    raw=raw
+                ))
+            
+            batch_result = BatchOrderResult(
+                success=len(order_results) > 0,
+                orders=order_results,
+                failed_count=len(all_errors),
+                errors=all_errors,
+                raw=all_results
+            )
+            return ApiResponse.ok(batch_result, raw=all_results)
         else:
-            return self._execute_order_batch_internal(orders_list)
+            raw = self._execute_order_batch_internal(orders_list)
+            
+            if isinstance(raw, dict) and "error" in raw:
+                return ApiResponse.error(raw["error"], raw=raw)
+            
+            order_results = []
+            raw_list = raw if isinstance(raw, list) else [raw]
+            for item in raw_list:
+                order_results.append(OrderResult(
+                    success=True,
+                    order_id=item.get("id") or item.get("orderId"),
+                    client_order_id=item.get("clientId"),
+                    symbol=item.get("symbol"),
+                    side=item.get("side"),
+                    order_type=item.get("orderType"),
+                    size=self.safe_decimal(item.get("quantity")),
+                    price=self.safe_decimal(item.get("price")),
+                    status=item.get("status"),
+                    raw=item
+                ))
+            
+            batch_result = BatchOrderResult(
+                success=True,
+                orders=order_results,
+                raw=raw
+            )
+            return ApiResponse.ok(batch_result, raw=raw)
 
     def _execute_order_batch_internal(self, orders_list):
         """內部批量下單實現
@@ -236,15 +412,29 @@ class BPClient(BaseExchangeClient):
         endpoint = f"/api/{API_VERSION}/orders"
         instruction = "orderExecute"  # 每個訂單使用 orderExecute 指令
 
-        # 請求體直接是訂單數組，不需要包裝在 {orders: ...} 中
-        data = orders_list
+        # 預處理訂單，確保數值格式統一（與 execute_order 保持一致）
+        processed_orders = []
+        for order in orders_list:
+            processed_order = {}
+            for key, value in order.items():
+                if value is None:
+                    continue
+                if isinstance(value, bool):
+                    processed_order[key] = value  # 布爾值保持原樣
+                elif isinstance(value, (int, float)):
+                    processed_order[key] = str(value)  # 數值轉為字符串
+                else:
+                    processed_order[key] = value
+            processed_orders.append(processed_order)
+
+        # 請求體使用預處理後的訂單
+        data = processed_orders
 
         # 構建簽名參數字符串
-        # 根據文檔：為每個訂單構建 instruction=orderExecute&param1=value1&param2=value2...
-        # 然後將所有訂單的參數字符串拼接起來
+        # 使用預處理後的訂單，確保簽名和請求體格式一致
         param_strings = []
 
-        for order in orders_list:
+        for order in processed_orders:
             # 按字母順序排序訂單參數
             sorted_params = sorted(order.items())
 
@@ -255,7 +445,7 @@ class BPClient(BaseExchangeClient):
             for key, value in sorted_params:
                 if value is None:
                     continue
-                # 布爾值轉換為小寫字符串
+                # 布爾值轉換為小寫字符串（用於簽名）
                 if isinstance(value, bool):
                     order_params.append(f"{key}={str(value).lower()}")
                 else:
@@ -288,9 +478,6 @@ class BPClient(BaseExchangeClient):
         }
 
         # 執行請求（使用自定義頭，不通過 make_request）
-        import json
-        import requests
-
         retry_count = 3
         for attempt in range(retry_count):
             try:
@@ -320,86 +507,193 @@ class BPClient(BaseExchangeClient):
 
         return {"error": "達到最大重試次數"}
 
-    def get_open_orders(self, symbol=None):
-        """獲取未成交訂單"""
+    def get_open_orders(self, symbol: Optional[str] = None) -> ApiResponse:
+        """獲取未成交訂單
+        
+        Returns:
+            ApiResponse with data: List[OrderInfo]
+        """
         endpoint = f"/api/{API_VERSION}/orders"
         instruction = "orderQueryAll"
         params = {}
         if symbol:
             params["symbol"] = symbol
-        return self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
+        raw = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        orders = []
+        raw_list = raw if isinstance(raw, list) else []
+        for item in raw_list:
+            orders.append(OrderInfo(
+                order_id=item.get("id") or item.get("orderId"),
+                symbol=item.get("symbol"),
+                side=item.get("side"),
+                order_type=item.get("orderType"),
+                size=self.safe_decimal(item.get("quantity"), Decimal("0")),
+                price=self.safe_decimal(item.get("price")),
+                status=item.get("status"),
+                filled_size=self.safe_decimal(item.get("executedQuantity"), Decimal("0")),
+                remaining_size=self.safe_decimal(item.get("quantity"), Decimal("0")) - self.safe_decimal(item.get("executedQuantity"), Decimal("0")),
+                client_order_id=item.get("clientId"),
+                created_at=self.safe_int(item.get("createdAt")),
+                time_in_force=item.get("timeInForce"),
+                post_only=item.get("postOnly", False),
+                raw=item
+            ))
+        
+        return ApiResponse.ok(orders, raw=raw)
 
-    def cancel_all_orders(self, symbol):
-        """取消所有訂單"""
+    def cancel_all_orders(self, symbol: str) -> ApiResponse:
+        """取消所有訂單
+        
+        Returns:
+            ApiResponse with data: CancelResult
+        """
         endpoint = f"/api/{API_VERSION}/orders"
         instruction = "orderCancelAll"
         params = {"symbol": symbol}
         data = {"symbol": symbol}
-        return self.make_request("DELETE", endpoint, self.api_key, self.secret_key, instruction, params, data)
+        raw = self.make_request("DELETE", endpoint, self.api_key, self.secret_key, instruction, params, data)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return ApiResponse(
+                success=False,
+                data=CancelResult(success=False, error_message=error.error_message, raw=raw),
+                error_message=error.error_message,
+                raw=raw
+            )
+        
+        cancelled_count = len(raw) if isinstance(raw, list) else 1
+        return ApiResponse.ok(CancelResult(success=True, cancelled_count=cancelled_count, raw=raw), raw=raw)
 
-    def cancel_order(self, order_id, symbol):
-        """取消指定訂單"""
+    def cancel_order(self, order_id: str, symbol: str) -> ApiResponse:
+        """取消指定訂單
+        
+        Returns:
+            ApiResponse with data: CancelResult
+        """
         endpoint = f"/api/{API_VERSION}/order"
         instruction = "orderCancel"
         params = {"orderId": order_id, "symbol": symbol}
         data = {"orderId": order_id, "symbol": symbol}
-        return self.make_request("DELETE", endpoint, self.api_key, self.secret_key, instruction, params, data)
+        raw = self.make_request("DELETE", endpoint, self.api_key, self.secret_key, instruction, params, data)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return ApiResponse(
+                success=False,
+                data=CancelResult(success=False, order_id=order_id, error_message=error.error_message, raw=raw),
+                error_message=error.error_message,
+                raw=raw
+            )
+        
+        return ApiResponse.ok(CancelResult(success=True, order_id=order_id, cancelled_count=1, raw=raw), raw=raw)
 
-    def get_ticker(self, symbol):
-        """獲取市場價格"""
+    def get_ticker(self, symbol: str) -> ApiResponse:
+        """獲取市場價格
+        
+        Returns:
+            ApiResponse with data: TickerInfo
+        """
         endpoint = f"/api/{API_VERSION}/ticker"
         params = {"symbol": symbol}
-        response = self.make_request("GET", endpoint, params=params)
+        raw = self.make_request("GET", endpoint, params=params)
 
-        if not isinstance(response, dict) or "error" in response:
-            return response
+        error = self._check_raw_error(raw)
+        if error:
+            return error
 
-        parsed = self._parse_ticker_snapshot(response)
+        parsed = self._parse_ticker_snapshot(raw)
         if not parsed:
-            return {"error": "無法解析ticker數據"}
+            return ApiResponse.error("無法解析ticker數據", raw=raw)
 
-        symbol_value = self._extract_from_payload(response, ("symbol", "s"))
-        if symbol_value:
-            parsed.setdefault("symbol", symbol_value)
+        ticker = TickerInfo(
+            symbol=symbol,
+            last_price=self.safe_decimal(parsed.get("lastPrice")),
+            bid_price=self.safe_decimal(parsed.get("bidPrice")),
+            ask_price=self.safe_decimal(parsed.get("askPrice")),
+            volume_24h=self.safe_decimal(parsed.get("volume")),
+            change_percent_24h=self.safe_decimal(parsed.get("change24h")),
+            raw=raw
+        )
+        
+        return ApiResponse.ok(ticker, raw=raw)
 
-        return parsed
-
-    def get_markets(self):
-        """獲取所有交易對信息"""
+    def get_markets(self) -> ApiResponse:
+        """獲取所有交易對信息
+        
+        Returns:
+            ApiResponse with data: List[MarketInfo]
+        """
         endpoint = f"/api/{API_VERSION}/markets"
-        return self.make_request("GET", endpoint)
+        raw = self.make_request("GET", endpoint)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        markets = []
+        raw_list = raw if isinstance(raw, list) else []
+        for item in raw_list:
+            filters = item.get("filters", {})
+            tick_size = "0.00000001"
+            min_order_size = "0"
+            
+            if "price" in filters:
+                tick_size = filters["price"].get("tickSize", tick_size)
+            if "quantity" in filters:
+                min_order_size = filters["quantity"].get("minQuantity", min_order_size)
+            
+            markets.append(MarketInfo(
+                symbol=item.get("symbol"),
+                base_asset=item.get("baseSymbol"),
+                quote_asset=item.get("quoteSymbol"),
+                market_type="PERP" if item.get("type") == "perpetual" else "SPOT",
+                status=item.get("status", "ACTIVE"),
+                min_order_size=self.safe_decimal(min_order_size, Decimal("0")),
+                tick_size=self.safe_decimal(tick_size, Decimal("0.00000001")),
+                base_precision=len(min_order_size.split(".")[-1]) if "." in min_order_size else 0,
+                quote_precision=len(tick_size.split(".")[-1]) if "." in tick_size else 0,
+                raw=item
+            ))
+        
+        return ApiResponse.ok(markets, raw=raw)
 
-    def get_order_book(self, symbol, limit=None):
-        """獲取市場深度"""
+    def get_order_book(self, symbol: str, limit: Optional[int] = None) -> ApiResponse:
+        """獲取市場深度
+        
+        Returns:
+            ApiResponse with data: OrderBookInfo
+        """
         endpoint = f"/api/{API_VERSION}/depth"
         params = {"symbol": symbol}
         if limit is not None:
             params["limit"] = str(limit)
-        response = self.make_request("GET", endpoint, params=params)
+        raw = self.make_request("GET", endpoint, params=params)
 
-        if not isinstance(response, dict) or "error" in response:
-            return response
+        error = self._check_raw_error(raw)
+        if error:
+            return error
 
-        bids, asks = self._parse_order_book_snapshot(response)
-        result = {
-            "bids": bids,
-            "asks": asks,
-        }
+        bids_raw, asks_raw = self._parse_order_book_snapshot(raw)
+        
+        bids = [OrderBookLevel(price=Decimal(str(b[0])), quantity=Decimal(str(b[1]))) for b in bids_raw]
+        asks = [OrderBookLevel(price=Decimal(str(a[0])), quantity=Decimal(str(a[1]))) for a in asks_raw]
+        
+        order_book = OrderBookInfo(
+            symbol=symbol,
+            bids=bids,
+            asks=asks,
+            timestamp=self.safe_int(self._extract_from_payload(raw, ("ts", "timestamp", "time"))),
+            sequence=self.safe_int(self._extract_from_payload(raw, ("sequence", "seq", "lastUpdateId"))),
+            raw=raw
+        )
 
-        # 保留部分關鍵欄位，方便上層使用
-        timestamp = self._extract_from_payload(response, ("ts", "timestamp", "time"))
-        if timestamp is not None:
-            result["timestamp"] = timestamp
-
-        sequence = self._extract_from_payload(response, ("sequence", "seq", "lastUpdateId"))
-        if sequence is not None:
-            result["sequence"] = sequence
-
-        symbol_value = self._extract_from_payload(response, ("symbol", "s"))
-        if symbol_value:
-            result["symbol"] = symbol_value
-
-        return result
+        return ApiResponse.ok(order_book, raw=raw)
 
     # ------------------------------------------------------------------
     # Snapshot parsing helpers
@@ -486,17 +780,48 @@ class BPClient(BaseExchangeClient):
 
         return result
 
-    def get_fill_history(self, symbol=None, limit=100):
-        """獲取歷史成交記錄"""
+    def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100) -> ApiResponse:
+        """獲取歷史成交記錄
+        
+        Returns:
+            ApiResponse with data: List[TradeInfo]
+        """
         endpoint = f"/wapi/{API_VERSION}/history/fills"
         instruction = "fillHistoryQueryAll"
         params = {"limit": str(limit)}
         if symbol:
             params["symbol"] = symbol
-        return self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
+        raw = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        trades = []
+        raw_list = raw if isinstance(raw, list) else []
+        for item in raw_list:
+            trades.append(TradeInfo(
+                trade_id=str(item.get("tradeId", "")),
+                order_id=item.get("orderId"),
+                symbol=item.get("symbol"),
+                side=item.get("side"),
+                size=self.safe_decimal(item.get("quantity"), Decimal("0")),
+                price=self.safe_decimal(item.get("price"), Decimal("0")),
+                fee=self.safe_decimal(item.get("fee")),
+                fee_asset=item.get("feeSymbol"),
+                timestamp=self.safe_int(item.get("createdAt")),
+                is_maker=item.get("isMaker"),
+                raw=item
+            ))
+        
+        return ApiResponse.ok(trades, raw=raw)
 
-    def get_klines(self, symbol, interval="1h", limit=100):
-        """獲取K線數據"""
+    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> ApiResponse:
+        """獲取K線數據
+        
+        Returns:
+            ApiResponse with data: List[KlineInfo]
+        """
         endpoint = f"/api/{API_VERSION}/klines"
         
         # 計算起始時間 (秒)
@@ -519,51 +844,67 @@ class BPClient(BaseExchangeClient):
             "startTime": str(start_time)
         }
 
-        return self.make_request("GET", endpoint, params=params)
+        raw = self.make_request("GET", endpoint, params=params)
+        
+        error = self._check_raw_error(raw)
+        if error:
+            return error
+        
+        klines = []
+        raw_list = raw if isinstance(raw, list) else []
+        for item in raw_list:
+            if isinstance(item, dict):
+                klines.append(KlineInfo(
+                    open_time=self.safe_int(item.get("start"), 0),
+                    close_time=self.safe_int(item.get("end"), 0),
+                    open_price=self.safe_decimal(item.get("open"), Decimal("0")),
+                    high_price=self.safe_decimal(item.get("high"), Decimal("0")),
+                    low_price=self.safe_decimal(item.get("low"), Decimal("0")),
+                    close_price=self.safe_decimal(item.get("close"), Decimal("0")),
+                    volume=self.safe_decimal(item.get("volume"), Decimal("0")),
+                    quote_volume=self.safe_decimal(item.get("quoteVolume")),
+                    trades_count=self.safe_int(item.get("trades")),
+                    raw=item
+                ))
+            elif isinstance(item, (list, tuple)) and len(item) >= 6:
+                # 數組格式: [open_time, open, high, low, close, volume, ...]
+                klines.append(KlineInfo(
+                    open_time=self.safe_int(item[0], 0),
+                    close_time=self.safe_int(item[0], 0) + duration,
+                    open_price=self.safe_decimal(item[1], Decimal("0")),
+                    high_price=self.safe_decimal(item[2], Decimal("0")),
+                    low_price=self.safe_decimal(item[3], Decimal("0")),
+                    close_price=self.safe_decimal(item[4], Decimal("0")),
+                    volume=self.safe_decimal(item[5], Decimal("0")),
+                    raw=item
+                ))
+        
+        return ApiResponse.ok(klines, raw=raw)
 
-    def get_market_limits(self, symbol):
-        """獲取交易對的最低訂單量和價格精度"""
-        markets_info = self.get_markets()
+    def get_market_limits(self, symbol: str) -> ApiResponse:
+        """獲取交易對的最低訂單量和價格精度
+        
+        Returns:
+            ApiResponse with data: MarketInfo
+        """
+        markets_response = self.get_markets()
 
-        if not isinstance(markets_info, dict) and isinstance(markets_info, list):
-            for market_info in markets_info:
-                if market_info.get('symbol') == symbol:
-                    base_asset = market_info.get('baseSymbol')
-                    quote_asset = market_info.get('quoteSymbol')
-                    
-                    # 從filters中獲取精度和最小訂單量信息
-                    filters = market_info.get('filters', {})
-                    base_precision = 8  # 默認值
-                    quote_precision = 8  # 默認值
-                    min_order_size = "0"  # 默認值
-                    tick_size = "0.00000001"  # 默認值
-                    
-                    if 'price' in filters:
-                        tick_size = filters['price'].get('tickSize', '0.00000001')
-                        quote_precision = len(tick_size.split('.')[-1]) if '.' in tick_size else 0
-                    
-                    if 'quantity' in filters:
-                        min_order_size = filters['quantity'].get('minQuantity', '0')
-                        min_value = filters['quantity'].get('minQuantity', '0.00000001')
-                        base_precision = len(min_value.split('.')[-1]) if '.' in min_value else 0
-                    
-                    return {
-                        'base_asset': base_asset,
-                        'quote_asset': quote_asset,
-                        'base_precision': base_precision,
-                        'quote_precision': quote_precision,
-                        'min_order_size': min_order_size,
-                        'tick_size': tick_size
-                    }
-            
-            logger.error(f"找不到交易對 {symbol} 的信息")
-            return None
-        else:
-            logger.error(f"無法獲取交易對信息: {markets_info}")
-            return None
+        if not markets_response.success:
+            return markets_response
+        
+        markets_list = markets_response.data
+        for market_info in markets_list:
+            if market_info.symbol == symbol:
+                return ApiResponse.ok(market_info, raw=market_info.raw)
+        
+        return ApiResponse.error(f"找不到交易對 {symbol} 的信息")
 
-    def get_positions(self, symbol=None):
-        """獲取永續合約倉位"""
+    def get_positions(self, symbol: Optional[str] = None) -> ApiResponse:
+        """獲取永續合約倉位
+        
+        Returns:
+            ApiResponse with data: List[PositionInfo]
+        """
         endpoint = f"/api/{API_VERSION}/position"
         instruction = "positionQuery"
         params = {}
@@ -571,13 +912,42 @@ class BPClient(BaseExchangeClient):
             params["symbol"] = symbol
         
         # 對於倉位查詢，404是正常情況（表示沒有倉位），所以只重試1次
-        result = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params, retry_count=1)
+        raw = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params, retry_count=1)
 
         # 特殊處理404錯誤 - 對於倉位查詢，404表示沒有倉位，返回空列表
-        if isinstance(result, dict) and "error" in result:
-            error_msg = result["error"]
+        if isinstance(raw, dict) and "error" in raw:
+            error_msg = raw["error"]
             if "404" in error_msg or "RESOURCE_NOT_FOUND" in error_msg:
                 logger.debug("倉位查詢返回404，表示沒有活躍倉位")
-                return []  # 返回空列表而不是錯誤
+                return ApiResponse.ok([], raw=raw)
+            return ApiResponse.error(error_msg, raw=raw)
         
-        return result
+        positions = []
+        raw_list = raw if isinstance(raw, list) else [raw] if raw else []
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            
+            size = self.safe_decimal(item.get("netQuantity") or item.get("size"), Decimal("0"))
+            if size > 0:
+                side = "LONG"
+            elif size < 0:
+                side = "SHORT"
+            else:
+                side = "FLAT"
+            
+            positions.append(PositionInfo(
+                symbol=item.get("symbol"),
+                side=side,
+                size=abs(size),
+                entry_price=self.safe_decimal(item.get("entryPrice")),
+                mark_price=self.safe_decimal(item.get("markPrice")),
+                liquidation_price=self.safe_decimal(item.get("liquidationPrice")),
+                unrealized_pnl=self.safe_decimal(item.get("pnlUnrealized")),
+                realized_pnl=self.safe_decimal(item.get("pnlRealized")),
+                margin=self.safe_decimal(item.get("margin")),
+                leverage=self.safe_decimal(item.get("leverage")),
+                raw=item
+            ))
+        
+        return ApiResponse.ok(positions, raw=raw)

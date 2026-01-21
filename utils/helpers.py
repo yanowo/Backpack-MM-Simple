@@ -19,6 +19,24 @@ def round_to_precision(value: float, precision: int) -> float:
     factor = 10 ** precision
     return math.floor(value * factor) / factor
 
+
+def format_quantity(value: float, precision: int) -> str:
+    """
+    格式化數量為字符串，避免科學計數法
+    
+    Args:
+        value: 數值
+        precision: 小數點精度
+        
+    Returns:
+        格式化的字符串
+    """
+    if value == 0:
+        return "0"
+    # 使用 f-string 格式化，確保不使用科學計數法
+    format_str = f"{{:.{precision}f}}"
+    return format_str.format(value)
+
 def round_to_tick_size(price: float, tick_size: float) -> float:
     """
     根據tick_size四捨五入價格

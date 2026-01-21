@@ -3,6 +3,7 @@ CLI命令模塊，提供命令行交互功能
 """
 import time
 import os
+import traceback
 from typing import Optional
 from datetime import datetime
 
@@ -295,15 +296,38 @@ def get_balance_command(api_key, secret_key):
             
             secret_for_client = ex_secret_key
             c = _get_client(api_key=ex_api_key, secret_key=secret_for_client, exchange=exchange, exchange_config=exchange_config)
-            balances = c.get_balance()
-            collateral = c.get_collateral()
+            balances_response = c.get_balance()
+            collateral_response = c.get_collateral()
             
-            if isinstance(balances, dict) and "error" in balances and balances["error"]:
-                print(f"獲取餘額失敗: {balances['error']}")
+            if not balances_response.success:
+                print(f"獲取餘額失敗: {balances_response.error_message}")
             else:
                 print("\n當前餘額:")
                 has_balance = False
-                if isinstance(balances, dict):
+                balances = balances_response.data
+                # 如果是 BalanceInfo 列表，轉換為字典格式
+                if isinstance(balances, list):
+                    # 對於Lighter，USDC/USD/USDT是別名，只顯示一次
+                    seen_assets = set()
+                    for balance_info in balances:
+                        asset = balance_info.asset if hasattr(balance_info, 'asset') else balance_info.get('asset', '')
+                        if asset in seen_assets:
+                            continue
+                        seen_assets.add(asset)
+                        
+                        available = float(balance_info.available if hasattr(balance_info, 'available') else balance_info.get('available', 0))
+                        locked = float(balance_info.locked if hasattr(balance_info, 'locked') else balance_info.get('locked', 0))
+                        total = float(balance_info.total if hasattr(balance_info, 'total') else balance_info.get('total', available + locked))
+                        if available > 0 or locked > 0 or total > 0:
+                            # APEX 顯示總權益和可用保證金
+                            if exchange == 'apex':
+                                print(f"{asset}: 總權益 {total}, 可用保證金 {available}")
+                            else:
+                                print(f"{asset}: 可用 {available}, 凍結 {locked}")
+                            has_balance = True
+                    if not has_balance:
+                        print("無餘額記錄")
+                elif isinstance(balances, dict):
                     # 對於Lighter，USDC/USD/USDT是別名，只顯示一次
                     seen_objects = set()
                     for coin, details in balances.items():
@@ -332,25 +356,42 @@ def get_balance_command(api_key, secret_key):
 
             # Paradex 的抵押品信息格式不同
             if exchange == 'paradex':
-                if isinstance(collateral, dict) and "error" in collateral:
-                    print(f"獲取賬户摘要失敗: {collateral['error']}")
-                elif isinstance(collateral, dict) and collateral.get('account'):
-                    print("\n賬户摘要:")
-                    print(f"賬户地址: {collateral.get('account', 'N/A')}")
-                    print(f"賬户價值: {collateral.get('account_value', '0')} USDC")
-                    print(f"總抵押品: {collateral.get('total_collateral', '0')} USDC")
-                    print(f"可用抵押品: {collateral.get('free_collateral', '0')} USDC")
-                    print(f"初始保證金: {collateral.get('initial_margin', '0')} USDC")
-                    print(f"維持保證金: {collateral.get('maintenance_margin', '0')} USDC")
+                if not collateral_response.success:
+                    print(f"獲取賬户摘要失敗: {collateral_response.error_message}")
+                else:
+                    collateral = collateral_response.data
+                    # 支援 CollateralInfo dataclass 或 dict
+                    if hasattr(collateral, 'raw') and collateral.raw:
+                        collateral_dict = collateral.raw
+                    elif isinstance(collateral, dict):
+                        collateral_dict = collateral
+                    else:
+                        collateral_dict = {}
+                    if collateral_dict.get('account'):
+                        print("\n賬户摘要:")
+                        print(f"賬户地址: {collateral_dict.get('account', 'N/A')}")
+                        print(f"賬户價值: {collateral_dict.get('account_value', '0')} USDC")
+                        print(f"總抵押品: {collateral_dict.get('total_collateral', '0')} USDC")
+                        print(f"可用抵押品: {collateral_dict.get('free_collateral', '0')} USDC")
+                        print(f"初始保證金: {collateral_dict.get('initial_margin', '0')} USDC")
+                        print(f"維持保證金: {collateral_dict.get('maintenance_margin', '0')} USDC")
             elif exchange == 'lighter':
                 # Lighter 的抵押品信息格式
-                if isinstance(collateral, dict) and "error" in collateral:
-                    print(f"獲取抵押品失敗: {collateral['error']}")
-                elif isinstance(collateral, dict):
-                    total_collateral = collateral.get('totalCollateral', 0)
-                    available_collateral = collateral.get('availableCollateral', 0)
-                    total_asset_value = collateral.get('totalAssetValue', 0)
-                    cross_asset_value = collateral.get('crossAssetValue', 0)
+                if not collateral_response.success:
+                    print(f"獲取抵押品失敗: {collateral_response.error_message}")
+                else:
+                    collateral = collateral_response.data
+                    # 支援 CollateralInfo dataclass 或 dict
+                    if hasattr(collateral, 'raw') and collateral.raw:
+                        collateral_dict = collateral.raw
+                    elif isinstance(collateral, dict):
+                        collateral_dict = collateral
+                    else:
+                        collateral_dict = {}
+                    total_collateral = collateral_dict.get('totalCollateral', 0)
+                    available_collateral = collateral_dict.get('availableCollateral', 0)
+                    total_asset_value = collateral_dict.get('totalAssetValue', 0)
+                    cross_asset_value = collateral_dict.get('crossAssetValue', 0)
 
                     print("\n賬户摘要:")
                     print(f"總抵押品: {total_collateral} USDC")
@@ -361,17 +402,25 @@ def get_balance_command(api_key, secret_key):
                         print(f"跨倉資產價值: {cross_asset_value} USDC")
 
                     # 顯示持倉信息（如果有）
-                    assets = collateral.get('assets', [])
+                    assets = collateral_dict.get('assets', [])
             elif exchange == 'apex':
                 # APEX 的抵押品信息格式
-                if isinstance(collateral, dict) and "error" in collateral:
-                    print(f"獲取抵押品失敗: {collateral['error']}")
-                elif isinstance(collateral, dict):
-                    total_collateral = collateral.get('totalCollateral', 0)
-                    available_collateral = collateral.get('availableCollateral', 0)
-                    token = collateral.get('token', 'USDC')
-                    maker_fee = collateral.get('makerFeeRate', '0')
-                    taker_fee = collateral.get('takerFeeRate', '0')
+                if not collateral_response.success:
+                    print(f"獲取抵押品失敗: {collateral_response.error_message}")
+                else:
+                    collateral = collateral_response.data
+                    # 支援 CollateralInfo dataclass 或 dict
+                    if hasattr(collateral, 'raw') and collateral.raw:
+                        collateral_dict = collateral.raw
+                    elif isinstance(collateral, dict):
+                        collateral_dict = collateral
+                    else:
+                        collateral_dict = {}
+                    total_collateral = collateral_dict.get('totalCollateral', 0)
+                    available_collateral = collateral_dict.get('availableCollateral', 0)
+                    token = collateral_dict.get('token', 'USDC')
+                    maker_fee = collateral_dict.get('makerFeeRate', '0')
+                    taker_fee = collateral_dict.get('takerFeeRate', '0')
 
                     print("\n賬户摘要:")
                     print(f"合約錢包餘額: {total_collateral} {token}")
@@ -380,10 +429,18 @@ def get_balance_command(api_key, secret_key):
                         print(f"Taker 費率: {float(taker_fee)*100:.2f}%")
             else:
                 # 其他交易所的抵押品信息
-                if isinstance(collateral, dict) and "error" in collateral:
-                    print(f"獲取抵押品失敗: {collateral['error']}")
-                elif isinstance(collateral, dict):
-                    assets = collateral.get('assets') or collateral.get('collateral', [])
+                if not collateral_response.success:
+                    print(f"獲取抵押品失敗: {collateral_response.error_message}")
+                else:
+                    collateral = collateral_response.data
+                    # 支援 CollateralInfo dataclass 或 dict
+                    if hasattr(collateral, 'raw') and collateral.raw:
+                        collateral_dict = collateral.raw
+                    elif isinstance(collateral, dict):
+                        collateral_dict = collateral
+                    else:
+                        collateral_dict = {}
+                    assets = collateral_dict.get('assets') or collateral_dict.get('collateral', [])
                     if assets:
                         print("\n抵押品資產:")
                         for item in assets:
@@ -402,11 +459,20 @@ def get_balance_command(api_key, secret_key):
 def get_markets_command():
     """獲取市場信息命令"""
     print("\n獲取市場信息...")
-    markets_info = _get_client().get_markets()
+    markets_response = _get_client().get_markets()
     
-    if isinstance(markets_info, dict) and "error" in markets_info:
-        print(f"獲取市場信息失敗: {markets_info['error']}")
+    if not markets_response.success:
+        print(f"獲取市場信息失敗: {markets_response.error_message}")
         return
+    
+    # 支援 MarketInfo dataclass list 或 dict list
+    markets_data = markets_response.data
+    if markets_data and hasattr(markets_data[0], 'raw'):
+        markets_info = [m.raw for m in markets_data]
+    elif isinstance(markets_data, list):
+        markets_info = markets_data
+    else:
+        markets_info = []
     
     spot_markets = [m for m in markets_info if m.get('marketType') == 'SPOT']
     print(f"\n找到 {len(spot_markets)} 個現貨市場:")
@@ -434,7 +500,11 @@ def get_orderbook_command(api_key, secret_key):
         
         if not ws.connected:
             print("WebSocket連接超時，使用REST API獲取訂單簿")
-            depth = _get_client().get_order_book(symbol)
+            depth_response = _get_client().get_order_book(symbol)
+            if not depth_response.success:
+                print(f"獲取訂單簿失敗: {depth_response.error_message}")
+                return
+            depth = depth_response.data.raw if hasattr(depth_response.data, 'raw') else depth_response.data
         else:
             # 初始化訂單簿並訂閲深度流
             ws.initialize_orderbook()
@@ -485,10 +555,11 @@ def get_orderbook_command(api_key, secret_key):
         print(f"獲取訂單簿失敗: {str(e)}")
         # 嘗試使用REST API
         try:
-            depth = _get_client().get_order_book(symbol)
-            if isinstance(depth, dict) and "error" in depth:
-                print(f"獲取訂單簿失敗: {depth['error']}")
+            depth_response = _get_client().get_order_book(symbol)
+            if not depth_response.success:
+                print(f"獲取訂單簿失敗: {depth_response.error_message}")
                 return
+            depth = depth_response.data.raw if hasattr(depth_response.data, 'raw') else depth_response.data
             
             print("\n訂單簿 (REST API):")
             print("\n賣單 (從低到高):")
@@ -678,13 +749,23 @@ def run_market_maker_command(api_key, secret_key):
 
     symbol = input("請輸入要做市的交易對 (例如: SOL_USDC): ")
     client = _get_client(exchange=exchange, exchange_config=exchange_config)
-    market_limits = client.get_market_limits(symbol)
-    if not market_limits:
+    market_limits_response = client.get_market_limits(symbol)
+    if not market_limits_response.success:
+        print(f"交易對 {symbol} 不存在或不可交易: {market_limits_response.error_message}")
+        return
+    
+    market_info = market_limits_response.data
+    if not market_info:
         print(f"交易對 {symbol} 不存在或不可交易")
         return
 
-    base_asset = market_limits.get('base_asset') or symbol
-    quote_asset = market_limits.get('quote_asset') or ''
+    # 支援 MarketInfo dataclass 或 dict
+    if hasattr(market_info, 'base_asset'):
+        base_asset = market_info.base_asset or symbol
+        quote_asset = market_info.quote_asset or ''
+    else:
+        base_asset = market_info.get('base_asset') or symbol
+        quote_asset = market_info.get('quote_asset') or ''
     market_desc = f"{symbol}" if not quote_asset else f"{symbol} ({base_asset}/{quote_asset})"
 
     if market_type == "spot":
@@ -774,9 +855,12 @@ def run_market_maker_command(api_key, secret_key):
             take_profit_input = input("未實現止盈閾值 (報價資產金額，留空不啟用): ").strip()
             take_profit = float(take_profit_input) if take_profit_input else None
 
-            # 網格策略的默認值
+            # 網格策略的持倉參數：
+            # - target_position = 0：網格策略沒有目標持倉概念
+            # - position_threshold = max_position：只有超過最大持倉才觸發風控
+            # - inventory_skew = 0：不使用庫存偏移
             target_position = 0.0
-            position_threshold = 0.1
+            position_threshold = max_position  # 設為最大持倉，避免不必要的減倉觸發
             inventory_skew = 0.0
 
             if max_position <= 0:
@@ -1210,13 +1294,21 @@ def market_analysis_command(api_key, secret_key):
             
             # 獲取K線數據分析趨勢
             print("獲取歷史數據分析趨勢...")
-            klines = _get_client().get_klines(symbol, "15m")
+            klines_response = _get_client().get_klines(symbol, "15m")
 
             # 添加調試信息查看數據結構
             print("K線數據結構: ")
-            if isinstance(klines, dict) and "error" in klines:
-                print(f"獲取K線數據出錯: {klines['error']}")
+            if not klines_response.success:
+                print(f"獲取K線數據出錯: {klines_response.error_message}")
             else:
+                # 支援 KlineInfo dataclass list 或 dict list
+                klines_data = klines_response.data
+                if klines_data and hasattr(klines_data[0], 'raw'):
+                    klines = [k.raw for k in klines_data]
+                elif isinstance(klines_data, list):
+                    klines = klines_data
+                else:
+                    klines = []
                 print(f"收到 {len(klines) if isinstance(klines, list) else type(klines)} 條K線數據")
                 
                 # 檢查第一條記錄以確定結構

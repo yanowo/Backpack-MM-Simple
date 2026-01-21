@@ -544,6 +544,19 @@ section:hover {
     flex-direction: column;
 }
 
+/* Half-width form field for inline display */
+.form-field-half {
+    flex: 1;
+    min-width: 140px;
+}
+
+/* Inline row container for form fields */
+.form-row-inline {
+    display: flex;
+    gap: var(--spacing-md);
+    grid-column: 1 / -1;
+}
+
 .field-label {
     font-size: 0.875rem;
     font-weight: 600;

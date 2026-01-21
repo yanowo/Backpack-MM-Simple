@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 import requests
 from starknet_py.net.signer.stark_curve_signer import StarkCurveSigner, KeyPair
 from starknet_py.utils.typed_data import TypedData
-from typing import List
 
 from .base_client import (
     BaseExchangeClient,
@@ -20,12 +19,16 @@ from .base_client import (
     OrderResult,
     OrderInfo,
     BalanceInfo,
+    CollateralInfo,
     PositionInfo,
     MarketInfo,
     TickerInfo,
     OrderBookInfo,
     OrderBookLevel,
-    TradeInfo
+    TradeInfo,
+    CancelResult,
+    BatchOrderResult,
+    KlineInfo,
 )
 from .proxy_utils import get_proxy_config
 from logger import setup_logger
@@ -581,7 +584,7 @@ class ParadexClient(BaseExchangeClient):
             self._last_market_fetch = now
             logger.info(f"已緩存 {len(self._market_info_cache)} 個市場信息")
 
-    def get_balance(self) -> Dict[str, Any]:
+    def get_balance(self) -> ApiResponse:
         """獲取賬户餘額
         
         Paradex API 返回格式:
@@ -602,29 +605,31 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
         # 轉換為標準格式（與其他客户端一致）
-        balances = {}
+        balances: List[BalanceInfo] = []
         balance_list = result.get("results", []) if isinstance(result, dict) else []
 
         for item in balance_list:
             if isinstance(item, dict):
                 token = item.get("token", "UNKNOWN")
-                size = item.get("size", "0")
+                size = self.safe_float(item.get("size", "0")) or 0.0
                 
                 # Paradex 的 balance 端點只返回總額，沒有區分 available 和 locked
-                # 我們需要從 account summary 獲取更詳細的信息
-                balances[token] = {
-                    "available": str(size),
-                    "locked": "0",  # Paradex balance 端點不提供鎖定金額
-                    "total": str(size)
-                }
+                balances.append(BalanceInfo(
+                    asset=token,
+                    available=size,
+                    locked=0.0,
+                    total=size,
+                    raw=item,
+                ))
 
-        return balances
+        return ApiResponse.ok(balances, raw=result)
 
-    def get_collateral(self) -> Dict[str, Any]:
+    def get_collateral(self) -> ApiResponse:
         """獲取賬户抵押品信息（通過 account summary 端點）
         
         Paradex API 返回格式:
@@ -645,32 +650,33 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
-        # 返回包含抵押品信息的摘要
-        return {
-            "account": result.get("account"),
-            "account_value": result.get("account_value"),
-            "total_collateral": result.get("total_collateral"),
-            "free_collateral": result.get("free_collateral"),
-            "initial_margin": result.get("initial_margin_requirement"),
-            "maintenance_margin": result.get("maintenance_margin_requirement"),
-            "updated_at": result.get("updated_at")
-        }
+        collateral_info = CollateralInfo(
+            asset="USDC",
+            total_collateral=self.safe_float(result.get("total_collateral")),
+            free_collateral=self.safe_float(result.get("free_collateral")),
+            account_value=self.safe_float(result.get("account_value")),
+            initial_margin=self.safe_float(result.get("initial_margin_requirement")),
+            maintenance_margin=self.safe_float(result.get("maintenance_margin_requirement")),
+            raw=result,
+        )
+        return ApiResponse.ok(collateral_info, raw=result)
 
-    def execute_order(self, order_details: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_order(self, order_details: Dict[str, Any]) -> ApiResponse:
         """執行訂單
 
         Paradex 需要對每個訂單進行 StarkNet 簽名
         """
         symbol = order_details.get("symbol")
         if not symbol:
-            return {"error": "缺少交易對"}
+            return ApiResponse.error("缺少交易對")
 
         side = order_details.get("side", "").upper()
         if side not in ["BUY", "SELL", "BID", "ASK"]:
-            return {"error": "無效的買賣方向"}
+            return ApiResponse.error("無效的買賣方向")
 
         # 標準化方向
         if side in ["BID"]:
@@ -699,9 +705,9 @@ class ParadexClient(BaseExchangeClient):
                     normalized_price = float(price_decimal.quantize(Decimal('0.00000001')))
                 except (InvalidOperation, ValueError) as e:
                     logger.error(f"無效的價格格式: {price}, 錯誤: {e}")
-                    return {"error": f"無效的價格: {price}"}
+                    return ApiResponse.error(f"無效的價格: {price}")
             else:
-                return {"error": "限價單缺少價格"}
+                return ApiResponse.error("限價單缺少價格")
 
         # 構建訂單數據用於簽名
         order_data_for_signature = {
@@ -721,7 +727,7 @@ class ParadexClient(BaseExchangeClient):
             logger.error(f"訂單簽名失敗: {e}")
             import traceback
             logger.error(f"簽名異常詳情: {traceback.format_exc()}")
-            return {"error": f"訂單簽名失敗: {e}"}
+            return ApiResponse.error(f"訂單簽名失敗: {e}")
 
         # 構建 API 請求 payload（使用與簽名相同的標準化值）
         payload = {
@@ -767,10 +773,25 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        # 返回原始結果或錯誤
-        return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
-    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> Any:
+        # 轉換為標準格式
+        order_result = OrderResult(
+            success=True,
+            order_id=result.get("id") or result.get("order_id"),
+            client_order_id=result.get("client_order_id"),
+            symbol=symbol,
+            side=side,
+            price=normalized_price,
+            size=normalized_size,
+            status=result.get("status"),
+            raw=result,
+        )
+        return ApiResponse.ok(order_result, raw=result)
+
+    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> ApiResponse:
         """批量執行訂單
 
         Paradex 批量下單限制：每批最多 10 個訂單
@@ -779,10 +800,10 @@ class ParadexClient(BaseExchangeClient):
             orders_details: 訂單詳情列表
 
         Returns:
-            成功訂單列表或錯誤信息
+            ApiResponse with BatchOrderResult
         """
         if not orders_details:
-            return {"error": "訂單列表為空"}
+            return ApiResponse.error("訂單列表為空")
 
         # Paradex 限制每批最多 10 個訂單
         if len(orders_details) > 10:
@@ -790,8 +811,8 @@ class ParadexClient(BaseExchangeClient):
 
         # 將訂單拆分為多批（每批最多 10 個）
         batch_size = 10
-        all_results = []
-        all_errors = []
+        all_results: List[OrderResult] = []
+        all_errors: List[str] = []
 
         for batch_start in range(0, len(orders_details), batch_size):
             batch = orders_details[batch_start:batch_start + batch_size]
@@ -806,13 +827,13 @@ class ParadexClient(BaseExchangeClient):
                 symbol = order_details.get("symbol")
                 if not symbol:
                     logger.warning("跳過無效訂單: 缺少交易對")
-                    all_errors.append({"error": "缺少交易對", "order": order_details})
+                    all_errors.append("缺少交易對")
                     continue
 
                 side = order_details.get("side", "").upper()
                 if side not in ["BUY", "SELL", "BID", "ASK"]:
                     logger.warning("跳過無效訂單: 無效的買賣方向 %s", side)
-                    all_errors.append({"error": f"無效的買賣方向: {side}", "order": order_details})
+                    all_errors.append(f"無效的買賣方向: {side}")
                     continue
 
                 # 標準化方向
@@ -826,7 +847,7 @@ class ParadexClient(BaseExchangeClient):
 
                 if not size:
                     logger.warning("跳過無效訂單: 缺少數量")
-                    all_errors.append({"error": "缺少數量", "order": order_details})
+                    all_errors.append("缺少數量")
                     continue
 
                 # 標準化數值（確保簽名和發送使用相同的值）
@@ -844,11 +865,11 @@ class ParadexClient(BaseExchangeClient):
                             normalized_price = float(price_decimal.quantize(Decimal('0.00000001')))
                         except (InvalidOperation, ValueError) as e:
                             logger.warning("跳過無效訂單: 無效的價格格式 %s, 錯誤: %s", price, e)
-                            all_errors.append({"error": f"無效的價格: {price}", "order": order_details})
+                            all_errors.append(f"無效的價格: {price}")
                             continue
                     else:
                         logger.warning("跳過無效訂單: 限價單缺少價格")
-                        all_errors.append({"error": "限價單缺少價格", "order": order_details})
+                        all_errors.append("限價單缺少價格")
                         continue
 
                 # 構建訂單數據用於簽名
@@ -867,7 +888,7 @@ class ParadexClient(BaseExchangeClient):
                     signature = self._sign_order(order_data_for_signature, signature_timestamp)
                 except Exception as e:
                     logger.error("訂單簽名失敗: %s", e)
-                    all_errors.append({"error": f"訂單簽名失敗: {e}", "order": order_details})
+                    all_errors.append(f"訂單簽名失敗: {e}")
                     continue
 
                 # 構建單個訂單 payload（使用與簽名相同的標準化值）
@@ -927,13 +948,24 @@ class ParadexClient(BaseExchangeClient):
             if isinstance(result, dict):
                 # 處理成功的訂單
                 if "orders" in result:
-                    all_results.extend(result["orders"])
+                    for order in result["orders"]:
+                        all_results.append(OrderResult(
+                            success=True,
+                            order_id=order.get("id") or order.get("order_id"),
+                            client_order_id=order.get("client_order_id"),
+                            symbol=order.get("market"),
+                            side=order.get("side"),
+                            price=self.safe_float(order.get("price")),
+                            size=self.safe_float(order.get("size")),
+                            status=order.get("status"),
+                            raw=order,
+                        ))
                     logger.info("批量下單成功: %d 個訂單", len(result["orders"]))
 
                 # 處理失敗的訂單（過濾掉 None 值）
                 if "errors" in result and result["errors"]:
                     # Paradex API 返回的 errors 數組中，成功的訂單對應 None，失敗的訂單才有錯誤信息
-                    real_errors = [e for e in result["errors"] if e is not None]
+                    real_errors = [str(e) for e in result["errors"] if e is not None]
                     if real_errors:
                         all_errors.extend(real_errors)
                         logger.warning("批量下單部分失敗: %d 個錯誤", len(real_errors))
@@ -941,26 +973,23 @@ class ParadexClient(BaseExchangeClient):
                 # 如果整個批次失敗
                 if "error" in result and "orders" not in result:
                     logger.error("批量下單失敗: %s", result["error"])
-                    all_errors.append({"error": result["error"], "batch": batch_orders})
+                    all_errors.append(result["error"])
 
         # 返回結果
+        batch_result = BatchOrderResult(
+            success=len(all_results) > 0 or len(all_errors) == 0,
+            orders=all_results,
+            failed_count=len(all_errors),
+            errors=all_errors if all_errors else [],
+            raw={"successful_count": len(all_results), "failed_count": len(all_errors)},
+        )
+        
         if all_results:
-            # 有成功的訂單
-            if all_errors:
-                # 部分成功
-                return {
-                    "orders": all_results,
-                    "errors": all_errors,
-                    "partial_success": True
-                }
-            else:
-                # 全部成功
-                return all_results
+            return ApiResponse.ok(batch_result, raw=batch_result.raw)
         else:
-            # 全部失敗
-            return {"error": "批量下單全部失敗", "errors": all_errors}
+            return ApiResponse.error("批量下單全部失敗", raw={"errors": all_errors})
 
-    def get_open_orders(self, symbol: Optional[str] = None) -> Any:
+    def get_open_orders(self, symbol: Optional[str] = None) -> ApiResponse:
         """獲取開放訂單"""
         params = {}
         if symbol:
@@ -974,13 +1003,34 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
         # 返回訂單列表
-        return result.get("results", []) if isinstance(result, dict) else []
+        orders_raw = result.get("results", []) if isinstance(result, dict) else []
+        orders: List[OrderInfo] = []
+        for order in orders_raw:
+            size_val = self.safe_float(order.get("size"))
+            filled_val = self.safe_float(order.get("filled_size"))
+            orders.append(OrderInfo(
+                order_id=order.get("id") or order.get("order_id"),
+                client_order_id=order.get("client_order_id"),
+                symbol=order.get("market"),
+                side=order.get("side"),
+                price=self.safe_float(order.get("price")),
+                size=size_val,
+                filled_size=filled_val,
+                remaining_size=size_val - filled_val if size_val and filled_val else size_val,
+                status=order.get("status"),
+                order_type=order.get("type"),
+                time_in_force=order.get("instruction"),
+                created_at=order.get("created_at"),
+                raw=order,
+            ))
+        return ApiResponse.ok(orders, raw=result)
 
-    def cancel_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
+    def cancel_order(self, order_id: str, symbol: str) -> ApiResponse:
         """取消指定訂單"""
         result = self.make_request(
             "DELETE",
@@ -989,16 +1039,26 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
-    def cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        cancel_result = CancelResult(
+            success=True,
+            order_id=order_id,
+            cancelled_count=1,
+            raw=result,
+        )
+        return ApiResponse.ok(cancel_result, raw=result)
+
+    def cancel_all_orders(self, symbol: Optional[str] = None) -> ApiResponse:
         """批量取消訂單
 
         Args:
             symbol: 交易對符號（可選）。如果提供，只取消該市場的訂單；否則取消所有訂單
 
         Returns:
-            取消結果
+            ApiResponse with CancelResult
         """
         params = {}
         if symbol:
@@ -1012,9 +1072,28 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
-    def get_ticker(self, symbol: str) -> Dict[str, Any]:
+        # 計算取消的訂單數量
+        cancelled_count = 0
+        if isinstance(result, dict):
+            if "results" in result:
+                cancelled_count = len(result["results"])
+            elif "deleted" in result:
+                cancelled_count = result["deleted"]
+            elif isinstance(result.get("data"), list):
+                cancelled_count = len(result["data"])
+        
+        cancel_result = CancelResult(
+            success=True,
+            cancelled_count=cancelled_count,
+            raw=result,
+        )
+        return ApiResponse.ok(cancel_result, raw=result)
+
+    def get_ticker(self, symbol: str) -> ApiResponse:
         """獲取行情信息 - 使用 markets/summary 端點
 
         注意：Paradex 使用 /markets/summary 端點來獲取市場行情數據
@@ -1028,29 +1107,31 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        if isinstance(summary_result, dict) and "error" in summary_result:
-            return summary_result
+        error = self._check_raw_error(summary_result)
+        if error:
+            return error
 
         # Paradex summary 返回格式：{"results": [{"symbol": "...", "bid": "...", "ask": "...", "last_traded_price": "...", ...}]}
         results = summary_result.get("results", [])
 
         if not results:
-            return {"error": f"未找到交易對 {symbol} 的市場數據"}
+            return ApiResponse.error(f"未找到交易對 {symbol} 的市場數據")
 
         market_data = results[0]
 
-        # 轉換為標準格式（與其他客户端一致）
-        return {
-            "symbol": symbol,
-            "lastPrice": str(market_data.get("last_traded_price", 0)) if market_data.get("last_traded_price") else None,
-            "bidPrice": str(market_data.get("bid", 0)) if market_data.get("bid") else None,
-            "askPrice": str(market_data.get("ask", 0)) if market_data.get("ask") else None,
-            "volume": str(market_data.get("volume_24h", 0)) if market_data.get("volume_24h") else None,
-            "markPrice": str(market_data.get("mark_price", 0)) if market_data.get("mark_price") else None,
-            "raw": summary_result
-        }
+        # 轉換為標準格式
+        ticker = TickerInfo(
+            symbol=symbol,
+            last_price=self.safe_float(market_data.get("last_traded_price")),
+            bid_price=self.safe_float(market_data.get("bid")),
+            ask_price=self.safe_float(market_data.get("ask")),
+            volume_24h=self.safe_float(market_data.get("volume_24h")),
+            mark_price=self.safe_float(market_data.get("mark_price")),
+            raw=summary_result,
+        )
+        return ApiResponse.ok(ticker, raw=summary_result)
 
-    def get_markets(self) -> Dict[str, Any]:
+    def get_markets(self) -> ApiResponse:
         """獲取市場列表"""
         result = self.make_request(
             "GET",
@@ -1058,13 +1139,29 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
-        # 返回原始結果，與其他客户端保持一致
-        return result
+        # 轉換為標準格式
+        markets_raw = result.get("results", []) if isinstance(result, dict) else []
+        markets: List[MarketInfo] = []
+        for market in markets_raw:
+            markets.append(MarketInfo(
+                symbol=market.get("symbol"),
+                base_asset=market.get("base_currency"),
+                quote_asset=market.get("quote_currency"),
+                market_type="PERP",
+                status=market.get("status"),
+                min_order_size=str(market.get("min_order_size", 0)),
+                tick_size=str(market.get("price_tick_size") or market.get("tick_size", "0.1")),
+                base_precision=market.get("base_precision"),
+                quote_precision=market.get("quote_precision"),
+                raw=market,
+            ))
+        return ApiResponse.ok(markets, raw=result)
 
-    def get_order_book(self, symbol: str, limit: int = 20) -> Dict[str, Any]:
+    def get_order_book(self, symbol: str, limit: int = 20) -> ApiResponse:
         """獲取訂單簿
 
         注意：Paradex 的訂單簿端點是 /orderbook/{symbol}
@@ -1077,34 +1174,37 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
-        # 轉換為標準格式（與其他客户端一致）
+        # 轉換為標準格式
         orderbook_data = result.get("orderbook", result.get("results", result))
 
-        bids = orderbook_data.get("bids", [])
-        asks = orderbook_data.get("asks", [])
+        raw_bids = orderbook_data.get("bids", [])
+        raw_asks = orderbook_data.get("asks", [])
 
-        # 轉換為 [price, quantity] 格式
-        formatted_bids = [[float(b[0]), float(b[1])] for b in bids] if bids else []
-        formatted_asks = [[float(a[0]), float(a[1])] for a in asks] if asks else []
+        # 轉換為 OrderBookLevel 格式
+        bids = [OrderBookLevel(price=float(b[0]), quantity=float(b[1])) for b in raw_bids] if raw_bids else []
+        asks = [OrderBookLevel(price=float(a[0]), quantity=float(a[1])) for a in raw_asks] if raw_asks else []
 
-        return {
-            "bids": formatted_bids,
-            "asks": formatted_asks,
-            "symbol": symbol,
-            "timestamp": orderbook_data.get("timestamp"),
-        }
+        order_book = OrderBookInfo(
+            symbol=symbol,
+            bids=bids,
+            asks=asks,
+            timestamp=orderbook_data.get("timestamp"),
+            raw=result,
+        )
+        return ApiResponse.ok(order_book, raw=result)
 
-    def get_positions(self, symbol: Optional[str] = None) -> Any:
+    def get_positions(self, symbol: Optional[str] = None) -> ApiResponse:
         """獲取持倉信息
 
         Args:
             symbol: 交易對符號（可選），用於過濾特定市場
 
         Returns:
-            標準化的持倉信息列表
+            ApiResponse with List[PositionInfo]
 
         注意：Paradex API 返回所有持倉，然後在客户端進行過濾
         """
@@ -1115,17 +1215,18 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
-        # 轉換為標準格式（與其他客户端一致）
+        # 轉換為標準格式
         positions_data = result.get("results", [])
 
         # 如果指定了交易對，則過濾
         if symbol:
             positions_data = [p for p in positions_data if p.get("market") == symbol]
 
-        normalized = []
+        positions: List[PositionInfo] = []
 
         for pos in positions_data:
             # 讀取實際的字段名
@@ -1140,34 +1241,28 @@ class ParadexClient(BaseExchangeClient):
             else:
                 side = "FLAT"
 
-            # 使用正確的字段名 average_entry_price
-            entry_price = pos.get("average_entry_price")
-            unrealized_pnl = pos.get("unrealized_pnl", "0")
+            positions.append(PositionInfo(
+                symbol=pos.get("market"),
+                side=side,
+                size=abs(size),
+                entry_price=self.safe_float(pos.get("average_entry_price")),
+                mark_price=self.safe_float(pos.get("mark_price")),
+                liquidation_price=self.safe_float(pos.get("liquidation_price")),
+                unrealized_pnl=self.safe_float(pos.get("unrealized_pnl")),
+                leverage=self.safe_float(pos.get("leverage")),
+                raw=pos,
+            ))
 
-            normalized.append({
-                "symbol": pos.get("market"),
-                "side": side,
-                "size": str(abs(size)),
-                "netQuantity": str(size),
-                "entryPrice": entry_price,  # 使用 average_entry_price
-                "markPrice": pos.get("mark_price"),  # 注意：API 可能不返回 mark_price
-                "pnlUnrealized": unrealized_pnl,
-                "liquidationPrice": pos.get("liquidation_price"),
-                "leverage": pos.get("leverage"),
-                "status": pos.get("status"),
-                "raw": pos,
-            })
+        return ApiResponse.ok(positions, raw=result)
 
-        return normalized
-
-    def get_market_limits(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def get_market_limits(self, symbol: str) -> ApiResponse:
         """獲取市場限制信息"""
         self._fetch_markets_if_needed()
 
         market_info = self._market_info_cache.get(symbol)
         if not market_info:
             logger.error(f"未找到交易對 {symbol} 的信息")
-            return None
+            return ApiResponse.error(f"未找到交易對 {symbol} 的信息")
 
         # 獲取 tick_size，Paradex 使用 price_tick_size 字段
         tick_size_raw = market_info.get("price_tick_size") or market_info.get("tick_size")
@@ -1180,20 +1275,22 @@ class ParadexClient(BaseExchangeClient):
 
         logger.debug(f"市場 {symbol} 的 tick_size: {tick_size}")
 
-        # 返回字典格式，與其他客户端一致
-        return {
-            "symbol": symbol,
-            "base_asset": market_info.get("base_currency"),
-            "quote_asset": market_info.get("quote_currency"),
-            "market_type": "PERP",
-            "status": market_info.get("status", "ACTIVE"),
-            "min_order_size": str(market_info.get("min_order_size", 0)),
-            "tick_size": tick_size,
-            "base_precision": market_info.get("base_precision", 8),
-            "quote_precision": market_info.get("quote_precision", 2)
-        }
+        # 返回標準化格式
+        market_limits = MarketInfo(
+            symbol=symbol,
+            base_asset=market_info.get("base_currency"),
+            quote_asset=market_info.get("quote_currency"),
+            market_type="PERP",
+            status=market_info.get("status", "ACTIVE"),
+            min_order_size=str(market_info.get("min_order_size", 0)),
+            tick_size=tick_size,
+            base_precision=market_info.get("base_precision", 8),
+            quote_precision=market_info.get("quote_precision", 2),
+            raw=market_info,
+        )
+        return ApiResponse.ok(market_limits, raw=market_info)
 
-    def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100, **kwargs) -> Any:
+    def get_fill_history(self, symbol: Optional[str] = None, limit: int = 100, **kwargs) -> ApiResponse:
         """獲取成交歷史
 
         Args:
@@ -1205,7 +1302,7 @@ class ParadexClient(BaseExchangeClient):
                 - end_at: 結束時間戳（毫秒）
 
         Returns:
-            成交記錄列表或錯誤信息
+            ApiResponse with List[TradeInfo]
         """
         # Paradex API 使用 page_size 而不是 limit
         params = {"page_size": limit}
@@ -1230,8 +1327,25 @@ class ParadexClient(BaseExchangeClient):
             retry_count=self.max_retries
         )
 
-        if isinstance(result, dict) and "error" in result:
-            return result
+        error = self._check_raw_error(result)
+        if error:
+            return error
 
-        # 返回成交列表
-        return result.get("results", []) if isinstance(result, dict) else result
+        # 轉換為標準格式
+        fills_raw = result.get("results", []) if isinstance(result, dict) else result
+        trades: List[TradeInfo] = []
+        for fill in fills_raw:
+            trades.append(TradeInfo(
+                trade_id=fill.get("id") or fill.get("trade_id"),
+                order_id=fill.get("order_id"),
+                symbol=fill.get("market"),
+                side=fill.get("side"),
+                price=self.safe_float(fill.get("price")),
+                size=self.safe_float(fill.get("size")),
+                fee=self.safe_float(fill.get("fee")),
+                fee_asset=fill.get("fee_currency"),
+                is_maker=fill.get("liquidity") == "MAKER",
+                timestamp=fill.get("created_at"),
+                raw=fill,
+            ))
+        return ApiResponse.ok(trades, raw=result)

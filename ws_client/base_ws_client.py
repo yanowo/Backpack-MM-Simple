@@ -797,13 +797,26 @@ class BaseWebSocketClient(ABC):
             if not client:
                 return False
             
-            order_book = client.get_order_book(self.symbol, 100)
-            if isinstance(order_book, dict) and "error" in order_book:
-                self._logger.error(f"初始化訂單簿失敗: {order_book['error']}")
+            order_book_response = client.get_order_book(self.symbol, 100)
+            if not order_book_response.success:
+                self._logger.error(f"初始化訂單簿失敗: {order_book_response.error_message}")
                 return False
             
-            bids = order_book.get("bids", [])
-            asks = order_book.get("asks", [])
+            # 支援 OrderBookInfo dataclass 或 dict
+            order_book = order_book_response.data
+            if hasattr(order_book, 'bids'):
+                # OrderBookInfo dataclass - 需要轉換 OrderBookLevel 為列表格式
+                bids = [[float(level.price), float(level.quantity)] for level in order_book.bids]
+                asks = [[float(level.price), float(level.quantity)] for level in order_book.asks]
+            elif hasattr(order_book, 'raw') and order_book.raw:
+                bids = order_book.raw.get("bids", [])
+                asks = order_book.raw.get("asks", [])
+            elif isinstance(order_book, dict):
+                bids = order_book.get("bids", [])
+                asks = order_book.get("asks", [])
+            else:
+                bids = []
+                asks = []
             self.orderbook = {"bids": bids, "asks": asks}
             
             self._logger.info(
