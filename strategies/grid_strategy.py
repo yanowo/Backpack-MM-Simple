@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 from logger import setup_logger
 from strategies.market_maker import MarketMaker, format_balance
-from utils.helpers import round_to_precision, round_to_tick_size
+from utils.helpers import round_to_precision, round_to_tick_size, format_quantity
 
 logger = setup_logger("grid_strategy")
 
@@ -251,30 +251,51 @@ class GridStrategy(MarketMaker):
             buy_levels = sum(1 for p in self.grid_levels if p < current_price)
             sell_levels = sum(1 for p in self.grid_levels if p > current_price)
 
+            calculated_qty = None
+            
             if buy_levels > 0 and sell_levels > 0:
                 # 計算可用於買單的資金
                 quote_per_order = quote_balance / buy_levels * 0.95  # 預留5%
-                buy_quantity = quote_per_order / current_price
+                buy_quantity = quote_per_order / current_price if current_price > 0 else 0
 
                 # 計算可用於賣單的數量
                 sell_quantity = base_balance / sell_levels * 0.95
 
                 # 取較小值
-                self.order_quantity = min(buy_quantity, sell_quantity)
-                self.order_quantity = round_to_precision(self.order_quantity, self.base_precision)
-
+                if buy_quantity > 0 and sell_quantity > 0:
+                    calculated_qty = min(buy_quantity, sell_quantity)
+                elif buy_quantity > 0:
+                    calculated_qty = buy_quantity
+                elif sell_quantity > 0:
+                    calculated_qty = sell_quantity
+                    
+            elif buy_levels > 0 and quote_balance > 0 and current_price > 0:
+                # 只有買單層級
+                quote_per_order = quote_balance / buy_levels * 0.95
+                calculated_qty = quote_per_order / current_price
+                
+            elif sell_levels > 0 and base_balance > 0:
+                # 只有賣單層級
+                calculated_qty = base_balance / sell_levels * 0.95
+            
+            if calculated_qty and calculated_qty > 0:
+                self.order_quantity = round_to_precision(calculated_qty, self.base_precision)
                 # 確保不小於最小訂單量
                 if self.order_quantity < self.min_order_size:
                     self.order_quantity = self.min_order_size
-
-                logger.info("自動計算每格訂單數量: %.4f %s", self.order_quantity, self.base_asset)
+                    logger.info("計算的訂單數量小於最小值，使用最小訂單量: %.4f %s", self.order_quantity, self.base_asset)
+                else:
+                    logger.info("自動計算每格訂單數量: %.4f %s", self.order_quantity, self.base_asset)
             else:
                 self.order_quantity = self.min_order_size
-                logger.warning("無法計算訂單數量，使用最小值: %.4f", self.order_quantity)
+                logger.warning("無法根據餘額計算訂單數量，使用最小訂單量: %.4f %s", self.order_quantity, self.base_asset)
 
         # 批量構建網格訂單
         orders_to_place = []
 
+        # 格式化訂單數量，避免科學計數法
+        qty_str = format_quantity(self.order_quantity, self.base_precision)
+        
         for price in self.grid_levels:
             if price < current_price:
                 # 在當前價格下方掛買單
@@ -283,7 +304,7 @@ class GridStrategy(MarketMaker):
                     order = {
                         "orderType": "Limit",
                         "price": str(price),
-                        "quantity": str(self.order_quantity),
+                        "quantity": qty_str,
                         "side": "Bid",
                         "symbol": self.symbol,
                         "timeInForce": "GTC",
@@ -306,7 +327,7 @@ class GridStrategy(MarketMaker):
                     order = {
                         "orderType": "Limit",
                         "price": str(price),
-                        "quantity": str(self.order_quantity),
+                        "quantity": qty_str,
                         "side": "Ask",
                         "symbol": self.symbol,
                         "timeInForce": "GTC",
@@ -440,7 +461,7 @@ class GridStrategy(MarketMaker):
         order_details = {
             "orderType": "Limit",
             "price": str(price),
-            "quantity": str(quantity),
+            "quantity": format_quantity(quantity, self.base_precision),
             "side": "Bid",
             "symbol": self.symbol,
             "timeInForce": "GTC",
@@ -491,7 +512,7 @@ class GridStrategy(MarketMaker):
         order_details = {
             "orderType": "Limit",
             "price": str(price),
-            "quantity": str(quantity),
+            "quantity": format_quantity(quantity, self.base_precision),
             "side": "Ask",
             "symbol": self.symbol,
             "timeInForce": "GTC",

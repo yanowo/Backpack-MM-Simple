@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple, Any, Set, Iterable
 
 from logger import setup_logger
 from strategies.perp_market_maker import PerpetualMarketMaker, format_balance
-from utils.helpers import round_to_precision, round_to_tick_size
+from utils.helpers import round_to_precision, round_to_tick_size, format_quantity
 
 logger = setup_logger("perp_grid_strategy")
 
@@ -129,7 +129,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
         
         # 持倉快照（用於檢測倉位變化）
         self.last_position_snapshot: float = 0.0
-        self.position_change_threshold: float = self.order_quantity * 0.5  # 倉位變化閾值
+        # 倉位變化閾值：如果 order_quantity 為 None，在 _setup_grid 時會更新
+        self.position_change_threshold: float = (self.order_quantity * 0.5) if self.order_quantity else 0.0
         
         # 舊的數據結構（保留兼容性）
         self.grid_orders_by_price: Dict[float, List[Dict]] = {}
@@ -900,11 +901,45 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         # 計算每格訂單數量
         if not self.order_quantity:
-            # 使用最小訂單量
-            self.order_quantity = self.min_order_size
-            logger.info("使用最小訂單量: %.4f %s", self.order_quantity, self.base_asset)
+            # 使用父類方法獲取報價資產餘額（包含抵押品）
+            try:
+                _, quote_total = self.get_asset_balance(self.quote_asset)
+                
+                if quote_total > 0 and current_price > 0:
+                    # 計算可用於每格的資金（預留 20% 作為保證金緩衝）
+                    usable_margin = quote_total * 0.8 / self.grid_num
+                    # 計算每格可下的數量
+                    calculated_qty = usable_margin / current_price
+                    calculated_qty = round_to_precision(calculated_qty, self.base_precision)
+                    
+                    if calculated_qty >= self.min_order_size:
+                        self.order_quantity = calculated_qty
+                        logger.info("根據可用餘額自動計算每格訂單數量: %s %s (可用餘額: %.2f %s)", 
+                                   format_quantity(self.order_quantity, self.base_precision), 
+                                   self.base_asset, quote_total, self.quote_asset)
+                    else:
+                        self.order_quantity = self.min_order_size
+                        logger.warning("計算的訂單數量 %s 小於最小值，使用最小訂單量: %s %s", 
+                                      format_quantity(calculated_qty, self.base_precision),
+                                      format_quantity(self.order_quantity, self.base_precision), 
+                                      self.base_asset)
+                else:
+                    self.order_quantity = self.min_order_size
+                    logger.info("無法獲取有效餘額資訊，使用最小訂單量: %s %s", 
+                               format_quantity(self.order_quantity, self.base_precision), self.base_asset)
+            except Exception as e:
+                logger.warning("自動計算訂單數量時發生錯誤: %s，使用最小訂單量", e)
+                self.order_quantity = self.min_order_size
+                logger.info("使用最小訂單量: %s %s", 
+                           format_quantity(self.order_quantity, self.base_precision), self.base_asset)
+            
+            # 更新倉位變化閾值
+            self.position_change_threshold = self.order_quantity * 0.5
 
         # 批量構建網格訂單
+        # 格式化訂單數量，避免科學計數法
+        qty_str = format_quantity(self.order_quantity, self.base_precision)
+        
         orders_to_place = []
 
         for price in self.grid_levels:
@@ -915,7 +950,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     orders_to_place.append({
                         "orderType": "Limit",
                         "price": price,  # 保持為 float，讓 client 處理格式化
-                        "quantity": str(self.order_quantity),
+                        "quantity": qty_str,
                         "side": "Bid",
                         "symbol": self.symbol,
                         "timeInForce": "GTC",
@@ -926,7 +961,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     orders_to_place.append({
                         "orderType": "Limit",
                         "price": price,  # 保持為 float，讓 client 處理格式化
-                        "quantity": str(self.order_quantity),
+                        "quantity": qty_str,
                         "side": "Ask",
                         "symbol": self.symbol,
                         "timeInForce": "GTC",
@@ -939,7 +974,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     orders_to_place.append({
                         "orderType": "Limit",
                         "price": price,  # 保持為 float，讓 client 處理格式化
-                        "quantity": str(self.order_quantity),
+                        "quantity": qty_str,
                         "side": "Bid",
                         "symbol": self.symbol,
                         "timeInForce": "GTC",
@@ -952,7 +987,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     orders_to_place.append({
                         "orderType": "Limit",
                         "price": price,  # 保持為 float，讓 client 處理格式化
-                        "quantity": str(self.order_quantity),
+                        "quantity": qty_str,
                         "side": "Ask",
                         "symbol": self.symbol,
                         "timeInForce": "GTC",

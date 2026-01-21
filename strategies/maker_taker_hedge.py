@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from logger import setup_logger
 from strategies.market_maker import MarketMaker, format_balance
 from strategies.perp_market_maker import PerpetualMarketMaker
-from utils.helpers import round_to_precision, round_to_tick_size
+from utils.helpers import round_to_precision, round_to_tick_size, format_quantity
 
 logger = setup_logger("maker_taker_hedge")
 
@@ -306,7 +306,7 @@ class _MakerTakerHedgeMixin:
 
             order = {
                 "orderType": "Market",
-                "quantity": str(remaining_quantity),
+                "quantity": format_quantity(remaining_quantity, self.base_precision),
                 "side": attempt_side,
                 "symbol": self.symbol,
             }
@@ -610,7 +610,7 @@ class _MakerTakerHedgeMixin:
         order = {
             "orderType": "Limit",
             "price": str(round_to_tick_size(price, self.tick_size)),
-            "quantity": str(round_to_precision(quantity, self.base_precision)),
+            "quantity": format_quantity(round_to_precision(quantity, self.base_precision), self.base_precision),
             "side": side,
             "symbol": self.symbol,
             "timeInForce": "GTC",

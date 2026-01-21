@@ -14,7 +14,7 @@ from api.aster_client import AsterClient
 from api.lighter_client import LighterClient
 from ws_client import BackpackWebSocket
 from database.db import Database
-from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility
+from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility, format_quantity
 from logger import setup_logger
 import traceback
 
@@ -1633,7 +1633,7 @@ class MarketMaker:
             order_details = {
                 "orderType": "Limit",
                 "price": str(sell_price),
-                "quantity": str(quantity_to_sell),
+                "quantity": format_quantity(quantity_to_sell, self.base_precision),
                 "side": "Ask",
                 "symbol": self.symbol,
                 "timeInForce": "IOC",  # 立即成交或取消，避免掛單
@@ -1675,7 +1675,7 @@ class MarketMaker:
             order_details = {
                 "orderType": "Limit",
                 "price": str(buy_price),
-                "quantity": str(quantity_to_buy),
+                "quantity": format_quantity(quantity_to_buy, self.base_precision),
                 "side": "Bid",
                 "symbol": self.symbol,
                 "timeInForce": "IOC",  # 立即成交或取消，避免掛單
@@ -1761,17 +1761,23 @@ class MarketMaker:
                 logger.info(f"報價資產主要在抵押品中，將依靠自動贖回功能")
             
             # 計算每個訂單的數量
-            avg_price = sum(buy_prices) / len(buy_prices)
+            avg_price = sum(buy_prices) / len(buy_prices) if buy_prices else 0
             
-            # 使用更保守的分配比例，避免資金用盡
-            allocation_percent = min(0.05, 1.0 / (self.max_orders * 4))  # 最多使用總資金的25%
-            
-            # 基於總餘額計算，而不是可用餘額
-            quote_amount_per_side = quote_total * allocation_percent
-            base_amount_per_side = base_total * allocation_percent
-            
-            buy_quantity = max(self.min_order_size, round_to_precision(quote_amount_per_side / avg_price, self.base_precision))
-            sell_quantity = max(self.min_order_size, round_to_precision(base_amount_per_side, self.base_precision))
+            if avg_price <= 0 or (quote_total <= 0 and base_total <= 0):
+                # 無法計算，使用最小訂單量
+                logger.warning("無法根據餘額計算訂單數量，使用最小訂單量")
+                buy_quantity = self.min_order_size
+                sell_quantity = self.min_order_size
+            else:
+                # 使用更保守的分配比例，避免資金用盡
+                allocation_percent = min(0.05, 1.0 / (self.max_orders * 4))  # 最多使用總資金的25%
+                
+                # 基於總餘額計算，而不是可用餘額
+                quote_amount_per_side = quote_total * allocation_percent
+                base_amount_per_side = base_total * allocation_percent
+                
+                buy_quantity = max(self.min_order_size, round_to_precision(quote_amount_per_side / avg_price, self.base_precision))
+                sell_quantity = max(self.min_order_size, round_to_precision(base_amount_per_side, self.base_precision))
             
             logger.info(f"計算訂單數量: 買單 {format_balance(buy_quantity)} {self.base_asset}, 賣單 {format_balance(sell_quantity)} {self.base_asset}")
         else:
@@ -1782,10 +1788,12 @@ class MarketMaker:
         buy_futures = []
 
         def place_buy(price, qty):
+            # 使用 format_quantity 避免科學計數法
+            qty_str = format_quantity(qty, self.base_precision)
             order = {
                 "orderType": "Limit",
                 "price": str(price),
-                "quantity": str(qty),
+                "quantity": qty_str,
                 "side": "Bid",
                 "symbol": self.symbol,
                 "timeInForce": "GTC",
@@ -1803,7 +1811,7 @@ class MarketMaker:
             if not res.success and "INSUFFICIENT_FUNDS" in str(res.error_message or ""):
                 logger.warning(f"買單資金不足，可能需要手動贖回抵押品或等待自動贖回生效")
             
-            return qty, order["price"], res
+            return qty_str, order["price"], res
 
         with ThreadPoolExecutor(max_workers=self.max_orders) as executor:
             for p in buy_prices:
@@ -1826,10 +1834,12 @@ class MarketMaker:
         sell_futures = []
 
         def place_sell(price, qty):
+            # 使用 format_quantity 避免科學計數法
+            qty_str = format_quantity(qty, self.base_precision)
             order = {
                 "orderType": "Limit",
                 "price": str(price),
-                "quantity": str(qty),
+                "quantity": qty_str,
                 "side": "Ask",
                 "symbol": self.symbol,
                 "timeInForce": "GTC",
@@ -1847,7 +1857,7 @@ class MarketMaker:
             if not res.success and "INSUFFICIENT_FUNDS" in str(res.error_message or ""):
                 logger.warning(f"賣單資金不足，可能需要手動贖回抵押品或等待自動贖回生效")
             
-            return qty, order["price"], res
+            return qty_str, order["price"], res
 
         with ThreadPoolExecutor(max_workers=self.max_orders) as executor:
             for p in sell_prices:
