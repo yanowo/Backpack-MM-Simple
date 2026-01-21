@@ -27,6 +27,9 @@ const gridTypeField = document.getElementById('gridTypeField');
 const exchangeSelect = document.getElementById('exchange');
 const spreadField = document.getElementById('spreadField');
 const maxOrdersPerpField = document.getElementById('maxOrdersPerpField');
+const targetPositionField = document.getElementById('targetPositionField');
+const positionThresholdField = document.getElementById('positionThresholdField');
+const inventorySkewField = document.getElementById('inventorySkewField');
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
@@ -163,6 +166,12 @@ function toggleMarketTypeParams() {
     spotParams.style.display = 'none';
     perpParams.style.display = 'none';
 
+    // 更新永續合約參數區塊標題
+    const perpParamsTitle = perpParams.querySelector('.block-title');
+    if (perpParamsTitle) {
+        perpParamsTitle.textContent = strategy === 'grid' ? '網格風控參數' : '永續合約參數';
+    }
+
     if (strategy === 'grid') {
         // 現貨網格不需要額外倉位配置；永續網格要顯示倉位參數
         if (marketType === 'perp') {
@@ -290,6 +299,7 @@ function toggleSpreadField() {
 // 切換永續合約參數欄位顯示
 function togglePerpFields() {
     const strategy = strategySelect.value;
+    const isGridStrategy = (strategy === 'grid');
 
     // 永續對沖與永續網格都不需要最大訂單數
     if (maxOrdersPerpField) {
@@ -298,6 +308,18 @@ function togglePerpFields() {
         } else {
             maxOrdersPerpField.style.display = 'block';
         }
+    }
+
+    // 網格策略不需要目標倉位、調整觸發值、偏移係數
+    // 因為網格策略只使用最大倉位和止損止盈
+    if (targetPositionField) {
+        targetPositionField.style.display = isGridStrategy ? 'none' : 'block';
+    }
+    if (positionThresholdField) {
+        positionThresholdField.style.display = isGridStrategy ? 'none' : 'block';
+    }
+    if (inventorySkewField) {
+        inventorySkewField.style.display = isGridStrategy ? 'none' : 'block';
     }
 }
 
@@ -393,7 +415,8 @@ async function startBot() {
 
             data.target_position = targetPositionRaw ? parseFloat(targetPositionRaw) : 0.0;
             data.max_position = maxPositionRaw ? parseFloat(maxPositionRaw) : 1.0;
-            data.position_threshold = thresholdRaw ? parseFloat(thresholdRaw) : 0.1;
+            // 網格策略：position_threshold 設為 max_position，只有超過最大持倉才觸發風控
+            data.position_threshold = thresholdRaw ? parseFloat(thresholdRaw) : data.max_position;
             data.inventory_skew = skewRaw ? parseFloat(skewRaw) : 0.0;
             data.stop_loss = stopLossRaw ? parseFloat(stopLossRaw) : null;
             data.take_profit = takeProfitRaw ? parseFloat(takeProfitRaw) : null;

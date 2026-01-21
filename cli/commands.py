@@ -855,9 +855,12 @@ def run_market_maker_command(api_key, secret_key):
             take_profit_input = input("未實現止盈閾值 (報價資產金額，留空不啟用): ").strip()
             take_profit = float(take_profit_input) if take_profit_input else None
 
-            # 網格策略的默認值
+            # 網格策略的持倉參數：
+            # - target_position = 0：網格策略沒有目標持倉概念
+            # - position_threshold = max_position：只有超過最大持倉才觸發風控
+            # - inventory_skew = 0：不使用庫存偏移
             target_position = 0.0
-            position_threshold = 0.1
+            position_threshold = max_position  # 設為最大持倉，避免不必要的減倉觸發
             inventory_skew = 0.0
 
             if max_position <= 0:

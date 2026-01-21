@@ -2326,6 +2326,21 @@ class PerpGridStrategy(PerpetualMarketMaker):
         """計算價格 - 網格策略不需要這個方法"""
         return [], []
 
+    def need_rebalance(self) -> bool:
+        """網格策略只在超過最大持倉時才需要調整，不使用 target_position + threshold 邏輯"""
+        net = self.get_net_position()
+        current_size = abs(net)
+
+        if current_size > self.max_position:
+            logger.warning(
+                "持倉量 %s 超過最大允許 %s，準備執行風控平倉",
+                format_balance(current_size),
+                format_balance(self.max_position),
+            )
+            return True
+
+        return False
+
     def manage_positions(self) -> bool:
         """管理持倉 - 網格策略有自己的持倉管理邏輯"""
         # 檢查是否超過最大持倉
@@ -2341,6 +2356,12 @@ class PerpGridStrategy(PerpetualMarketMaker):
             return self.close_position(quantity=excess, order_type="Market")
 
         return False
+
+    def rebalance_position(self) -> None:
+        """覆寫永續倉位管理，網格策略只檢查最大持倉"""
+        acted = self.manage_positions()
+        if not acted:
+            logger.debug("持倉量在最大允許範圍內，無需調整")
 
     def _get_extra_summary_sections(self):
         """添加網格特有的統計信息"""
