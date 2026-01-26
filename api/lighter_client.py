@@ -1214,7 +1214,7 @@ class LighterClient(BaseExchangeClient):
             account_value=total_asset_value,
             raw=account,
         )
-        return ApiResponse.ok(collateral_info, raw=account)
+        return ApiResponse.ok([collateral_info], raw=account)
 
     def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> ApiResponse:
         """批量執行訂單

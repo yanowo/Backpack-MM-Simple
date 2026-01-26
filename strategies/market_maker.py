@@ -9,9 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Union, Any, Set, Deque
 from concurrent.futures import ThreadPoolExecutor
 
-from api.bp_client import BPClient
-from api.aster_client import AsterClient
-from api.lighter_client import LighterClient
+from api import get_client
 from ws_client import BackpackWebSocket
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility, format_quantity
@@ -55,24 +53,12 @@ class MarketMaker:
         self.symbol = symbol
         self.base_spread_percentage = base_spread_percentage
         self.order_quantity = order_quantity
+        exchange = (exchange or "backpack").lower()
         self.exchange = exchange
         self.exchange_config = exchange_config or {}
         
         # 初始化交易所客户端
-        if exchange == 'backpack':
-            self.client = BPClient(self.exchange_config)
-        elif exchange == 'aster':
-            self.client = AsterClient(self.exchange_config)
-        elif exchange == 'paradex':
-            from api.paradex_client import ParadexClient
-            self.client = ParadexClient(self.exchange_config)
-        elif exchange == 'lighter':
-            self.client = LighterClient(self.exchange_config)
-        elif exchange == 'apex':
-            from api.apex_client import ApexClient
-            self.client = ApexClient(self.exchange_config)
-        else:
-            raise ValueError(f"不支持的交易所: {exchange}")
+        self.client = get_client(exchange, self.exchange_config)
             
         self.max_orders = max_orders
         self.rebalance_threshold = rebalance_threshold
@@ -122,37 +108,26 @@ class MarketMaker:
         if not market_info:
             raise ValueError(f"無法獲取 {symbol} 的市場限制")
         
-        # 保存原始數據供後續使用（支援 MarketInfo dataclass 或 dict）
-        if hasattr(market_info, 'raw') and market_info.raw:
-            self.market_limits = market_info.raw
-        elif isinstance(market_info, dict):
-            self.market_limits = market_info
-        else:
-            # MarketInfo dataclass，轉換為 dict 方便存取
-            self.market_limits = {
-                'base_asset': getattr(market_info, 'base_asset', symbol),
-                'quote_asset': getattr(market_info, 'quote_asset', ''),
-                'base_precision': getattr(market_info, 'base_precision', 8),
-                'quote_precision': getattr(market_info, 'quote_precision', 8),
-                'min_order_size': getattr(market_info, 'min_order_size', 0),
-                'tick_size': getattr(market_info, 'tick_size', 0.00000001),
-            }
-        
-        # 從 MarketInfo dataclass 或 dict 取值
-        if hasattr(market_info, 'base_asset'):
-            self.base_asset = market_info.base_asset
-            self.quote_asset = market_info.quote_asset
-            self.base_precision = market_info.base_precision
-            self.quote_precision = market_info.quote_precision
-            self.min_order_size = float(market_info.min_order_size)
-            self.tick_size = float(market_info.tick_size)
-        else:
-            self.base_asset = market_info.get('base_asset', symbol)
-            self.quote_asset = market_info.get('quote_asset', '')
-            self.base_precision = market_info.get('base_precision', 8)
-            self.quote_precision = market_info.get('quote_precision', 8)
-            self.min_order_size = float(market_info.get('min_order_size', 0))
-            self.tick_size = float(market_info.get('tick_size', 0.00000001))
+        if not hasattr(market_info, 'base_asset'):
+            raise ValueError(f"市場限制返回非標準 MarketInfo: {type(market_info)}")
+
+        # 保存原始數據供後續使用（MarketInfo.raw 或基於 dataclass 的字典）
+        self.market_limits = market_info.raw or {
+            'base_asset': market_info.base_asset,
+            'quote_asset': market_info.quote_asset,
+            'base_precision': market_info.base_precision,
+            'quote_precision': market_info.quote_precision,
+            'min_order_size': market_info.min_order_size,
+            'tick_size': market_info.tick_size,
+        }
+
+        # 從 MarketInfo dataclass 取值
+        self.base_asset = market_info.base_asset
+        self.quote_asset = market_info.quote_asset
+        self.base_precision = market_info.base_precision
+        self.quote_precision = market_info.quote_precision
+        self.min_order_size = float(market_info.min_order_size or 0)
+        self.tick_size = float(market_info.tick_size or 0.00000001)
         
         # 交易量統計
         self.maker_buy_volume = 0
@@ -289,13 +264,17 @@ class MarketMaker:
             logger.debug(f"抵押品原始數據: {collateral_response.raw}")
             if not collateral_response.success:
                 logger.warning(f"獲取抵押品餘額失敗: {collateral_response.error_message}")
-                collateral_assets = []
+                collateral_items = []
             else:
-                # 從 raw 數據中提取抵押品資產
-                raw_data = collateral_response.raw or {}
-                collateral_assets = raw_data.get('assets') or raw_data.get('collateral', [])
+                collateral_data = collateral_response.data
+                if isinstance(collateral_data, list):
+                    collateral_items = collateral_data
+                elif collateral_data:
+                    collateral_items = [collateral_data]
+                else:
+                    collateral_items = []
 
-            logger.debug(f"抵押品資產列表: {collateral_assets}")
+            logger.debug(f"抵押品資產筆數: {len(collateral_items)}")
 
             # 初始化總餘額字典
             total_balances = {}
@@ -316,40 +295,53 @@ class MarketMaker:
             logger.debug(f"處理普通餘額後的 total_balances: {total_balances}")
 
             # 添加抵押品餘額
-            for item in collateral_assets:
-                symbol = item.get('symbol', '')
-                if symbol:
-                    total_quantity = float(item.get('totalQuantity', 0))
-                    available_quantity = float(item.get('availableQuantity', 0))
-                    lend_quantity = float(item.get('lendQuantity', 0))
+            for item in collateral_items:
+                if not hasattr(item, 'asset'):
+                    logger.warning("抵押品資料不是標準 CollateralInfo: %s", type(item))
+                    continue
 
-                    logger.debug(f"處理抵押品: {symbol}, 總量={total_quantity}, 可用={available_quantity}, 借出={lend_quantity}")
+                symbol = item.asset
+                total_quantity = float(item.total_collateral or 0)
+                available_quantity = float(item.free_collateral or 0)
+                raw = item.raw if getattr(item, 'raw', None) else {}
 
-                    # 對於 Backpack 抵押品，使用 totalQuantity 作為可用餘額
-                    # 因為借貸中的資產（lendQuantity）也可以用於交易
-                    effective_available = total_quantity
+                if not symbol:
+                    continue
 
-                    if symbol not in total_balances:
-                        total_balances[symbol] = {
-                            'available': 0,
-                            'locked': 0,
-                            'total': 0,
-                            'collateral_available': effective_available,
-                            'collateral_total': total_quantity
-                        }
-                    else:
-                        total_balances[symbol]['collateral_available'] = effective_available
-                        total_balances[symbol]['collateral_total'] = total_quantity
+                lend_quantity = 0.0
+                if isinstance(raw, dict):
+                    lend_quantity = float(raw.get('lendQuantity') or raw.get('lend_quantity') or 0)
+                    if raw.get('totalQuantity') is not None:
+                        total_quantity = float(raw.get('totalQuantity') or total_quantity)
+                    if raw.get('availableQuantity') is not None:
+                        available_quantity = float(raw.get('availableQuantity') or available_quantity)
 
-                    # 更新總可用量和總量
-                    total_balances[symbol]['total_available'] = (
-                        total_balances[symbol]['available'] +
-                        total_balances[symbol]['collateral_available']
-                    )
-                    total_balances[symbol]['total_all'] = (
-                        total_balances[symbol]['total'] +
-                        total_balances[symbol]['collateral_total']
-                    )
+                logger.debug(f"處理抵押品: {symbol}, 總量={total_quantity}, 可用={available_quantity}, 借出={lend_quantity}")
+
+                # 對於 Backpack 抵押品，total_quantity 視為可用餘額
+                effective_available = total_quantity if self.exchange == "backpack" else available_quantity
+
+                if symbol not in total_balances:
+                    total_balances[symbol] = {
+                        'available': 0,
+                        'locked': 0,
+                        'total': 0,
+                        'collateral_available': effective_available,
+                        'collateral_total': total_quantity
+                    }
+                else:
+                    total_balances[symbol]['collateral_available'] = effective_available
+                    total_balances[symbol]['collateral_total'] = total_quantity
+
+                # 更新總可用量和總量
+                total_balances[symbol]['total_available'] = (
+                    total_balances[symbol]['available'] +
+                    total_balances[symbol]['collateral_available']
+                )
+                total_balances[symbol]['total_all'] = (
+                    total_balances[symbol]['total'] +
+                    total_balances[symbol]['collateral_total']
+                )
 
             # 確保所有資產都有total_available和total_all字段
             for asset in total_balances:
@@ -592,177 +584,47 @@ class MarketMaker:
 
     def _normalize_fill_history_response(self, response) -> List[Dict[str, Any]]:
         """將 REST API 回傳的成交資料轉換為統一格式"""
-        # 支援新的 ApiResponse 格式
+        if response is None:
+            return []
+
         if hasattr(response, 'success'):
             if not response.success:
                 logger.error(f"獲取成交歷史失敗: {response.error_message}")
                 return []
-            # 如果 data 是空列表，直接返回
-            if response.data is not None and isinstance(response.data, list):
-                if len(response.data) == 0:
-                    return []
-                # 如果是 List[TradeInfo]，直接轉換
-                if hasattr(response.data[0], 'trade_id'):
-                    result = []
-                    for t in response.data:
-                        # 從 raw 中提取 clientId（APEX 用 clientId 追蹤訂單）
-                        raw = t.raw if hasattr(t, 'raw') and t.raw else {}
-                        client_id = raw.get('clientId') or raw.get('client_id') or raw.get('clientOrderId')
-                        result.append({
-                            'fill_id': t.trade_id,
-                            'order_id': t.order_id,
-                            'client_id': str(client_id) if client_id else None,  # 從 raw 提取 clientId
-                            'symbol': t.symbol,
-                            'side': t.side,
-                            'price': float(t.price) if t.price is not None else None,
-                            'quantity': float(t.size) if t.size is not None else None,  # TradeInfo 使用 size
-                            'fee': float(t.fee) if t.fee is not None else 0.0,  # fee 可以是 0，不能用 if t.fee 判斷
-                            'fee_asset': t.fee_asset,
-                            'is_maker': t.is_maker,
-                            'timestamp': t.timestamp,
-                        })
-                    return result
-            data = response.raw
+            data = response.data or []
         else:
             data = response
 
-        if isinstance(data, dict):
-            # APEX 格式: {"data": {"orders": [...]}}
-            inner_data = data.get('data', data)
-            if isinstance(inner_data, dict):
-                # APEX 成交在 orders 字段中
-                data = inner_data.get('orders', inner_data.get('fills', inner_data))
-            else:
-                data = inner_data
-
         if not isinstance(data, list):
-            # 只在非空 dict（不是純狀態響應）時顯示警告
-            if isinstance(data, dict) and data.get('orders') is None and data.get('fills') is None:
-                # APEX 返回 {"code": 0, "msg": "", ...} 表示沒有成交，這是正常的
-                return []
             logger.warning(f"成交歷史返回格式異常: {type(data)}")
             return []
 
-        fills: List[Dict[str, Any]] = []
+        if data and not hasattr(data[0], 'trade_id'):
+            logger.warning("成交歷史未返回標準 TradeInfo 列表，忽略處理")
+            return []
 
-        def _extract(entry: Dict[str, Any], *keys: str) -> Any:
-            for key in keys:
-                if key in entry and entry[key] not in (None, ""):
-                    return entry[key]
-            return None
+        result: List[Dict[str, Any]] = []
+        for t in data:
+            raw = t.raw if hasattr(t, 'raw') and t.raw else {}
+            client_id = None
+            if isinstance(raw, dict):
+                client_id = raw.get('clientId') or raw.get('client_id') or raw.get('clientOrderId')
 
-        def _to_float(value: Any) -> Optional[float]:
-            if value in (None, "", "NaN"):
-                return None
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return None
-
-        for entry in data:
-            if not isinstance(entry, dict):
-                continue
-
-            fill_id = _extract(
-                entry,
-                "id",
-                "fillId",
-                "fill_id",
-                "tradeId",
-                "trade_id",
-                "executionId",
-                "execution_id",
-                "matchFillId",  # APEX
-                "t",
-            )
-            order_id = _extract(
-                entry,
-                "orderId",
-                "order_id",
-                "orderIndex",
-                "order_index",
-                "ask_id",
-                "bid_id",
-                "i",
-            )
-            side = _extract(entry, "side", "S")
-            price = _to_float(_extract(entry, "price", "p", "L"))
-            quantity = _to_float(_extract(entry, "quantity", "qty", "q", "l", "size"))
-            fee_asset = _extract(
-                entry,
-                "fee_asset",
-                "feeAsset",
-                "commissionAsset",
-                "N",
-                "fee_currency",
-                "feeCurrency",
-            )
-            # APEX 使用 direction: MAKER/TAKER
-            maker_flag = _extract(entry, "maker", "isMaker", "m", "is_maker", "direction")
-            timestamp_raw = _extract(entry, "time", "timestamp", "T", "ts", "createdAt", "updatedTime")
-
-            maker_fee = _to_float(_extract(entry, "maker_fee", "makerFee"))
-            taker_fee = _to_float(_extract(entry, "taker_fee", "takerFee"))
-            fee_primary = _extract(entry, "fee", "commission", "n", "fee_value")
-            fee_value = _to_float(fee_primary)
-
-            derived_maker_flag: Optional[bool] = None
-            if maker_fee is not None and abs(maker_fee) > 0:
-                derived_maker_flag = True
-            elif taker_fee is not None and abs(taker_fee) > 0:
-                derived_maker_flag = False
-
-            is_maker = True
-            if isinstance(maker_flag, bool):
-                is_maker = maker_flag
-            elif maker_flag is not None:
-                maker_str = str(maker_flag).lower()
-                # APEX uses direction: MAKER/TAKER
-                is_maker = maker_str in ("true", "1", "yes", "maker")
-            elif derived_maker_flag is not None:
-                is_maker = derived_maker_flag
-
-            if fee_value is None:
-                if is_maker and maker_fee is not None:
-                    fee_value = maker_fee
-                elif not is_maker and taker_fee is not None:
-                    fee_value = taker_fee
-                elif maker_fee is not None:
-                    fee_value = maker_fee
-                elif taker_fee is not None:
-                    fee_value = taker_fee
-
-            if fee_value is None:
-                fee_value = 0.0
-
-            try:
-                timestamp_value = int(float(timestamp_raw)) if timestamp_raw is not None else 0
-            except (TypeError, ValueError):
-                timestamp_value = 0
-
-            # APEX: 提取 clientId/clientOrderId 作為備用 ID（下單時使用的是 clientId）
-            client_id = _extract(
-                entry,
-                "clientId",
-                "client_id",
-                "clientOrderId",
-                "client_order_id",
-            )
-
-            fills.append({
-                'fill_id': str(fill_id) if fill_id is not None else None,
-                'order_id': str(order_id) if order_id is not None else None,
-                'client_id': str(client_id) if client_id is not None else None,  # APEX 用 clientId 追蹤訂單
-                'side': side,
-                'price': price,
-                'quantity': quantity,
-                'fee': fee_value,
-                'fee_asset': fee_asset,
-                'is_maker': is_maker,
-                'timestamp': timestamp_value,
+            result.append({
+                'fill_id': t.trade_id,
+                'order_id': t.order_id,
+                'client_id': str(client_id) if client_id else None,
+                'symbol': t.symbol,
+                'side': t.side,
+                'price': float(t.price) if t.price is not None else None,
+                'quantity': float(t.size) if t.size is not None else None,
+                'fee': float(t.fee) if t.fee is not None else 0.0,
+                'fee_asset': t.fee_asset,
+                'is_maker': t.is_maker,
+                'timestamp': t.timestamp,
             })
 
-        return fills
+        return result
 
     def _has_seen_fill(self, fill_id: Optional[str], timestamp: int) -> bool:
         """判斷成交是否已處理"""
@@ -1826,7 +1688,8 @@ class MarketMaker:
                 logger.error(f"買單失敗: {res.error_message}")
             else:
                 logger.info(f"買單成功: 價格 {p_used}, 數量 {qty}")
-                self.active_buy_orders.append(res.raw)
+                if res.data:
+                    self.active_buy_orders.append(res.data)
                 self.orders_placed += 1
                 buy_order_count += 1
 
@@ -1872,7 +1735,8 @@ class MarketMaker:
                 logger.error(f"賣單失敗: {res.error_message}")
             else:
                 logger.info(f"賣單成功: 價格 {p_used}, 數量 {qty}")
-                self.active_sell_orders.append(res.raw)
+                if res.data:
+                    self.active_sell_orders.append(res.data)
                 self.orders_placed += 1
                 sell_order_count += 1
             
@@ -1909,7 +1773,7 @@ class MarketMaker:
                     
                     # 提交取消訂單任務
                     for order_info in open_orders:
-                        order_id = order_info.order_id if hasattr(order_info, 'order_id') else order_info.get('id')
+                        order_id = getattr(order_info, 'order_id', None)
                         if not order_id:
                             continue
                         
@@ -1963,14 +1827,14 @@ class MarketMaker:
         current_order_ids = set()
         if open_orders:
             for order_info in open_orders:
-                order_id = order_info.order_id if hasattr(order_info, 'order_id') else order_info.get('id')
+                order_id = getattr(order_info, 'order_id', None)
                 if order_id:
                     current_order_ids.add(order_id)
         prev_buy_orders = len(self.active_buy_orders)
         prev_sell_orders = len(self.active_sell_orders)
         filled_order_ids = []
         for order in self.active_buy_orders + self.active_sell_orders:
-            order_id = order.get('id') if isinstance(order, dict) else getattr(order, 'order_id', None)
+            order_id = getattr(order, 'order_id', None)
             if order_id and order_id not in current_order_ids:
                 filled_order_ids.append(order_id)
         filled_trades = []
@@ -1983,16 +1847,16 @@ class MarketMaker:
                     if not hasattr(self, '_processed_fill_ids'):
                         self._processed_fill_ids = set()
                     for fill in recent_fills:
-                        fill_id = fill.get('fill_id') or fill.get('id')
+                        fill_id = fill.get('fill_id')
                         fill_order_id = fill.get('order_id')
                         if fill_id in self._processed_fill_ids:
                             continue
                         if fill_order_id in filled_order_ids:
                             filled_trades.append(fill)
                             self._processed_fill_ids.add(fill_id)
-                            side = fill.get('side', '').upper()
+                            side = str(fill.get('side', '')).upper()
                             price = float(fill.get('price', 0) or 0)
-                            size = float(fill.get('quantity', 0) or fill.get('size', 0) or 0)
+                            size = float(fill.get('quantity', 0) or 0)
                             is_maker = fill.get('is_maker', True)
                             liquidity = 'MAKER' if is_maker else 'TAKER'
                             realized_pnl = fill.get('realized_pnl', 0)
@@ -2002,14 +1866,21 @@ class MarketMaker:
                             fee_currency = fill.get('fee_asset', self.quote_asset) or self.quote_asset
                             
                             # 構建完整的成交資訊
+                            if side in ('BUY', 'BID'):
+                                normalized_side = 'Bid'
+                            elif side in ('SELL', 'ASK'):
+                                normalized_side = 'Ask'
+                            else:
+                                normalized_side = 'Bid'
+
                             fill_info = {
-                                'side': 'Bid' if side == 'BUY' else 'Ask',
+                                'side': normalized_side,
                                 'quantity': size,
                                 'price': price,
                                 'maker': is_maker,
                                 'order_id': fill.get('order_id'),
                                 'client_id': fill.get('client_id'),  # APEX 使用 clientId
-                                'trade_id': fill.get('id'),
+                                'trade_id': fill_id,
                                 'realized_pnl': realized_pnl,
                                 'fee': fee,
                                 'fee_currency': fee_currency
@@ -2040,11 +1911,7 @@ class MarketMaker:
         active_sell_orders = []
         if open_orders:
             for order in open_orders:
-                # 支援 OrderInfo dataclass 或 dict
-                if hasattr(order, 'side'):
-                    side = str(order.side).upper()
-                else:
-                    side = str(order.get('side', '')).upper()
+                side = str(order.side or '').upper()
                 if side in ('BID', 'BUY'):
                     active_buy_orders.append(order)
                 elif side in ('ASK', 'SELL'):
@@ -2145,23 +2012,11 @@ class MarketMaker:
         )
 
         if self.active_buy_orders and self.active_sell_orders:
-            # 支援 dict 或 OrderInfo/OrderResult dataclass
             last_buy = self.active_buy_orders[-1]
             first_sell = self.active_sell_orders[0]
             
-            if hasattr(last_buy, 'price'):
-                buy_price = float(last_buy.price or 0)
-            elif isinstance(last_buy, dict):
-                buy_price = float(last_buy.get('price', 0) or 0)
-            else:
-                buy_price = 0
-            
-            if hasattr(first_sell, 'price'):
-                sell_price = float(first_sell.price or 0)
-            elif isinstance(first_sell, dict):
-                sell_price = float(first_sell.get('price', 0) or 0)
-            else:
-                sell_price = 0
+            buy_price = float(getattr(last_buy, 'price', 0) or 0)
+            sell_price = float(getattr(first_sell, 'price', 0) or 0)
             
             spread = sell_price - buy_price
             spread_pct = (spread / buy_price * 100) if buy_price > 0 else 0

@@ -298,6 +298,13 @@ def get_balance_command(api_key, secret_key):
             c = _get_client(api_key=ex_api_key, secret_key=secret_for_client, exchange=exchange, exchange_config=exchange_config)
             balances_response = c.get_balance()
             collateral_response = c.get_collateral()
+            collateral_data = collateral_response.data
+            if isinstance(collateral_data, list):
+                collateral_items = collateral_data
+            elif collateral_data:
+                collateral_items = [collateral_data]
+            else:
+                collateral_items = []
             
             if not balances_response.success:
                 print(f"獲取餘額失敗: {balances_response.error_message}")
@@ -359,9 +366,9 @@ def get_balance_command(api_key, secret_key):
                 if not collateral_response.success:
                     print(f"獲取賬户摘要失敗: {collateral_response.error_message}")
                 else:
-                    collateral = collateral_response.data
+                    collateral = collateral_items[0] if collateral_items else None
                     # 支援 CollateralInfo dataclass 或 dict
-                    if hasattr(collateral, 'raw') and collateral.raw:
+                    if collateral and hasattr(collateral, 'raw') and collateral.raw:
                         collateral_dict = collateral.raw
                     elif isinstance(collateral, dict):
                         collateral_dict = collateral
@@ -369,28 +376,66 @@ def get_balance_command(api_key, secret_key):
                         collateral_dict = {}
                     if collateral_dict.get('account'):
                         print("\n賬户摘要:")
+                        account_value = (
+                            collateral.account_value
+                            if hasattr(collateral, 'account_value') and collateral.account_value is not None
+                            else collateral_dict.get('account_value', '0')
+                        )
+                        total_collateral = (
+                            collateral.total_collateral
+                            if hasattr(collateral, 'total_collateral') and collateral.total_collateral is not None
+                            else collateral_dict.get('total_collateral', '0')
+                        )
+                        free_collateral = (
+                            collateral.free_collateral
+                            if hasattr(collateral, 'free_collateral') and collateral.free_collateral is not None
+                            else collateral_dict.get('free_collateral', '0')
+                        )
+                        initial_margin = (
+                            collateral.initial_margin
+                            if hasattr(collateral, 'initial_margin') and collateral.initial_margin is not None
+                            else collateral_dict.get('initial_margin', '0')
+                        )
+                        maintenance_margin = (
+                            collateral.maintenance_margin
+                            if hasattr(collateral, 'maintenance_margin') and collateral.maintenance_margin is not None
+                            else collateral_dict.get('maintenance_margin', '0')
+                        )
+
                         print(f"賬户地址: {collateral_dict.get('account', 'N/A')}")
-                        print(f"賬户價值: {collateral_dict.get('account_value', '0')} USDC")
-                        print(f"總抵押品: {collateral_dict.get('total_collateral', '0')} USDC")
-                        print(f"可用抵押品: {collateral_dict.get('free_collateral', '0')} USDC")
-                        print(f"初始保證金: {collateral_dict.get('initial_margin', '0')} USDC")
-                        print(f"維持保證金: {collateral_dict.get('maintenance_margin', '0')} USDC")
+                        print(f"賬户價值: {account_value} USDC")
+                        print(f"總抵押品: {total_collateral} USDC")
+                        print(f"可用抵押品: {free_collateral} USDC")
+                        print(f"初始保證金: {initial_margin} USDC")
+                        print(f"維持保證金: {maintenance_margin} USDC")
             elif exchange == 'lighter':
                 # Lighter 的抵押品信息格式
                 if not collateral_response.success:
                     print(f"獲取抵押品失敗: {collateral_response.error_message}")
                 else:
-                    collateral = collateral_response.data
+                    collateral = collateral_items[0] if collateral_items else None
                     # 支援 CollateralInfo dataclass 或 dict
-                    if hasattr(collateral, 'raw') and collateral.raw:
+                    if collateral and hasattr(collateral, 'raw') and collateral.raw:
                         collateral_dict = collateral.raw
                     elif isinstance(collateral, dict):
                         collateral_dict = collateral
                     else:
                         collateral_dict = {}
-                    total_collateral = collateral_dict.get('totalCollateral', 0)
-                    available_collateral = collateral_dict.get('availableCollateral', 0)
-                    total_asset_value = collateral_dict.get('totalAssetValue', 0)
+                    total_collateral = (
+                        collateral.total_collateral
+                        if hasattr(collateral, 'total_collateral') and collateral.total_collateral is not None
+                        else collateral_dict.get('totalCollateral', 0)
+                    )
+                    available_collateral = (
+                        collateral.free_collateral
+                        if hasattr(collateral, 'free_collateral') and collateral.free_collateral is not None
+                        else collateral_dict.get('availableCollateral', 0)
+                    )
+                    total_asset_value = (
+                        collateral.account_value
+                        if hasattr(collateral, 'account_value') and collateral.account_value is not None
+                        else collateral_dict.get('totalAssetValue', 0)
+                    )
                     cross_asset_value = collateral_dict.get('crossAssetValue', 0)
 
                     print("\n賬户摘要:")
@@ -408,17 +453,29 @@ def get_balance_command(api_key, secret_key):
                 if not collateral_response.success:
                     print(f"獲取抵押品失敗: {collateral_response.error_message}")
                 else:
-                    collateral = collateral_response.data
+                    collateral = collateral_items[0] if collateral_items else None
                     # 支援 CollateralInfo dataclass 或 dict
-                    if hasattr(collateral, 'raw') and collateral.raw:
+                    if collateral and hasattr(collateral, 'raw') and collateral.raw:
                         collateral_dict = collateral.raw
                     elif isinstance(collateral, dict):
                         collateral_dict = collateral
                     else:
                         collateral_dict = {}
-                    total_collateral = collateral_dict.get('totalCollateral', 0)
-                    available_collateral = collateral_dict.get('availableCollateral', 0)
-                    token = collateral_dict.get('token', 'USDC')
+                    total_collateral = (
+                        collateral.total_collateral
+                        if hasattr(collateral, 'total_collateral') and collateral.total_collateral is not None
+                        else collateral_dict.get('totalCollateral', 0)
+                    )
+                    available_collateral = (
+                        collateral.free_collateral
+                        if hasattr(collateral, 'free_collateral') and collateral.free_collateral is not None
+                        else collateral_dict.get('availableCollateral', 0)
+                    )
+                    token = (
+                        collateral.asset
+                        if hasattr(collateral, 'asset') and collateral.asset
+                        else collateral_dict.get('token', 'USDC')
+                    )
                     maker_fee = collateral_dict.get('makerFeeRate', '0')
                     taker_fee = collateral_dict.get('takerFeeRate', '0')
 
@@ -432,23 +489,27 @@ def get_balance_command(api_key, secret_key):
                 if not collateral_response.success:
                     print(f"獲取抵押品失敗: {collateral_response.error_message}")
                 else:
-                    collateral = collateral_response.data
-                    # 支援 CollateralInfo dataclass 或 dict
-                    if hasattr(collateral, 'raw') and collateral.raw:
-                        collateral_dict = collateral.raw
-                    elif isinstance(collateral, dict):
-                        collateral_dict = collateral
-                    else:
-                        collateral_dict = {}
-                    assets = collateral_dict.get('assets') or collateral_dict.get('collateral', [])
+                    assets = collateral_items
+                    if not assets and isinstance(collateral_response.raw, dict):
+                        assets = collateral_response.raw.get('assets') or collateral_response.raw.get('collateral', [])
+
                     if assets:
                         print("\n抵押品資產:")
                         for item in assets:
-                            symbol = item.get('symbol', '')
-                            total = item.get('totalQuantity', '')
-                            available = item.get('availableQuantity', '')
-                            lend = item.get('lendQuantity', '')
-                            collateral_value = item.get('collateralValue', '')
+                            raw = item.raw if hasattr(item, 'raw') else item if isinstance(item, dict) else {}
+                            if hasattr(item, 'asset'):
+                                symbol = item.asset
+                                total = item.total_collateral
+                                available = item.free_collateral
+                            elif isinstance(item, dict):
+                                symbol = item.get('symbol', '') or item.get('asset', '')
+                                total = item.get('totalQuantity', item.get('total_collateral', ''))
+                                available = item.get('availableQuantity', item.get('free_collateral', ''))
+                            else:
+                                continue
+
+                            lend = raw.get('lendQuantity', '') if isinstance(raw, dict) else ''
+                            collateral_value = raw.get('collateralValue', '') if isinstance(raw, dict) else ''
                             print(f"{symbol}: 總量 {total}, 可用 {available}, 出借中 {lend}, 抵押價值 {collateral_value}")
         
         except Exception as e:

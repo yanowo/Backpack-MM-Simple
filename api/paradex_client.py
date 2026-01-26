@@ -642,6 +642,9 @@ class ParadexClient(BaseExchangeClient):
             "total_collateral": "123003.62047353",
             "updated_at": 1681471234972
         }
+        
+        Returns:
+            ApiResponse with List[CollateralInfo]
         """
         result = self.make_request(
             "GET",
@@ -663,7 +666,7 @@ class ParadexClient(BaseExchangeClient):
             maintenance_margin=self.safe_float(result.get("maintenance_margin_requirement")),
             raw=result,
         )
-        return ApiResponse.ok(collateral_info, raw=result)
+        return ApiResponse.ok([collateral_info], raw=result)
 
     def execute_order(self, order_details: Dict[str, Any]) -> ApiResponse:
         """執行訂單

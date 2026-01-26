@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
 # 全局函數導入已移除，現在使用客户端方法
+from api import ApiResponse, PositionInfo
 from logger import setup_logger
 from strategies.market_maker import MarketMaker, format_balance
 from utils.helpers import round_to_precision, round_to_tick_size, format_quantity
@@ -162,14 +163,14 @@ class PerpetualMarketMaker(MarketMaker):
             
             # 取第一個倉位（因為已經按symbol過濾了）
             position = positions[0]
-            # 支援 PositionInfo dataclass
-            if hasattr(position, 'size'):
-                net_quantity = float(position.size or 0)
-                # 根據 side 調整正負
-                if hasattr(position, 'side') and position.side == 'SHORT':
-                    net_quantity = -abs(net_quantity)
-            else:
-                net_quantity = float(position.get("netQuantity", 0))
+            if not isinstance(position, PositionInfo):
+                logger.warning("倉位資料不是標準 PositionInfo: %s", type(position))
+                return 0.0
+
+            net_quantity = float(position.size or 0)
+            # 根據 side 調整正負
+            if position.side == 'SHORT':
+                net_quantity = -abs(net_quantity)
             
             logger.debug("從API獲取 %s 永續倉位: %s", self.symbol, net_quantity)
             return net_quantity
@@ -180,8 +181,8 @@ class PerpetualMarketMaker(MarketMaker):
             logger.warning("使用本地計算的倉位作為備用")
             return self.total_bought - self.total_sold
 
-    def _get_actual_position_info(self) -> Dict[str, Any]:
-        """獲取完整的倉位信息"""
+    def _get_actual_position_info(self) -> Optional[PositionInfo]:
+        """獲取完整的倉位信息（PositionInfo）"""
         try:
             # 嘗試查詢特定symbol的倉位
             result = self.client.get_positions(self.symbol)
@@ -195,30 +196,27 @@ class PerpetualMarketMaker(MarketMaker):
                 # 從所有倉位中篩選當前symbol
                 if result.success and isinstance(result.data, list):
                     for pos in result.data:
-                        pos_symbol = pos.symbol if hasattr(pos, 'symbol') else pos.get('symbol')
-                        if pos_symbol == self.symbol:
+                        if getattr(pos, 'symbol', None) == self.symbol:
                             logger.info(f"從所有倉位中找到 {self.symbol}")
-                            # 轉換為字典格式
-                            if hasattr(pos, 'raw'):
-                                return pos.raw or {}
-                            return pos if isinstance(pos, dict) else {}
+                            return pos
                     logger.warning(f"在所有倉位中未找到 {self.symbol}")
-                    return {}
+                    return None
             
             positions = result.data
             if not isinstance(positions, list) or not positions:
                 logger.info("API返回空倉位列表")
-                return {}
+                return None
             
             position = positions[0]
-            # 轉換為字典格式
-            if hasattr(position, 'raw'):
-                return position.raw or {}
-            return position if isinstance(position, dict) else {}
+            if not isinstance(position, PositionInfo):
+                logger.warning("倉位資料不是標準 PositionInfo: %s", type(position))
+                return None
+
+            return position
             
         except Exception as e:
             logger.error(f"獲取倉位信息時發生錯誤: {e}")
-            return {}
+            return None
 
     def _calculate_average_short_entry(self) -> float:
         """計算目前空頭倉位的平均開倉價格。"""
@@ -264,11 +262,9 @@ class PerpetualMarketMaker(MarketMaker):
         position_info = self._get_actual_position_info()
         
         if position_info:
-            # 使用API返回的精確信息
-            entry_price_raw = position_info.get("entryPrice", 0)
-            pnl_raw = position_info.get("pnlUnrealized", 0)
+            entry_price_raw = position_info.entry_price
+            pnl_raw = position_info.unrealized_pnl
 
-            # 安全處理可能為 None 的值
             avg_entry = float(entry_price_raw) if entry_price_raw is not None else 0.0
             unrealized = float(pnl_raw) if pnl_raw is not None else 0.0
         else:
@@ -424,7 +420,7 @@ class PerpetualMarketMaker(MarketMaker):
         time_in_force: str = "GTC",
         post_only: bool = False,
         client_id: Optional[str] = None,
-    ) -> Dict:
+    ) -> ApiResponse:
         """提交開倉或平倉訂單。"""
 
         normalized_order_type = order_type.capitalize()
@@ -499,7 +495,7 @@ class PerpetualMarketMaker(MarketMaker):
         reduce_only: bool = False,
         post_only: bool = False,
         **kwargs,
-    ) -> Dict:
+    ) -> ApiResponse:
         """開啟或增加多頭倉位。"""
         return self.open_position(
             side="Bid",
@@ -519,7 +515,7 @@ class PerpetualMarketMaker(MarketMaker):
         reduce_only: bool = False,
         post_only: bool = False,
         **kwargs,
-    ) -> Dict:
+    ) -> ApiResponse:
         """開啟或增加空頭倉位。"""
         return self.open_position(
             side="Ask",

@@ -265,7 +265,19 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 break
 
     def _extract_order_identifiers(self, order_data: Any) -> Tuple[Optional[str], List[str]]:
-        if isinstance(order_data, dict):
+        if order_data is None:
+            return None, []
+
+        def _get_value(source: Any, key: str) -> Any:
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        raw = None
+        if hasattr(order_data, 'raw') and isinstance(order_data.raw, dict):
+            raw = order_data.raw
+
+        if isinstance(order_data, dict) or hasattr(order_data, 'order_id') or hasattr(order_data, 'client_order_id') or raw:
             alias_ids: List[str] = []
             # 收集所有可能的訂單 ID
             candidate_keys = [
@@ -275,7 +287,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 'clientId', 'client_id'
             ]
             for key in candidate_keys:
-                normalized = self._normalize_order_id(order_data.get(key))
+                value = _get_value(order_data, key)
+                if value is None and raw:
+                    value = raw.get(key)
+                normalized = self._normalize_order_id(value)
                 if normalized and normalized not in alias_ids:
                     alias_ids.append(normalized)
 
@@ -287,7 +302,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 'clientId', 'client_id'
             ]
             for key in priority_keys:
-                normalized = self._normalize_order_id(order_data.get(key))
+                value = _get_value(order_data, key)
+                if value is None and raw:
+                    value = raw.get(key)
+                normalized = self._normalize_order_id(value)
                 if normalized:
                     primary = normalized
                     break
@@ -303,14 +321,12 @@ class PerpGridStrategy(PerpetualMarketMaker):
             return None, []
         return normalized, [normalized]
 
-    def _update_aliases_from_open_orders(self, open_orders: Optional[List[Dict[str, Any]]]) -> Set[str]:
+    def _update_aliases_from_open_orders(self, open_orders: Optional[List[Any]]) -> Set[str]:
         normalized_ids: Set[str] = set()
         if not isinstance(open_orders, list):
             return normalized_ids
 
         for order in open_orders:
-            if not isinstance(order, dict):
-                continue
             primary, aliases = self._extract_order_identifiers(order)
             if primary and aliases:
                 self._register_order_aliases(primary, aliases)
@@ -734,11 +750,6 @@ class PerpGridStrategy(PerpetualMarketMaker):
             return
         
         open_orders = open_orders_response.data or []
-        # 轉換為字典列表用於後續處理
-        if hasattr(open_orders, '__iter__') and open_orders:
-            first = next(iter(open_orders), None)
-            if hasattr(first, 'raw'):
-                open_orders = [o.raw if o.raw else {} for o in open_orders]
 
         exchange_order_ids = self._update_aliases_from_open_orders(open_orders)
         
@@ -997,102 +1008,13 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 批量下單
         placed_orders = 0
         if orders_to_place:
-            # 檢查客戶端是否支持批量下單
-            has_batch_method = hasattr(self.client, 'execute_order_batch') and callable(getattr(self.client, 'execute_order_batch'))
+            logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
+            result = self.client.execute_order_batch(orders_to_place)
 
-            if has_batch_method:
-                logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
-                result = self.client.execute_order_batch(orders_to_place)
-
-                if not result.success:
-                    logger.error("批量下單失敗: %s", result.error_message)
-                    # 如果批量下單失敗，回退到逐個下單
-                    logger.info("回退到逐個下單模式...")
-                    for i, order in enumerate(orders_to_place):
-                        price = float(order['price'])
-                        side = order['side']
-                        result_single = self.client.execute_order(order)
-
-                        if result_single.success:
-                            order_data = result_single.data
-                            # 轉換為字典用於記錄
-                            order_dict = order_data.raw if hasattr(order_data, 'raw') and order_data.raw else {'id': order_data.order_id if hasattr(order_data, 'order_id') else None}
-                            self._record_grid_order(order_dict, price, side, self.order_quantity)
-                            placed_orders += 1
-                            logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
-                        else:
-                            logger.error("掛單失敗: %s", result_single.error_message)
-                else:
-                    # 批量下單成功，記錄所有訂單
-                    # 處理不同交易所的響應格式
-                    orders_list = []
-                    batch_data = result.data
-                    
-                    # 如果是 BatchOrderResult dataclass
-                    if hasattr(batch_data, 'orders'):
-                        orders_list = batch_data.orders or []
-                        if hasattr(batch_data, 'errors') and batch_data.errors:
-                            real_errors = [e for e in batch_data.errors if e is not None]
-                            if real_errors:
-                                logger.warning("批量下單部分失敗，錯誤數量: %d", len(real_errors))
-                                for error_info in real_errors[:3]:
-                                    logger.warning("錯誤詳情: %s", error_info)
-                    elif isinstance(batch_data, list):
-                        # 直接返回訂單數組（Backpack、Lighter、Paradex 成功時）
-                        orders_list = batch_data
-                    elif isinstance(batch_data, dict):
-                        # 包含 orders 字段的響應（Paradex 部分成功時）
-                        if "orders" in batch_data:
-                            orders_list = batch_data["orders"]
-                            # 記錄錯誤（過濾掉 None 值）
-                            if "errors" in batch_data and batch_data.get("errors"):
-                                # Paradex API 返回的 errors 中，成功的訂單對應 None
-                                real_errors = [e for e in batch_data["errors"] if e is not None]
-                                if real_errors:
-                                    logger.warning("批量下單部分失敗，錯誤數量: %d", len(real_errors))
-                                    for error_info in real_errors[:3]:  # 只記錄前3個錯誤
-                                        logger.warning("錯誤詳情: %s", error_info)
-
-                    # 記錄所有成功的訂單
-                    for order_result in orders_list:
-                        # 支援 OrderResult dataclass 或 dict
-                        if hasattr(order_result, 'order_id'):
-                            price = float(order_result.price or 0)
-                            side = order_result.side or ''
-                            if isinstance(side, str):
-                                if side.upper() in ['BUY', 'LONG']:
-                                    side = 'Bid'
-                                elif side.upper() in ['SELL', 'SHORT', 'ASK']:
-                                    side = 'Ask'
-                            # OrderResult 使用 filled_size 和 size，不是 filled_quantity 和 quantity
-                            quantity = float(order_result.filled_size or order_result.size or self.order_quantity)
-                            order_dict = order_result.raw if hasattr(order_result, 'raw') and order_result.raw else {'id': order_result.order_id}
-                            self._record_grid_order(order_dict, price, side, quantity)
-                            placed_orders += 1
-                        elif isinstance(order_result, dict):
-                            price = float(order_result.get('price', 0))
-                            side = order_result.get('side', '')
-                            if isinstance(side, str):
-                                if side.upper() in ['BUY', 'LONG']:
-                                    side = 'Bid'
-                                elif side.upper() in ['SELL', 'SHORT', 'ASK']:
-                                    side = 'Ask'
-
-                            quantity_raw = (
-                                order_result.get('quantity') or
-                                order_result.get('size') or
-                                order_result.get('origQty') or
-                                self.order_quantity
-                            )
-                            quantity = float(quantity_raw)
-
-                            self._record_grid_order(order_result, price, side, quantity)
-                            placed_orders += 1
-
-                    logger.info("批量下單成功: %d 個訂單", placed_orders)
-            else:
-                # 客戶端不支持批量下單，直接逐個下單
-                logger.info("該交易所不支持批量下單，使用逐個下單模式: %d 個訂單", len(orders_to_place))
+            if not result.success:
+                logger.error("批量下單失敗: %s", result.error_message)
+                # 如果批量下單失敗，回退到逐個下單
+                logger.info("回退到逐個下單模式...")
                 for i, order in enumerate(orders_to_place):
                     price = float(order['price'])
                     side = order['side']
@@ -1100,13 +1022,41 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
                     if result_single.success:
                         order_data = result_single.data
-                        # 轉換為字典用於記錄
-                        order_dict = order_data.raw if hasattr(order_data, 'raw') and order_data.raw else {'id': order_data.order_id if hasattr(order_data, 'order_id') else None}
-                        self._record_grid_order(order_dict, price, side, self.order_quantity)
+                        self._record_grid_order(order_data, price, side, self.order_quantity)
                         placed_orders += 1
                         logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
                     else:
                         logger.error("掛單失敗: %s", result_single.error_message)
+            else:
+                # 批量下單成功，記錄所有訂單
+                # 處理不同交易所的響應格式
+                batch_data = result.data
+                
+                if not batch_data or not hasattr(batch_data, 'orders'):
+                    logger.error("批量下單回傳格式異常，無法解析訂單結果")
+                else:
+                    orders_list = batch_data.orders or []
+                    real_errors = [e for e in (batch_data.errors or []) if e is not None]
+                    if real_errors:
+                        logger.warning("批量下單部分失敗，錯誤數量: %d", len(real_errors))
+                        for error_info in real_errors[:3]:
+                            logger.warning("錯誤詳情: %s", error_info)
+
+                    # 記錄所有成功的訂單
+                    for order_result in orders_list:
+                        price = float(order_result.price or 0)
+                        side = order_result.side or ''
+                        if isinstance(side, str):
+                            if side.upper() in ['BUY', 'LONG']:
+                                side = 'Bid'
+                            elif side.upper() in ['SELL', 'SHORT', 'ASK']:
+                                side = 'Ask'
+                        # OrderResult 使用 filled_size 和 size，不是 filled_quantity 和 quantity
+                        quantity = float(order_result.filled_size or order_result.size or self.order_quantity)
+                        self._record_grid_order(order_result, price, side, quantity)
+                        placed_orders += 1
+
+                    logger.info("批量下單成功: %d 個訂單", placed_orders)
 
         logger.info("網格初始化完成: 共放置 %d 個訂單", placed_orders)
         self.grid_initialized = True
@@ -1218,8 +1168,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 
                 if result.success:
                     result_data = result.data
-                    result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
-                    primary_id, alias_ids = self._extract_order_identifiers(result_dict)
+                    primary_id, alias_ids = self._extract_order_identifiers(result_data)
                     if primary_id:
                         # 同步補掛的訂單使用平倉價格作為開倉價格，這樣不會產生虛假利潤
                         # 網格利潤只計算正常流程（開倉->平倉）的利潤
@@ -1242,8 +1191,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 )
                 if result.success:
                     result_data = result.data
-                    result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
-                    primary_id, alias_ids = self._extract_order_identifiers(result_dict)
+                    primary_id, alias_ids = self._extract_order_identifiers(result_data)
                     if primary_id:
                         # 同步補掛的訂單使用平倉價格作為開倉價格
                         self._record_close_order(primary_id, close_price, remaining_qty, 'short', aliases=alias_ids)
@@ -1282,8 +1230,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 
                 if result.success:
                     result_data = result.data
-                    result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
-                    primary_id, alias_ids = self._extract_order_identifiers(result_dict)
+                    primary_id, alias_ids = self._extract_order_identifiers(result_data)
                     if primary_id:
                         # 同步補掛的訂單使用平倉價格作為開倉價格，這樣不會產生虛假利潤
                         self._record_close_order(primary_id, close_price, order_qty, 'long', aliases=alias_ids)
@@ -1304,8 +1251,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 )
                 if result.success:
                     result_data = result.data
-                    result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
-                    primary_id, alias_ids = self._extract_order_identifiers(result_dict)
+                    primary_id, alias_ids = self._extract_order_identifiers(result_data)
                     if primary_id:
                         # 同步補掛的訂單使用平倉價格作為開倉價格
                         self._record_close_order(primary_id, close_price, remaining_qty, 'long', aliases=alias_ids)
@@ -1343,8 +1289,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
             return False
 
         result_data = result.data
-        result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
-        primary_id, alias_ids = self._extract_order_identifiers(result_dict)
+        primary_id, alias_ids = self._extract_order_identifiers(result_data)
         logger.info("成功掛開多單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, primary_id)
 
         # 使用新的記錄系統
@@ -1372,8 +1317,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
             return False
 
         result_data = result.data
-        result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
-        primary_id, alias_ids = self._extract_order_identifiers(result_dict)
+        primary_id, alias_ids = self._extract_order_identifiers(result_data)
         logger.info("成功掛開空單: 價格=%.4f, 數量=%.4f, 訂單ID=%s", price, quantity, primary_id)
 
         # 使用新的記錄系統
@@ -1405,14 +1349,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         # APEX 成交歷史返回: orderId (交易所ID), clientId (下單時的UUID)
         # 我們下單時用 clientId 追蹤，所以優先用 client_id 匹配
-        order_id = (
-            fill_info.get('order_id')
-            or fill_info.get('id')
-            or fill_info.get('orderId')
-            or primary_id
-        )
+        order_id = fill_info.get('order_id') or primary_id
         # APEX: client_id 是下單時生成的 UUID，用於追蹤
-        client_id = fill_info.get('client_id') or fill_info.get('clientId') or fill_info.get('clientOrderId')
+        client_id = fill_info.get('client_id')
 
         side = fill_info.get('side')
         quantity_raw = fill_info.get('quantity')
@@ -1717,9 +1656,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         # 使用新的記錄系統記錄平倉單
         result_data = result.data
-        result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
-        primary_id, alias_ids = self._extract_order_identifiers(result_dict)
-        order_id = primary_id or (result_data.order_id if hasattr(result_data, 'order_id') else None)
+        primary_id, alias_ids = self._extract_order_identifiers(result_data)
+        order_id = primary_id or getattr(result_data, 'order_id', None)
         if order_id:
             self._record_close_order(order_id, open_price, quantity, 'long', aliases=alias_ids)
             
@@ -1868,9 +1806,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         # 使用新的記錄系統記錄平倉單
         result_data = result.data
-        result_dict = result_data.raw if hasattr(result_data, 'raw') and result_data.raw else {'id': result_data.order_id if hasattr(result_data, 'order_id') else None}
-        primary_id, alias_ids = self._extract_order_identifiers(result_dict)
-        order_id = primary_id or (result_data.order_id if hasattr(result_data, 'order_id') else None)
+        primary_id, alias_ids = self._extract_order_identifiers(result_data)
+        order_id = primary_id or getattr(result_data, 'order_id', None)
         if order_id:
             self._record_close_order(order_id, open_price, quantity, 'short', aliases=alias_ids)
             
@@ -2089,7 +2026,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         使用新的追蹤系統，只統計真正的開倉單。
         
         Args:
-            open_orders: 現有訂單列表（可以是 OrderInfo dataclass 列表或 dict 列表）
+            open_orders: 現有訂單列表（OrderInfo dataclass 列表）
             
         Returns:
             {'Bid': {price: count}, 'Ask': {price: count}}
@@ -2098,19 +2035,13 @@ class PerpGridStrategy(PerpetualMarketMaker):
         short_open_counts: Dict[float, int] = defaultdict(int)  # 開空單
 
         for order in open_orders:
-            # 支援 OrderInfo dataclass 或 dict
-            if hasattr(order, 'order_id'):
-                order_id = order.order_id
-                side_raw = str(order.side or '').upper()
-                price_raw = order.price
-                reduce_only = getattr(order, 'reduce_only', False)
-            elif isinstance(order, dict):
-                order_id = order.get('id') or order.get('orderId') or order.get('order_id')
-                side_raw = str(order.get('side', '')).upper()
-                price_raw = order.get('price')
-                reduce_only = order.get('reduceOnly', False) or order.get('reduce_only', False)
-            else:
+            if not hasattr(order, 'order_id'):
                 continue
+
+            order_id = order.order_id
+            side_raw = str(order.side or '').upper()
+            price_raw = order.price
+            reduce_only = getattr(order, 'reduce_only', False)
 
             if not order_id:
                 continue

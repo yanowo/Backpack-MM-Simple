@@ -85,7 +85,7 @@ def get_client(name: str, *args, **kwargs):
         # 只有真的需要時才導入，避免在 lighter 路徑拉起 starkware/cairo 舊依賴
         from .paradex_client import ParadexClient
         return ParadexClient(*args, **kwargs)
-    elif name == "bp":
+    elif name in ("bp", "backpack"):
         return BPClient(*args, **kwargs)
     elif name == "aster":
         return AsterClient(*args, **kwargs)

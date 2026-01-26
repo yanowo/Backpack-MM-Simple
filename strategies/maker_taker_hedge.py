@@ -100,7 +100,8 @@ class _MakerTakerHedgeMixin:
                     format_balance(buy_price),
                     format_balance(buy_qty),
                 )
-                self.active_buy_orders.append(result.raw)
+                if result.data:
+                    self.active_buy_orders.append(result.data)
                 self.orders_placed += 1
 
         if sell_qty >= self.min_order_size:
@@ -118,7 +119,8 @@ class _MakerTakerHedgeMixin:
                     format_balance(sell_price),
                     format_balance(sell_qty),
                 )
-                self.active_sell_orders.append(result.raw)
+                if result.data:
+                    self.active_sell_orders.append(result.data)
                 self.orders_placed += 1
 
     def _determine_order_sizes(self, buy_price: float, ask_price: float) -> Tuple[Optional[float], Optional[float]]:

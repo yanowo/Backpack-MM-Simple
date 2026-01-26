@@ -640,7 +640,7 @@ class ApexClient(BaseExchangeClient):
         """獲取抵押品資訊。
         
         Returns:
-            ApiResponse with CollateralInfo
+            ApiResponse with List[CollateralInfo]
         """
         result = self.make_request(
             "GET",
@@ -675,7 +675,7 @@ class ApexClient(BaseExchangeClient):
             raw=data,
         )
 
-        return ApiResponse.ok(collateral, raw=result)
+        return ApiResponse.ok([collateral], raw=result)
 
     def execute_order(self, order_details: Dict[str, Any]) -> ApiResponse:
         """執行訂單。
