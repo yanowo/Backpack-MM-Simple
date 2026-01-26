@@ -8,7 +8,7 @@
 4. 無需關心兼容性問題
 """
 from typing import Dict, Any, Optional
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from .base_client import (
     BaseExchangeClient, ApiResponse, BalanceInfo, OrderResult, 
     OrderInfo, TickerInfo, MarketInfo, OrderBookInfo, OrderBookLevel,
@@ -172,10 +172,31 @@ class ExampleExchangeClient(BaseExchangeClient):
             # 轉換為標準格式
             positions = []
             for item in raw_response.get("positions", []):
+                raw_size = item.get("size", "0")
+                try:
+                    size_value = Decimal(str(raw_size))
+                except (InvalidOperation, TypeError, ValueError):
+                    size_value = Decimal("0")
+
+                raw_side = str(item.get("side", "")).upper()
+                if raw_side in {"LONG", "BUY", "BID"}:
+                    side = "LONG"
+                elif raw_side in {"SHORT", "SELL", "ASK"}:
+                    side = "SHORT"
+                elif raw_side in {"FLAT", "NONE", ""}:
+                    side = "FLAT"
+                else:
+                    if size_value > 0:
+                        side = "LONG"
+                    elif size_value < 0:
+                        side = "SHORT"
+                    else:
+                        side = "FLAT"
+
                 position = PositionInfo(
                     symbol=item["symbol"],
-                    side=item["side"],
-                    size=Decimal(item["size"]),
+                    side=side,
+                    size=abs(size_value),
                     entry_price=Decimal(item.get("entryPrice", "0")),
                     mark_price=Decimal(item.get("markPrice", "0")),
                     unrealized_pnl=Decimal(item.get("unrealizedPnl", "0")),

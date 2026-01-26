@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from api import PositionInfo
 from logger import setup_logger
 from strategies.market_maker import MarketMaker, format_balance
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -491,24 +492,25 @@ class _MakerTakerHedgeMixin:
                     if not positions:
                         logger.debug("無倉位記錄，當前倉位為0")
                         return 0.0
-                        
+
                     position = positions[0]
-                    # 支援 PositionInfo dataclass
-                    if hasattr(position, 'size'):
-                        size_value = float(position.size or 0)
-                        # 根據 side 決定正負號：LONG=正, SHORT=負
-                        if hasattr(position, 'side'):
-                            if position.side == "SHORT":
-                                size_value = -size_value
-                            # LONG 或 FLAT 保持原值
-                        return size_value
-                    # 後備：字典格式
-                    for field in ["netQuantity", "size", "position_size", "amount"]:
-                        if field in position:
-                            return float(position[field] or 0)
-                            
-                    logger.warning(f"倉位信息中找不到數量字段: {position}")
-                    return 0.0
+                    if not isinstance(position, PositionInfo):
+                        logger.warning("倉位資料不是標準 PositionInfo: %s", type(position))
+                        return None
+
+                    size_value = float(position.size or 0)
+                    side = str(position.side or "").upper()
+                    if side == "SHORT":
+                        size_value = -abs(size_value)
+                    elif side == "LONG":
+                        size_value = abs(size_value)
+                    elif side == "FLAT":
+                        size_value = 0.0
+                    else:
+                        logger.warning("倉位方向非標準: %s", position.side)
+                        return None
+
+                    return size_value
                 
                 logger.error(f"意外的API響應格式: {positions}")
                 return None
