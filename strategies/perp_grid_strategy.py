@@ -1575,9 +1575,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         logger.info("開多成交後在價格 %.4f 掛平多單 (開倉價格: %.4f)", next_price, open_price)
 
-        # 檢查並取消平倉價格上的衝突開倉單（Backpack reduceOnly 限制）
+        # 檢查並取消平倉價格上的衝突開倉單（部分交易所 reduceOnly 會因衝突單被拒）
         # 平多單是 Ask，會與同價格的開空單衝突
-        if self.exchange == 'backpack':
+        if self.exchange in ('backpack', 'aster'):
             self._cancel_conflicting_open_order_at_price(next_price, 'Ask')
 
         # APEX 是 zkLink L2 架構，持倉更新有延遲
@@ -1726,9 +1726,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
         logger.info("開空成交後在價格 %.4f 掛平空單 (開倉價格: %.4f)", next_price, open_price)
 
-        # 檢查並取消平倉價格上的衝突開倉單（Backpack reduceOnly 限制）
+        # 檢查並取消平倉價格上的衝突開倉單（部分交易所 reduceOnly 會因衝突單被拒）
         # 平空單是 Bid，會與同價格的開多單衝突
-        if self.exchange == 'backpack':
+        if self.exchange in ('backpack', 'aster'):
             self._cancel_conflicting_open_order_at_price(next_price, 'Bid')
 
         # APEX 是 zkLink L2 架構，持倉更新有延遲
@@ -2115,6 +2115,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
         net_position = self.get_net_position()
         logger.debug("當前淨持倉: %.4f, 開始檢查網格訂單...", net_position)
 
+        # 有待重試的平倉單時，對應開倉價格視為鎖定，避免補開新倉
+        pending_close_prices = {open_price for open_price, _, _, _ in self.pending_close_orders}
+
         refilled = 0
         skipped_locked = 0
         skipped_has_order = 0
@@ -2125,7 +2128,12 @@ class PerpGridStrategy(PerpetualMarketMaker):
         for price in self.grid_levels:
             # 獲取該網格點位的狀態
             level_state = self.grid_level_states[price]
-            is_locked = level_state['locked']
+            has_unclosed_position = abs(level_state.get('open_position', 0.0)) >= self.min_order_size
+            is_locked = (
+                level_state['locked']
+                or has_unclosed_position
+                or price in pending_close_prices
+            )
             
             if self.grid_type == "neutral":
                 if price < current_price:
