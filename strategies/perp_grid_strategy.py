@@ -789,6 +789,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         
         # 檢查平倉單
         filled_close_orders = []
+        cancelled_close_orders = []
         for order_id, close_info in list(self.close_orders.items()):
             tracked_aliases = {self._normalize_order_id(order_id)}
             alias_set = close_info.get('alias_ids', set()) if isinstance(close_info, dict) else set()
@@ -798,7 +799,15 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     tracked_aliases.add(normalized_alias)
 
             if exchange_order_ids.isdisjoint(tracked_aliases):
-                filled_close_orders.append((order_id, close_info))
+                # 訂單不在活躍列表中，需要驗證是否真的成交
+                # Paradex 和 Aster 會取消/過期 reduceOnly 訂單，需要驗證
+                if self.exchange in ('paradex', 'aster'):
+                    if self._verify_order_filled(order_id, close_info):
+                        filled_close_orders.append((order_id, close_info))
+                    else:
+                        cancelled_close_orders.append((order_id, close_info))
+                else:
+                    filled_close_orders.append((order_id, close_info))
         
         # 處理發現的已成交訂單
         if filled_open_orders:
@@ -829,6 +838,24 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 side = 'Ask' if position_type == 'long' else 'Bid'
                 logger.info("補充處理平倉單成交: ID=%s, 開倉價格=%.4f, 類型=%s", order_id, open_price, position_type)
                 self._handle_close_order_filled(order_id, open_price, side, quantity)
+        
+        # 處理被取消/過期的平倉單（重新掛單）
+        if cancelled_close_orders:
+            logger.warning("發現 %d 個平倉單被取消/過期（sync），將重新掛單", len(cancelled_close_orders))
+            for order_id, close_info in cancelled_close_orders:
+                open_price = close_info.get('open_price', 0)
+                quantity = close_info.get('quantity', 0)
+                position_type = close_info.get('position_type', 'long')
+                retry_count = close_info.get('retry_count', 0)
+                
+                # 移除舊的平倉單記錄
+                self._remove_close_order(order_id)
+                
+                logger.info("重新掛平倉單（sync）: 開倉價格=%.4f, 數量=%.4f, 類型=%s, 重試次數=%d", 
+                           open_price, quantity, position_type, retry_count + 1)
+                
+                # 加入待重試隊列
+                self._add_pending_close_order(open_price, quantity, position_type, retry_count + 1)
 
     def _detect_filled_orders_from_exchange(self, open_orders: List) -> None:
         """從交易所訂單列表檢測已成交訂單
@@ -913,15 +940,16 @@ class PerpGridStrategy(PerpetualMarketMaker):
             if exchange_order_ids.isdisjoint(tracked_aliases):
                 # 訂單不在活躍列表中，可能是成交或被取消
                 # 
-                # Paradex 特殊處理：Paradex 會靜默取消與開倉單衝突的 reduceOnly 訂單，
-                # 需要通過成交歷史驗證訂單是否真的成交了
-                # 其他交易所（Backpack, Aster, Lighter 等）不會靜默取消，直接當作成交處理
-                if self.exchange == 'paradex':
-                    # Paradex: 通過成交歷史驗證
+                # 需要驗證的交易所：
+                # - Paradex: 會靜默取消與開倉單衝突的 reduceOnly 訂單
+                # - Aster: reduceOnly 訂單在沒有足夠倉位時會被標記為「過期」而非成交
+                # 這些交易所需要通過成交歷史驗證訂單是否真的成交了
+                if self.exchange in ('paradex', 'aster'):
+                    # 通過成交歷史驗證
                     if self._verify_order_filled(order_id, close_info):
                         filled_close_orders.append((order_id, close_info))
                     else:
-                        # 訂單被取消，需要重新掛單
+                        # 訂單被取消/過期，需要重新掛單
                         cancelled_close_orders.append((order_id, close_info))
                 else:
                     # 其他交易所：直接當作成交處理（因為它們不會靜默取消訂單）
@@ -1385,12 +1413,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 close_price = close_prices[price_idx]
                 price_idx += 1
                 
+                # 【重要】先取消該價格上的衝突開倉單，避免 reduceOnly 失敗
+                self._cancel_conflicting_open_order_at_price(close_price, 'Bid')
+                
+                # Aster 不使用 reduce_only，因為平台會在同價位掛上新訂單時自動移除 reduceOnly 訂單
+                use_reduce_only = self.exchange != 'aster'
+                
                 logger.info("補掛平空單 %d/%d: 價格=%.4f, 數量=%.4f", i+1, num_orders, close_price, order_qty)
                 result = self.open_long(
                     quantity=order_qty,
                     price=close_price,
                     order_type="Limit",
-                    reduce_only=True,
+                    reduce_only=use_reduce_only,
                     post_only=False  # 補掛時不使用 post_only，確保能掛出
                 )
                 
@@ -1409,12 +1443,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
             # 處理剩餘數量
             if remaining_qty >= effective_min_size and remaining_qty > 0 and close_prices:
                 close_price = close_prices[0]
+                # 【重要】先取消該價格上的衝突開倉單
+                self._cancel_conflicting_open_order_at_price(close_price, 'Bid')
+                
+                # Aster 不使用 reduce_only
+                use_reduce_only = self.exchange != 'aster'
+                
                 logger.info("補掛剩餘平空單: 價格=%.4f, 數量=%.4f", close_price, remaining_qty)
                 result = self.open_long(
                     quantity=remaining_qty,
                     price=close_price,
                     order_type="Limit",
-                    reduce_only=True,
+                    reduce_only=use_reduce_only,
                     post_only=False
                 )
                 if result.success:
@@ -1447,12 +1487,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 close_price = close_prices[price_idx]
                 price_idx += 1
                 
+                # 【重要】先取消該價格上的衝突開倉單，避免 reduceOnly 失敗
+                self._cancel_conflicting_open_order_at_price(close_price, 'Ask')
+                
+                # Aster 不使用 reduce_only，因為平台會在同價位掛上新訂單時自動移除 reduceOnly 訂單
+                use_reduce_only = self.exchange != 'aster'
+                
                 logger.info("補掛平多單 %d/%d: 價格=%.4f, 數量=%.4f", i+1, num_orders, close_price, order_qty)
                 result = self.open_short(
                     quantity=order_qty,
                     price=close_price,
                     order_type="Limit",
-                    reduce_only=True,
+                    reduce_only=use_reduce_only,
                     post_only=False
                 )
                 
@@ -1469,12 +1515,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
             
             if remaining_qty >= effective_min_size and remaining_qty > 0 and close_prices:
                 close_price = close_prices[0]
+                # 【重要】先取消該價格上的衝突開倉單
+                self._cancel_conflicting_open_order_at_price(close_price, 'Ask')
+                
+                # Aster 不使用 reduce_only
+                use_reduce_only = self.exchange != 'aster'
+                
                 logger.info("補掛剩餘平多單: 價格=%.4f, 數量=%.4f", close_price, remaining_qty)
                 result = self.open_short(
                     quantity=remaining_qty,
                     price=close_price,
                     order_type="Limit",
-                    reduce_only=True,
+                    reduce_only=use_reduce_only,
                     post_only=False
                 )
                 if result.success:
@@ -1814,11 +1866,12 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 不需要查詢 API 持倉（因為可能還沒更新）
         
         # 對於 APEX，由於 L2 結算延遲，我們信任本地狀態而不是 API
+        # 對於 Aster，平台會在同價位掛上新訂單時自動移除 reduceOnly 訂單，所以不使用 reduceOnly
         # 開多成交後立即掛平多單，使用 reduce_only=False 避免因 API 延遲導致失敗
         reduce_only = False
         
         # 對於其他交易所，可以嘗試使用 reduce_only
-        if self.exchange not in ('apex',):
+        if self.exchange not in ('apex', 'aster'):
             # 延遲一下，等待持倉更新
             time.sleep(0.5)
             net_position = self.get_net_position()
@@ -1966,10 +2019,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 不需要查詢 API 持倉（因為可能還沒更新）
         
         # 對於 APEX，由於 L2 結算延遲，我們信任本地狀態而不是 API
+        # 對於 Aster，平台會在同價位掛上新訂單時自動移除 reduceOnly 訂單，所以不使用 reduceOnly
         reduce_only = False
         
         # 對於其他交易所，可以嘗試使用 reduce_only
-        if self.exchange not in ('apex',):
+        if self.exchange not in ('apex', 'aster'):
             # 延遲一下，等待持倉更新
             time.sleep(0.5)
             net_position = self.get_net_position()
