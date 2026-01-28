@@ -154,6 +154,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
         self.pending_close_orders: List[Tuple[float, float, str, int]] = []
         self.max_close_order_retries = 3  # 平倉單最大重試次數
         
+        # === 本次迭代新掛的訂單（避免誤判為成交） ===
+        self._orders_placed_this_iteration: Set[str] = set()
+        
         # === 週期性倉位同步 ===
         self._last_position_sync_time: float = 0.0  # 上次同步時間戳
         self._position_sync_interval: int = 600  # 同步間隔（秒），預設 10 分鐘
@@ -427,6 +430,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
             'position': position_type
         }
         self.grid_level_locks[open_price] = normalized_id
+        
+        # 標記為本次迭代新掛的訂單（避免在成交檢測中誤判）
+        self._orders_placed_this_iteration.add(normalized_id)
+        for alias in alias_ids:
+            self._orders_placed_this_iteration.add(alias)
         
         logger.debug("記錄平倉單: 開倉價格=%.4f, ID=%s, 類型=%s", open_price, normalized_id, position_type)
     
@@ -799,6 +807,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 logger.info("補充處理開倉單成交: ID=%s, 價格=%.4f, 方向=%s", order_id, price, side)
                 self._handle_open_order_filled(order_id, price, side, quantity)
         
+        # 【重要】處理完開倉單後，新掛的平倉單會加入 _orders_placed_this_iteration
+        # 需要過濾掉這些剛掛的訂單
+        if filled_close_orders:
+            original_count = len(filled_close_orders)
+            filled_close_orders = [
+                (order_id, close_info) for order_id, close_info in filled_close_orders
+                if not ({self._normalize_order_id(order_id)} | 
+                       close_info.get('alias_ids', set())) & self._orders_placed_this_iteration
+            ]
+            if len(filled_close_orders) < original_count:
+                logger.debug("過濾掉 %d 個本次迭代新掛的平倉單（sync）", original_count - len(filled_close_orders))
+        
         if filled_close_orders:
             logger.warning("發現 %d 個未被檢測的平倉單成交", len(filled_close_orders))
             for order_id, close_info in filled_close_orders:
@@ -885,14 +905,27 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 if normalized_alias:
                     tracked_aliases.add(normalized_alias)
             
+            # 跳過本次迭代剛掛的訂單（因為 open_orders 是在掛單前獲取的，不會包含新訂單）
+            if tracked_aliases & self._orders_placed_this_iteration:
+                logger.debug("跳過本次迭代新掛的平倉單: %s", order_id)
+                continue
+            
             if exchange_order_ids.isdisjoint(tracked_aliases):
                 # 訂單不在活躍列表中，可能是成交或被取消
-                # 通過成交歷史驗證是否真的成交了
-                if self._verify_order_filled(order_id, close_info):
-                    filled_close_orders.append((order_id, close_info))
+                # 
+                # Paradex 特殊處理：Paradex 會靜默取消與開倉單衝突的 reduceOnly 訂單，
+                # 需要通過成交歷史驗證訂單是否真的成交了
+                # 其他交易所（Backpack, Aster, Lighter 等）不會靜默取消，直接當作成交處理
+                if self.exchange == 'paradex':
+                    # Paradex: 通過成交歷史驗證
+                    if self._verify_order_filled(order_id, close_info):
+                        filled_close_orders.append((order_id, close_info))
+                    else:
+                        # 訂單被取消，需要重新掛單
+                        cancelled_close_orders.append((order_id, close_info))
                 else:
-                    # 訂單被取消，需要重新掛單
-                    cancelled_close_orders.append((order_id, close_info))
+                    # 其他交易所：直接當作成交處理（因為它們不會靜默取消訂單）
+                    filled_close_orders.append((order_id, close_info))
         
         # 處理已成交的開倉單
         if filled_open_orders:
@@ -901,6 +934,19 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 logger.info("處理開倉單成交: ID=%s, 價格=%.4f, 方向=%s, 數量=%.4f", 
                            order_id, price, side, quantity)
                 self._handle_open_order_filled(order_id, price, side, quantity)
+        
+        # 【重要】開倉單處理完後會掛平倉單，這些新掛的訂單會加入 _orders_placed_this_iteration
+        # 需要重新過濾 filled_close_orders，排除本次迭代新掛的訂單
+        if filled_close_orders:
+            # 過濾掉本次迭代新掛的訂單
+            original_count = len(filled_close_orders)
+            filled_close_orders = [
+                (order_id, close_info) for order_id, close_info in filled_close_orders
+                if not ({self._normalize_order_id(order_id)} | 
+                       close_info.get('alias_ids', set())) & self._orders_placed_this_iteration
+            ]
+            if len(filled_close_orders) < original_count:
+                logger.debug("過濾掉 %d 個本次迭代新掛的平倉單", original_count - len(filled_close_orders))
         
         # 處理已成交的平倉單
         if filled_close_orders:
@@ -2169,6 +2215,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
     def place_limit_orders(self) -> None:
         """放置限價單 - 覆蓋父類方法（增加倉位變化檢測）"""
+        # 【重要】每次迭代開始時清除上一輪記錄的訂單 ID
+        # 必須在所有成交檢測之前清除，包括 _check_position_changes 中的 _sync_orders_with_exchange
+        self._orders_placed_this_iteration.clear()
+        
         if not self.grid_initialized:
             success = self.initialize_grid()
             if not success:
