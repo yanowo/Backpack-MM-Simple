@@ -1144,6 +1144,11 @@ class LighterClient(BaseExchangeClient):
         return ApiResponse.ok(order_book, raw=payload)
 
     def get_ticker(self, symbol: str) -> ApiResponse:
+        """獲取交易對的即時行情資訊
+        
+        【重要】使用買一/賣一的中間價作為最新價格，確保價格是即時更新的。
+        緩存的 last_price 只用於回退，因為緩存數據只在程式啟動時獲取一次，之後不會更新。
+        """
         book_response = self.get_order_book(symbol, limit=50)
         if not book_response.success:
             return book_response
@@ -1155,10 +1160,21 @@ class LighterClient(BaseExchangeClient):
         best_bid = bids[0].price if bids else None
         best_ask = asks[0].price if asks else None
 
-        market = self._lookup_market(symbol)
-        last_price = market.get("last_price") if market else None
-        if last_price is None:
-            last_price = best_bid or best_ask
+        # 【修正】優先使用買一/賣一的中間價作為最新價格（即時價格）
+        # 緩存的 last_price 只在啟動時獲取一次，之後不會更新，會導致價格判斷錯誤
+        if best_bid is not None and best_ask is not None:
+            # 有買賣盤時使用中間價
+            last_price = (best_bid + best_ask) / 2
+        elif best_bid is not None:
+            # 只有買盤時使用買一價
+            last_price = best_bid
+        elif best_ask is not None:
+            # 只有賣盤時使用賣一價
+            last_price = best_ask
+        else:
+            # 完全沒有盤口數據時，回退使用緩存的價格
+            market = self._lookup_market(symbol)
+            last_price = market.get("last_price") if market else None
 
         ticker = TickerInfo(
             symbol=symbol,

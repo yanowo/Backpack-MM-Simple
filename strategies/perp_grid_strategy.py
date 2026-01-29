@@ -154,8 +154,17 @@ class PerpGridStrategy(PerpetualMarketMaker):
         self.pending_close_orders: List[Tuple[float, float, str, int]] = []
         self.max_close_order_retries = 3  # 平倉單最大重試次數
         
+        # === 價格偏移取消追蹤 ===
+        # 記錄因價格偏移而被取消的網格點位，避免重複掛單
+        # 格式: {price: {'side': 'Bid'/'Ask', 'cancel_count': int, 'last_cancel_time': float}}
+        self.price_offset_cancelled: Dict[float, Dict[str, Any]] = {}
+        
         # === 本次迭代新掛的訂單（避免誤判為成交） ===
         self._orders_placed_this_iteration: Set[str] = set()
+        
+        # === 主動取消的訂單（為了掛 reduceOnly 平倉單而取消的衝突開倉單） ===
+        # 這些訂單是主動取消的，不應該被記錄為「價格偏移取消」
+        self._manually_cancelled_orders: Set[str] = set()
         
         # === 週期性倉位同步 ===
         self._last_position_sync_time: float = 0.0  # 上次同步時間戳
@@ -172,6 +181,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         self.grid_level_states.clear()
         self.order_alias_map.clear()
         self.order_aliases_by_primary.clear()
+        self._manually_cancelled_orders.clear()  # 清空主動取消訂單的追蹤
         
         # 清理舊的數據結構
         self.grid_orders_by_price.clear()
@@ -549,6 +559,16 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 cancel_result = self.client.cancel_order(order_id, self.symbol)
                 if cancel_result.success:
                     logger.info("成功取消衝突%s: ID=%s", order_type_name, order_id)
+                    # 【重要】記錄這是主動取消的訂單，避免被誤判為「價格偏移取消」
+                    normalized_id = self._normalize_order_id(order_id)
+                    if normalized_id:
+                        self._manually_cancelled_orders.add(normalized_id)
+                        # 也記錄別名
+                        alias_set = order_info.get('alias_ids', set()) if isinstance(order_info, dict) else set()
+                        for alias in alias_set:
+                            normalized_alias = self._normalize_order_id(alias)
+                            if normalized_alias:
+                                self._manually_cancelled_orders.add(normalized_alias)
                     # 移除本地記錄（使用開倉單的方向）
                     self._remove_open_order(order_id, price, open_side)
                     cancelled_any = True
@@ -977,13 +997,42 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     # 其他交易所：直接當作成交處理（因為它們不會靜默取消訂單）
                     filled_close_orders.append((order_id, close_info))
         
-        # 處理被取消的開倉單（從追蹤中移除，讓補單邏輯重新掛單）
+        # 處理被取消的開倉單（從追蹤中移除，記錄價格偏移信息）
         if cancelled_open_orders:
             logger.warning("檢測到 %d 個開倉單被取消（價格偏移或其他原因）", len(cancelled_open_orders))
             for order_id, price, side, quantity in cancelled_open_orders:
+                # 檢查是否是主動取消的訂單（為了掛 reduceOnly 平倉單而取消的）
+                normalized_id = self._normalize_order_id(order_id)
+                is_manually_cancelled = normalized_id and normalized_id in self._manually_cancelled_orders
+                
+                if is_manually_cancelled:
+                    # 主動取消的訂單，只需移除本地記錄，不記錄為價格偏移取消
+                    logger.info("訂單 %s 是主動取消的（為了掛平倉單），不記錄為價格偏移取消", order_id)
+                    self._remove_open_order(order_id, price, side)
+                    # 從主動取消集合中移除（一次性使用）
+                    self._manually_cancelled_orders.discard(normalized_id)
+                    continue
+                
                 logger.info("移除被取消的開倉單: ID=%s, 價格=%.4f, 方向=%s", order_id, price, side)
                 # 從本地追蹤中移除
                 self._remove_open_order(order_id, price, side)
+                
+                # 記錄該價格點位因價格偏移被取消，避免重複掛單
+                import time as time_module
+                if price not in self.price_offset_cancelled:
+                    self.price_offset_cancelled[price] = {
+                        'side': side,
+                        'cancel_count': 1,
+                        'last_cancel_time': time_module.time()
+                    }
+                else:
+                    self.price_offset_cancelled[price]['cancel_count'] += 1
+                    self.price_offset_cancelled[price]['last_cancel_time'] = time_module.time()
+                
+                logger.info(
+                    "記錄價格偏移取消: 價格=%.4f, 方向=%s, 取消次數=%d",
+                    price, side, self.price_offset_cancelled[price]['cancel_count']
+                )
         
         # 處理已成交的開倉單
         if filled_open_orders:
@@ -2436,6 +2485,12 @@ class PerpGridStrategy(PerpetualMarketMaker):
             except Exception as exc:
                 logger.warning("補單前無法獲取訂單列表: %s", exc)
             
+            # 【重要】重新獲取最新價格，避免使用過時的價格導致錯誤的距離計算
+            current_price = self.get_current_price()
+            if not current_price:
+                logger.warning("無法獲取最新價格，跳過補單")
+                return
+            
             # 傳遞數據給 _refill_grid_orders，此時不再重複檢測成交
             self._refill_grid_orders(current_price=current_price, 
                                     open_orders=open_orders,
@@ -2517,6 +2572,12 @@ class PerpGridStrategy(PerpetualMarketMaker):
             current_price = self.get_current_price()
             if not current_price:
                 return
+        
+        # 【日誌】顯示當前使用的價格，用於調試價格更新問題
+        logger.info("補單檢查 - 當前價格: %.4f, 網格範圍: [%.4f ~ %.4f]", 
+                   current_price, 
+                   self.grid_lower_price or 0, 
+                   self.grid_upper_price or 0)
 
         if open_orders is None:
             try:
@@ -2548,6 +2609,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         refilled = 0
         skipped_locked = 0
         skipped_has_order = 0
+        skipped_price_offset = 0  # 因價格偏移跳過的點位
         
         # 追蹤本次迭代已補單的價格，避免重複補單
         filled_prices_this_round: Set[float] = set()
@@ -2555,6 +2617,14 @@ class PerpGridStrategy(PerpetualMarketMaker):
         # 計算有效的最小持倉閾值（用於判斷是否有未平倉位）
         # 使用 > 0 的邏輯，避免 min_order_size=0 時的誤判
         effective_position_threshold = max(self.min_order_size, self.order_quantity * 0.01, 1e-10)
+        
+        # 價格偏移的最小緩衝距離
+        min_price_buffer = self.tick_size
+        
+        # 檢查當前價格是否超出網格範圍
+        price_out_of_range_high = self.grid_upper_price is not None and current_price > self.grid_upper_price
+        price_out_of_range_low = self.grid_lower_price is not None and current_price < self.grid_lower_price
+        skipped_out_of_range = 0  # 因價格超出範圍跳過的點位
 
         for price in self.grid_levels:
             # 獲取該網格點位的狀態
@@ -2569,6 +2639,32 @@ class PerpGridStrategy(PerpetualMarketMaker):
             
             if self.grid_type == "neutral":
                 if price < current_price:
+                    # 【重要】當價格低於網格下限時，不應該嘗試掛 Bid 單
+                    # 因為 Post-Only 訂單會被拒絕（價格會立即成交）
+                    if price_out_of_range_low:
+                        logger.debug(
+                            "當前價格 %.4f 低於網格下限 %.4f，跳過網格點位 %.4f 的開多單",
+                            current_price, self.grid_lower_price, price
+                        )
+                        skipped_out_of_range += 1
+                        continue
+                    
+                    # 檢查是否之前因價格偏移被取消過
+                    if price in self.price_offset_cancelled:
+                        price_distance = current_price - price
+                        # 只有當價格距離足夠大時才清除記錄並允許補單
+                        if price_distance >= min_price_buffer:
+                            logger.info("網格點位 %.4f 價格距離已足夠 (%.4f >= %.4f)，清除價格偏移記錄", 
+                                       price, price_distance, min_price_buffer)
+                            del self.price_offset_cancelled[price]
+                        else:
+                            logger.debug(
+                                "網格點位 %.4f 之前因價格偏移被取消，當前距離不足 (%.4f < %.4f)，跳過開多單",
+                                price, price_distance, min_price_buffer
+                            )
+                            skipped_price_offset += 1
+                            continue
+                    
                     # 檢查是否已有開多單（交易所 API + 本地追蹤 + 本輪已補）
                     has_long_order = (
                         active_long_open_counts.get(price, 0) > 0 or
@@ -2597,6 +2693,33 @@ class PerpGridStrategy(PerpetualMarketMaker):
                         filled_prices_this_round.add(price)
                         
                 elif price > current_price:
+                    # 【重要】當價格超出網格上限時，不應該嘗試掛 Ask 單
+                    # 因為 Post-Only 訂單會被拒絕（價格會立即成交）
+                    if price_out_of_range_high:
+                        logger.debug(
+                            "當前價格 %.4f 超出網格上限 %.4f，跳過網格點位 %.4f 的開空單",
+                            current_price, self.grid_upper_price, price
+                        )
+                        skipped_out_of_range += 1
+                        # 如果有價格偏移記錄，保持記錄但不補單
+                        continue
+                    
+                    # 檢查是否之前因價格偏移被取消過
+                    if price in self.price_offset_cancelled:
+                        price_distance = price - current_price
+                        # 只有當價格距離足夠大時才清除記錄並允許補單
+                        if price_distance >= min_price_buffer:
+                            logger.info("網格點位 %.4f 價格距離已足夠 (%.4f >= %.4f)，清除價格偏移記錄", 
+                                       price, price_distance, min_price_buffer)
+                            del self.price_offset_cancelled[price]
+                        else:
+                            logger.debug(
+                                "網格點位 %.4f 之前因價格偏移被取消，當前距離不足 (%.4f < %.4f)，跳過開空單",
+                                price, price_distance, min_price_buffer
+                            )
+                            skipped_price_offset += 1
+                            continue
+                    
                     # 檢查是否已有開空單（交易所 API + 本地追蹤 + 本輪已補）
                     has_short_order = (
                         active_short_open_counts.get(price, 0) > 0 or
@@ -2626,6 +2749,31 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
             elif self.grid_type == "long":
                 if price <= current_price:
+                    # 【重要】當價格低於網格下限時，不應該嘗試掛 Bid 單
+                    if price_out_of_range_low:
+                        logger.debug(
+                            "當前價格 %.4f 低於網格下限 %.4f，跳過網格點位 %.4f 的開多單",
+                            current_price, self.grid_lower_price, price
+                        )
+                        skipped_out_of_range += 1
+                        continue
+                    
+                    # 檢查是否之前因價格偏移被取消過
+                    if price in self.price_offset_cancelled:
+                        price_distance = current_price - price
+                        # 只有當價格距離足夠大時才清除記錄並允許補單
+                        if price_distance >= min_price_buffer:
+                            logger.info("網格點位 %.4f 價格距離已足夠 (%.4f >= %.4f)，清除價格偏移記錄", 
+                                       price, price_distance, min_price_buffer)
+                            del self.price_offset_cancelled[price]
+                        else:
+                            logger.debug(
+                                "網格點位 %.4f 之前因價格偏移被取消，當前距離不足 (%.4f < %.4f)，跳過開多單",
+                                price, price_distance, min_price_buffer
+                            )
+                            skipped_price_offset += 1
+                            continue
+                    
                     # 檢查是否已有開多單（交易所 API + 本地追蹤 + 本輪已補）
                     has_long_order = (
                         active_long_open_counts.get(price, 0) > 0 or
@@ -2655,6 +2803,31 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
             elif self.grid_type == "short":
                 if price >= current_price:
+                    # 【重要】當價格超出網格上限時，不應該嘗試掛 Ask 單
+                    if price_out_of_range_high:
+                        logger.debug(
+                            "當前價格 %.4f 超出網格上限 %.4f，跳過網格點位 %.4f 的開空單",
+                            current_price, self.grid_upper_price, price
+                        )
+                        skipped_out_of_range += 1
+                        continue
+                    
+                    # 檢查是否之前因價格偏移被取消過
+                    if price in self.price_offset_cancelled:
+                        price_distance = price - current_price
+                        # 只有當價格距離足夠大時才清除記錄並允許補單
+                        if price_distance >= min_price_buffer:
+                            logger.info("網格點位 %.4f 價格距離已足夠 (%.4f >= %.4f)，清除價格偏移記錄", 
+                                       price, price_distance, min_price_buffer)
+                            del self.price_offset_cancelled[price]
+                        else:
+                            logger.debug(
+                                "網格點位 %.4f 之前因價格偏移被取消，當前距離不足 (%.4f < %.4f)，跳過開空單",
+                                price, price_distance, min_price_buffer
+                            )
+                            skipped_price_offset += 1
+                            continue
+                    
                     # 檢查是否已有開空單（交易所 API + 本地追蹤 + 本輪已補）
                     has_short_order = (
                         active_short_open_counts.get(price, 0) > 0 or
@@ -2683,15 +2856,23 @@ class PerpGridStrategy(PerpetualMarketMaker):
                         filled_prices_this_round.add(price)
 
         # 補單摘要
-        if refilled > 0 or skipped_locked > 0:
+        if refilled > 0 or skipped_locked > 0 or skipped_price_offset > 0 or skipped_out_of_range > 0:
             # 統計當前開倉單總數
             total_open_orders = sum(len(orders) for orders in self.open_long_orders.values())
             total_open_orders += sum(len(orders) for orders in self.open_short_orders.values())
             
-            logger.info(
-                "補單檢查完成: 補充了 %d 個訂單, 跳過 %d 個已鎖定點位, 跳過 %d 個已有訂單點位 (總開倉單: %d, 總平倉單: %d)",
-                refilled, skipped_locked, skipped_has_order, total_open_orders, len(self.close_orders)
-            )
+            log_parts = [f"補單檢查完成: 補充了 {refilled} 個訂單"]
+            if skipped_locked > 0:
+                log_parts.append(f"跳過 {skipped_locked} 個已鎖定點位")
+            if skipped_has_order > 0:
+                log_parts.append(f"跳過 {skipped_has_order} 個已有訂單點位")
+            if skipped_price_offset > 0:
+                log_parts.append(f"跳過 {skipped_price_offset} 個價格偏移點位")
+            if skipped_out_of_range > 0:
+                log_parts.append(f"跳過 {skipped_out_of_range} 個超出範圍點位 (當前價格: {current_price:.4f}, 範圍: {self.grid_lower_price:.4f}~{self.grid_upper_price:.4f})")
+            log_parts.append(f"(總開倉單: {total_open_orders}, 總平倉單: {len(self.close_orders)})")
+            
+            logger.info(", ".join(log_parts))
 
     def calculate_prices(self) -> Tuple[List[float], List[float]]:
         """計算價格 - 網格策略不需要這個方法"""
