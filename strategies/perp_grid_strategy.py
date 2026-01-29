@@ -712,10 +712,15 @@ class PerpGridStrategy(PerpetualMarketMaker):
     
     # ==================== 新的核心方法：基於倉位變化的檢測 ====================
     
-    def _check_position_changes(self) -> None:
+    def _check_position_changes(self, open_orders: Optional[List] = None, 
+                                  fill_history: Optional[List] = None) -> None:
         """檢查倉位變化，補強訂單狀態檢測的遺漏
         
         通過比對當前持倉與上次快照，檢測是否有未被訂單狀態捕獲的成交
+        
+        Args:
+            open_orders: 預先獲取的訂單列表（避免重複請求）
+            fill_history: 預先獲取的成交歷史（避免重複請求）
         """
         current_position = self.get_net_position()
         
@@ -734,8 +739,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 self.last_position_snapshot, current_position, position_change
             )
             
-            # 同步訂單狀態，確保沒有遺漏的成交
-            self._sync_orders_with_exchange()
+            # 同步訂單狀態，確保沒有遺漏的成交（使用預先獲取的數據）
+            self._sync_orders_with_exchange(open_orders, fill_history)
             
             # 更新快照
             self.last_position_snapshot = current_position
@@ -745,19 +750,25 @@ class PerpGridStrategy(PerpetualMarketMaker):
             logger.debug("倉位小幅變化: %.4f -> %.4f", self.last_position_snapshot, current_position)
             self.last_position_snapshot = current_position
     
-    def _sync_orders_with_exchange(self) -> None:
-        """與交易所同步訂單狀態，找出已成交但未被檢測到的訂單"""
-        try:
-            open_orders_response = self.client.get_open_orders(self.symbol)
-        except Exception as exc:
-            logger.error("同步訂單狀態失敗: %s", exc)
-            return
+    def _sync_orders_with_exchange(self, open_orders: Optional[List] = None,
+                                    fill_history: Optional[List] = None) -> None:
+        """與交易所同步訂單狀態，找出已成交但未被檢測到的訂單
         
-        if not open_orders_response.success:
-            logger.error("同步訂單狀態返回錯誤: %s", open_orders_response.error_message)
-            return
-        
-        open_orders = open_orders_response.data or []
+        Args:
+            open_orders: 預先獲取的訂單列表（如果未提供則會請求）
+            fill_history: 預先獲取的成交歷史（如果未提供則會請求）
+        """
+        # 如果未提供訂單列表，則請求
+        if open_orders is None:
+            try:
+                open_orders_response = self.client.get_open_orders(self.symbol)
+                if not open_orders_response.success:
+                    logger.error("同步訂單狀態返回錯誤: %s", open_orders_response.error_message)
+                    return
+                open_orders = open_orders_response.data or []
+            except Exception as exc:
+                logger.error("同步訂單狀態失敗: %s", exc)
+                return
 
         exchange_order_ids = self._update_aliases_from_open_orders(open_orders)
         
@@ -802,7 +813,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 # 訂單不在活躍列表中，需要驗證是否真的成交
                 # Paradex 和 Aster 會取消/過期 reduceOnly 訂單，需要驗證
                 if self.exchange in ('paradex', 'aster'):
-                    if self._verify_order_filled(order_id, close_info):
+                    if self._verify_order_filled(order_id, close_info, fill_history):
                         filled_close_orders.append((order_id, close_info))
                     else:
                         cancelled_close_orders.append((order_id, close_info))
@@ -857,7 +868,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 # 加入待重試隊列
                 self._add_pending_close_order(open_price, quantity, position_type, retry_count + 1)
 
-    def _detect_filled_orders_from_exchange(self, open_orders: List) -> None:
+    def _detect_filled_orders_from_exchange(self, open_orders: List, 
+                                             fill_history: Optional[List] = None) -> None:
         """從交易所訂單列表檢測已成交訂單
         
         比對本地追蹤的訂單和交易所實際存在的訂單，
@@ -865,6 +877,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         
         Args:
             open_orders: 交易所返回的活躍訂單列表
+            fill_history: 預先獲取的成交歷史（用於驗證訂單是否真的成交）
         """
         # 收集交易所上實際存在的訂單 ID
         exchange_order_ids: Set[str] = set()
@@ -891,6 +904,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         
         # 檢查開倉單是否已成交
         filled_open_orders = []
+        cancelled_open_orders = []  # 被取消的開倉單
         
         for price, orders in list(self.open_long_orders.items()):
             for order_id, order_info in list(orders.items()):
@@ -902,10 +916,14 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     if normalized_alias:
                         tracked_aliases.add(normalized_alias)
                 
-                # 如果訂單的所有 ID 都不在交易所上，說明已成交
+                # 如果訂單的所有 ID 都不在交易所上，可能已成交或被取消
                 if exchange_order_ids.isdisjoint(tracked_aliases):
                     qty = order_info.get('quantity', self.order_quantity) if isinstance(order_info, dict) else self.order_quantity
-                    filled_open_orders.append((order_id, price, 'Bid', qty))
+                    # 需要驗證成交歷史，確認是真的成交還是被取消
+                    if self._verify_open_order_filled(order_id, order_info, fill_history):
+                        filled_open_orders.append((order_id, price, 'Bid', qty))
+                    else:
+                        cancelled_open_orders.append((order_id, price, 'Bid', qty))
         
         for price, orders in list(self.open_short_orders.items()):
             for order_id, order_info in list(orders.items()):
@@ -918,7 +936,11 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 
                 if exchange_order_ids.isdisjoint(tracked_aliases):
                     qty = order_info.get('quantity', self.order_quantity) if isinstance(order_info, dict) else self.order_quantity
-                    filled_open_orders.append((order_id, price, 'Ask', qty))
+                    # 需要驗證成交歷史，確認是真的成交還是被取消
+                    if self._verify_open_order_filled(order_id, order_info, fill_history):
+                        filled_open_orders.append((order_id, price, 'Ask', qty))
+                    else:
+                        cancelled_open_orders.append((order_id, price, 'Ask', qty))
         
         # 檢查平倉單是否已成交
         filled_close_orders = []
@@ -945,8 +967,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 # - Aster: reduceOnly 訂單在沒有足夠倉位時會被標記為「過期」而非成交
                 # 這些交易所需要通過成交歷史驗證訂單是否真的成交了
                 if self.exchange in ('paradex', 'aster'):
-                    # 通過成交歷史驗證
-                    if self._verify_order_filled(order_id, close_info):
+                    # 通過成交歷史驗證（使用預先獲取的成交歷史）
+                    if self._verify_order_filled(order_id, close_info, fill_history):
                         filled_close_orders.append((order_id, close_info))
                     else:
                         # 訂單被取消/過期，需要重新掛單
@@ -954,6 +976,14 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 else:
                     # 其他交易所：直接當作成交處理（因為它們不會靜默取消訂單）
                     filled_close_orders.append((order_id, close_info))
+        
+        # 處理被取消的開倉單（從追蹤中移除，讓補單邏輯重新掛單）
+        if cancelled_open_orders:
+            logger.warning("檢測到 %d 個開倉單被取消（價格偏移或其他原因）", len(cancelled_open_orders))
+            for order_id, price, side, quantity in cancelled_open_orders:
+                logger.info("移除被取消的開倉單: ID=%s, 價格=%.4f, 方向=%s", order_id, price, side)
+                # 從本地追蹤中移除
+                self._remove_open_order(order_id, price, side)
         
         # 處理已成交的開倉單
         if filled_open_orders:
@@ -1006,24 +1036,28 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 # 加入待重試隊列
                 self._add_pending_close_order(open_price, quantity, position_type, retry_count + 1)
 
-    def _verify_order_filled(self, order_id: str, close_info: dict) -> bool:
+    def _verify_order_filled(self, order_id: str, close_info: dict, 
+                              fill_history: Optional[List] = None) -> bool:
         """驗證訂單是否真的成交了（通過成交歷史確認）
         
         Args:
             order_id: 訂單 ID
             close_info: 平倉單信息
+            fill_history: 預先獲取的成交歷史（如果未提供則會請求）
             
         Returns:
             True 如果訂單確實成交了，False 如果訂單被取消
         """
         try:
-            # 獲取最近的成交歷史
-            fills_response = self.client.get_fill_history(self.symbol, limit=50)
-            if not fills_response.success:
-                logger.warning("無法獲取成交歷史，假設訂單已成交: %s", fills_response.error_message)
-                return True  # 無法確認時，假設成交（保守處理）
-            
-            fills = fills_response.data or []
+            # 如果未提供成交歷史，則請求
+            if fill_history is None:
+                fills_response = self.client.get_fill_history(self.symbol, limit=50)
+                if not fills_response.success:
+                    logger.warning("無法獲取成交歷史，假設訂單已成交: %s", fills_response.error_message)
+                    return True  # 無法確認時，假設成交（保守處理）
+                fills = fills_response.data or []
+            else:
+                fills = fill_history
             
             # 收集該訂單的所有別名
             order_aliases = {self._normalize_order_id(order_id)}
@@ -1048,6 +1082,57 @@ class PerpGridStrategy(PerpetualMarketMaker):
             
         except Exception as e:
             logger.error("驗證訂單成交狀態時發生錯誤: %s，假設已成交", e)
+            return True  # 發生錯誤時，假設成交（保守處理）
+
+    def _verify_open_order_filled(self, order_id: str, order_info: dict, 
+                                   fill_history: Optional[List] = None) -> bool:
+        """驗證開倉單是否真的成交了（通過成交歷史確認）
+        
+        這個方法專門用於開倉單的成交驗證，防止因價格偏移等原因被取消的訂單被誤判為成交。
+        
+        Args:
+            order_id: 訂單 ID
+            order_info: 開倉單信息 (包含 quantity, side, alias_ids 等)
+            fill_history: 預先獲取的成交歷史（如果未提供則會請求）
+            
+        Returns:
+            True 如果訂單確實成交了，False 如果訂單被取消
+        """
+        try:
+            # 如果未提供成交歷史，則請求
+            if fill_history is None:
+                fills_response = self.client.get_fill_history(self.symbol, limit=50)
+                if not fills_response.success:
+                    logger.warning("無法獲取成交歷史，假設開倉單已成交: %s", fills_response.error_message)
+                    return True  # 無法確認時，假設成交（保守處理）
+                fills = fills_response.data or []
+            else:
+                fills = fill_history
+            
+            # 收集該訂單的所有別名
+            order_aliases = {self._normalize_order_id(order_id)}
+            if isinstance(order_info, dict):
+                alias_set = order_info.get('alias_ids', set())
+                for alias in alias_set:
+                    normalized = self._normalize_order_id(alias)
+                    if normalized:
+                        order_aliases.add(normalized)
+            
+            # 在成交歷史中查找匹配的訂單
+            for fill in fills:
+                fill_order_id = getattr(fill, 'order_id', None)
+                if fill_order_id:
+                    normalized_fill_id = self._normalize_order_id(fill_order_id)
+                    if normalized_fill_id in order_aliases:
+                        logger.debug("在成交歷史中找到開倉單 %s 的成交記錄", order_id)
+                        return True
+            
+            # 沒有找到成交記錄，訂單可能被取消
+            logger.warning("開倉單 %s 不在活躍列表中，也沒有成交記錄，判斷為被取消", order_id)
+            return False
+            
+        except Exception as e:
+            logger.error("驗證開倉單成交狀態時發生錯誤: %s，假設已成交", e)
             return True  # 發生錯誤時，假設成交（保守處理）
 
     def _initialize_grid_prices(self) -> bool:
@@ -1880,18 +1965,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
             if net_position >= quantity * 0.9:
                 reduce_only = True
                 logger.debug("持倉足夠，使用 reduce_only 掛平倉單")
-            elif self.grid_type == "long" and net_position <= 0:
-                # 做多網格且無多頭倉位，直接跳過
+            elif net_position <= 0:
+                # 無多頭倉位，直接跳過平多單（可能倉位已在其他網格點位被平掉）
                 logger.warning(
-                    "做多網格：多頭持倉不足且已無倉位 (當前: %.4f)，跳過平多單",
+                    "無多頭持倉 (當前: %.4f)，跳過平多單（倉位可能已在其他網格點位被平掉）",
                     net_position
                 )
                 return True
             else:
-                # 對於中性網格或仍有部分倉位的情況，使用 reduce_only=True
+                # 有部分倉位但不足，使用 reduce_only=True
                 reduce_only = True
                 logger.warning(
-                    "多頭持倉不足 (當前: %.4f, 需要: %.4f)，仍使用 reduce_only=True 以避免開新倉",
+                    "多頭持倉不足 (當前: %.4f, 需要: %.4f)，使用 reduce_only=True",
                     net_position, quantity
                 )
 
@@ -2032,18 +2117,18 @@ class PerpGridStrategy(PerpetualMarketMaker):
             if net_position <= -quantity * 0.9:
                 reduce_only = True
                 logger.debug("持倉足夠，使用 reduce_only 掛平倉單")
-            elif self.grid_type == "short" and net_position >= 0:
-                # 做空網格且無空頭倉位，直接跳過
+            elif net_position >= 0:
+                # 無空頭倉位，直接跳過平空單（可能倉位已在其他網格點位被平掉）
                 logger.warning(
-                    "做空網格：空頭持倉不足且已無倉位 (當前: %.4f)，跳過平空單",
+                    "無空頭持倉 (當前: %.4f)，跳過平空單（倉位可能已在其他網格點位被平掉）",
                     net_position
                 )
                 return True
             else:
-                # 對於中性網格或仍有部分倉位的情況，使用 reduce_only=True
+                # 有部分倉位但不足，使用 reduce_only=True
                 reduce_only = True
                 logger.warning(
-                    "空頭持倉不足 (當前: %.4f, 需要: %.4f)，仍使用 reduce_only=True",
+                    "空頭持倉不足 (當前: %.4f, 需要: %.4f)，使用 reduce_only=True",
                     net_position, -quantity
                 )
 
@@ -2268,9 +2353,17 @@ class PerpGridStrategy(PerpetualMarketMaker):
             logger.info("倉位同步檢查完成，無異常")
 
     def place_limit_orders(self) -> None:
-        """放置限價單 - 覆蓋父類方法（增加倉位變化檢測）"""
+        """放置限價單 - 覆蓋父類方法（增加倉位變化檢測）
+        
+        優化後的執行流程：
+        1. 清除上一輪追蹤的訂單 ID
+        2. 獲取成交歷史和訂單列表（一次性獲取，避免重複請求）
+        3. 先處理成交歷史，確認哪些訂單真正成交了
+        4. 再用訂單列表補充檢測遺漏的成交
+        5. 最後再補充缺失的網格訂單
+        """
         # 【重要】每次迭代開始時清除上一輪記錄的訂單 ID
-        # 必須在所有成交檢測之前清除，包括 _check_position_changes 中的 _sync_orders_with_exchange
+        # 必須在所有成交檢測之前清除
         self._orders_placed_this_iteration.clear()
         
         if not self.grid_initialized:
@@ -2283,17 +2376,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
             # 記錄初始同步時間
             self._last_position_sync_time = time.time()
         else:
-            # 【新增】倉位變化檢測，補強訂單狀態的遺漏
-            self._check_position_changes()
-            
-            # 【新增】重試失敗的平倉單
-            self._retry_pending_close_orders()
-            
-            # 【新增】週期性倉位同步檢查
-            self._periodic_position_sync()
-            
-            # 一次性獲取所有必要數據，然後檢查並補充缺失的網格訂單
+            # ========== 階段 1: 一次性獲取所有必要數據 ==========
             current_price = self.get_current_price()
+            
+            # 獲取當前訂單列表
             try:
                 open_orders_response = self.client.get_open_orders(self.symbol)
                 if open_orders_response.success:
@@ -2304,9 +2390,42 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 logger.warning("無法獲取現有訂單: %s", exc)
                 open_orders = []
             
-            # 傳遞數據給 _refill_grid_orders，避免重複請求
+            # 對於需要驗證成交的交易所，預先獲取成交歷史
+            fill_history = []
+            if self.exchange in ('paradex', 'aster'):
+                try:
+                    fills_response = self.client.get_fill_history(self.symbol, limit=50)
+                    if fills_response.success:
+                        fill_history = fills_response.data or []
+                except Exception as exc:
+                    logger.warning("無法獲取成交歷史: %s", exc)
+            
+            # ========== 階段 2: 基於成交歷史和訂單列表的成交檢測 ==========
+            # 傳遞預先獲取的數據，避免重複請求
+            self._detect_filled_orders_from_exchange(open_orders, fill_history)
+            
+            # ========== 階段 3: 倉位變化檢測（補強遺漏） ==========
+            self._check_position_changes(open_orders, fill_history)
+            
+            # ========== 階段 4: 重試失敗的平倉單 ==========
+            self._retry_pending_close_orders()
+            
+            # ========== 階段 5: 週期性倉位同步檢查 ==========
+            self._periodic_position_sync()
+            
+            # ========== 階段 6: 補充缺失的網格訂單 ==========
+            # 重新獲取訂單列表（因為之前的處理可能已經掛了新訂單）
+            try:
+                open_orders_response = self.client.get_open_orders(self.symbol)
+                if open_orders_response.success:
+                    open_orders = open_orders_response.data if isinstance(open_orders_response.data, list) else []
+            except Exception as exc:
+                logger.warning("補單前無法獲取訂單列表: %s", exc)
+            
+            # 傳遞數據給 _refill_grid_orders，此時不再重複檢測成交
             self._refill_grid_orders(current_price=current_price, 
-                                    open_orders=open_orders)
+                                    open_orders=open_orders,
+                                    skip_fill_detection=True)
 
     def _reconcile_grid_orders_from_list(self, open_orders: List) -> Dict[str, Dict[float, int]]:
         """統計目前在交易所實際掛出的開倉單數量，從訂單列表中統計。
@@ -2365,7 +2484,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
         }
 
     def _refill_grid_orders(self, current_price: Optional[float] = None,
-                            open_orders: Optional[List] = None) -> None:
+                            open_orders: Optional[List] = None,
+                            skip_fill_detection: bool = False) -> None:
         """補充缺失的網格訂單（使用新的狀態管理系統）
         
         確認邏輯：
@@ -2376,6 +2496,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         Args:
             current_price: 當前價格（如果未提供則會請求一次）
             open_orders: 現有訂單列表（如果未提供則會請求一次）
+            skip_fill_detection: 是否跳過成交檢測（如果之前已經執行過則設為 True）
         """
         # 只在未提供數據時才請求
         if current_price is None:
@@ -2394,8 +2515,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
                 logger.warning("無法獲取現有訂單: %s", exc)
                 return
 
-        # 【重要】在補單之前，先檢測已成交的訂單
-        self._detect_filled_orders_from_exchange(open_orders)
+        # 只在未跳過時執行成交檢測（避免重複檢測）
+        if not skip_fill_detection:
+            self._detect_filled_orders_from_exchange(open_orders)
 
         # 統計開倉單（不包括平倉單）
         active_counts = self._reconcile_grid_orders_from_list(open_orders)
