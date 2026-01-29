@@ -1911,7 +1911,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     "做多網格：當前無多頭倉位 (淨倉位: %.4f)，跳過平多單 (開倉價格: %.4f, 數量: %.4f)",
                     net_position, open_price, quantity
                 )
-                # 從待重試隊列中移除此訂單（如果存在）
+                # 重置該網格點位的持倉狀態，讓補單邏輯可以重新掛開倉單
+                if open_price in self.grid_level_states:
+                    self.grid_level_states[open_price]['open_position'] = 0.0
+                    logger.info("重置網格點位 %.4f 的持倉狀態", open_price)
                 return True  # 返回 True 表示不需要再重試
         
         # 找到下一個更高的網格點位
@@ -1971,6 +1974,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     "無多頭持倉 (當前: %.4f)，跳過平多單（倉位可能已在其他網格點位被平掉）",
                     net_position
                 )
+                # 重置該網格點位的持倉狀態，讓補單邏輯可以重新掛開倉單
+                if open_price in self.grid_level_states:
+                    self.grid_level_states[open_price]['open_position'] = 0.0
+                    logger.info("重置網格點位 %.4f 的持倉狀態", open_price)
                 return True
             else:
                 # 有部分倉位但不足，使用 reduce_only=True
@@ -2064,7 +2071,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     "做空網格：當前無空頭倉位 (淨倉位: %.4f)，跳過平空單 (開倉價格: %.4f, 數量: %.4f)",
                     net_position, open_price, quantity
                 )
-                # 從待重試隊列中移除此訂單（如果存在）
+                # 重置該網格點位的持倉狀態，讓補單邏輯可以重新掛開倉單
+                if open_price in self.grid_level_states:
+                    self.grid_level_states[open_price]['open_position'] = 0.0
+                    logger.info("重置網格點位 %.4f 的持倉狀態", open_price)
                 return True  # 返回 True 表示不需要再重試
         
         # 找到下一個更低的網格點位
@@ -2123,6 +2133,10 @@ class PerpGridStrategy(PerpetualMarketMaker):
                     "無空頭持倉 (當前: %.4f)，跳過平空單（倉位可能已在其他網格點位被平掉）",
                     net_position
                 )
+                # 重置該網格點位的持倉狀態，讓補單邏輯可以重新掛開倉單
+                if open_price in self.grid_level_states:
+                    self.grid_level_states[open_price]['open_position'] = 0.0
+                    logger.info("重置網格點位 %.4f 的持倉狀態", open_price)
                 return True
             else:
                 # 有部分倉位但不足，使用 reduce_only=True
