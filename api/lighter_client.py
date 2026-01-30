@@ -1144,6 +1144,11 @@ class LighterClient(BaseExchangeClient):
         return ApiResponse.ok(order_book, raw=payload)
 
     def get_ticker(self, symbol: str) -> ApiResponse:
+        """獲取交易對的即時行情資訊
+        
+        【重要】使用買一/賣一的中間價作為最新價格，確保價格是即時更新的。
+        緩存的 last_price 只用於回退，因為緩存數據只在程式啟動時獲取一次，之後不會更新。
+        """
         book_response = self.get_order_book(symbol, limit=50)
         if not book_response.success:
             return book_response
@@ -1155,10 +1160,21 @@ class LighterClient(BaseExchangeClient):
         best_bid = bids[0].price if bids else None
         best_ask = asks[0].price if asks else None
 
-        market = self._lookup_market(symbol)
-        last_price = market.get("last_price") if market else None
-        if last_price is None:
-            last_price = best_bid or best_ask
+        # 【修正】優先使用買一/賣一的中間價作為最新價格（即時價格）
+        # 緩存的 last_price 只在啟動時獲取一次，之後不會更新，會導致價格判斷錯誤
+        if best_bid is not None and best_ask is not None:
+            # 有買賣盤時使用中間價
+            last_price = (best_bid + best_ask) / 2
+        elif best_bid is not None:
+            # 只有買盤時使用買一價
+            last_price = best_bid
+        elif best_ask is not None:
+            # 只有賣盤時使用賣一價
+            last_price = best_ask
+        else:
+            # 完全沒有盤口數據時，回退使用緩存的價格
+            market = self._lookup_market(symbol)
+            last_price = market.get("last_price") if market else None
 
         ticker = TickerInfo(
             symbol=symbol,
@@ -1214,7 +1230,7 @@ class LighterClient(BaseExchangeClient):
             account_value=total_asset_value,
             raw=account,
         )
-        return ApiResponse.ok(collateral_info, raw=account)
+        return ApiResponse.ok([collateral_info], raw=account)
 
     def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> ApiResponse:
         """批量執行訂單
@@ -2052,14 +2068,52 @@ class LighterClient(BaseExchangeClient):
         payload: Dict[str, Any],
         symbol: str,
     ) -> Dict[str, Any]:
-        order_id = payload.get("order_id") or payload.get("order_index")
-        client_order_index = payload.get("client_order_index") or payload.get("order_index")
+        order_index = (
+            payload.get("order_index")
+            if payload.get("order_index") is not None
+            else payload.get("orderIndex")
+            if payload.get("orderIndex") is not None
+            else payload.get("i")
+        )
+        client_order_index = (
+            payload.get("client_order_index")
+            if payload.get("client_order_index") is not None
+            else payload.get("clientOrderIndex")
+            if payload.get("clientOrderIndex") is not None
+            else payload.get("u")
+        )
+        order_id = (
+            payload.get("order_id")
+            or payload.get("orderId")
+            or payload.get("id")
+            or order_index
+        )
+        client_order_id = (
+            payload.get("client_order_id")
+            or payload.get("clientOrderId")
+            or client_order_index
+        )
+
         price = self._safe_float(payload.get("price"))
+        if price is None:
+            price = self._safe_float(payload.get("p"))
+        if price is None:
+            price = self._safe_float(payload.get("base_price") or payload.get("basePrice"))
+
         remaining = self._safe_float(payload.get("remaining_base_amount"))
+        if remaining is None:
+            remaining = self._safe_float(payload.get("rs"))
+
         initial = self._safe_float(payload.get("initial_base_amount"))
+        if initial is None:
+            initial = self._safe_float(payload.get("is"))
+
+        filled_raw = self._safe_float(payload.get("filled_base_amount"))
+        if filled_raw is None:
+            filled_raw = self._safe_float(payload.get("fb"))
 
         if remaining is None and initial is not None:
-            remaining = max(initial - (self._safe_float(payload.get("filled_base_amount")) or 0.0), 0.0)
+            remaining = max(initial - (filled_raw or 0.0), 0.0)
         if initial is None:
             initial = remaining
 
@@ -2068,28 +2122,64 @@ class LighterClient(BaseExchangeClient):
             filled_amount = max(initial - remaining, 0.0)
 
         trigger_price = self._safe_float(payload.get("trigger_price"))
+        if trigger_price is None:
+            trigger_price = self._safe_float(payload.get("tp"))
+
+        is_ask_raw = payload.get("is_ask")
+        if is_ask_raw is None:
+            is_ask_raw = payload.get("ia")
+        side_raw = payload.get("side")
+        is_ask = self._as_bool(is_ask_raw)
+        if is_ask is None and side_raw is not None:
+            side_upper = str(side_raw).strip().upper()
+            if side_upper in ("ASK", "SELL", "SELL_SHORT", "SHORT"):
+                is_ask = True
+            elif side_upper in ("BID", "BUY", "BUY_LONG", "LONG"):
+                is_ask = False
+        side = "Ask" if is_ask is True else "Bid" if is_ask is False else side_raw
+
+        status = payload.get("status") if payload.get("status") is not None else payload.get("st")
+        order_type = payload.get("type") if payload.get("type") is not None else payload.get("ot")
+        time_in_force = (
+            payload.get("time_in_force")
+            if payload.get("time_in_force") is not None
+            else payload.get("f")
+        )
+        reduce_only_raw = payload.get("reduce_only")
+        if reduce_only_raw is None:
+            reduce_only_raw = payload.get("ro")
+        reduce_only = self._as_bool(reduce_only_raw)
+        order_expiry = (
+            payload.get("order_expiry")
+            if payload.get("order_expiry") is not None
+            else payload.get("e")
+        )
+        timestamp = payload.get("timestamp") if payload.get("timestamp") is not None else payload.get("t")
+        tx_hash = payload.get("tx_hash") if payload.get("tx_hash") is not None else payload.get("txHash")
 
         return {
             "id": str(order_id) if order_id is not None else None,
             "orderId": str(order_id) if order_id is not None else None,
-            "orderIndex": payload.get("order_index"),
-            "clientOrderId": str(client_order_index) if client_order_index is not None else None,
+            "orderIndex": order_index,
+            "order_index": order_index,
+            "clientOrderId": str(client_order_id) if client_order_id is not None else None,
             "clientOrderIndex": client_order_index,
+            "client_order_index": client_order_index,
             "symbol": symbol,
             "price": price,
             "quantity": remaining,
             "remainingQuantity": remaining,
             "origQty": initial,
             "executedQty": filled_amount,
-            "status": payload.get("status"),
-            "side": "Ask" if payload.get("is_ask") else "Bid",
-            "type": payload.get("type"),
-            "timeInForce": payload.get("time_in_force"),
-            "reduceOnly": payload.get("reduce_only"),
+            "status": status,
+            "side": side,
+            "type": order_type,
+            "timeInForce": time_in_force,
+            "reduceOnly": reduce_only,
             "triggerPrice": trigger_price,
-            "orderExpiry": payload.get("order_expiry"),
-            "timestamp": payload.get("timestamp"),
-            "txHash": payload.get("tx_hash"),
+            "orderExpiry": order_expiry,
+            "timestamp": timestamp,
+            "txHash": tx_hash,
         }
 
     def _normalize_trade_record(self, trade: Dict[str, Any]) -> Dict[str, Any]:

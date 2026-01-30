@@ -1,4 +1,28 @@
 # Changelog
+## [2.6.0] - 2026-01-30
+
+### 新增
+- **PARADEX 精度處理優化**：改進浮點數精度計算，確保訂單金額精確性
+
+### 修復
+- **LighterClient 即時行情獲取**：增強即時行情獲取邏輯，優化價格判斷及取消訂單處理
+- **網格點位持倉狀態重置**：支持補單邏輯，解決網格策略補單失敗問題
+- **倉位變化檢測增強**：優化訂單狀態同步邏輯，確保倉位與訂單一致
+- **Aster 網格訂單調整**：移除網格訂單減倉功能，簡化交易邏輯
+- **Lighter 成交問題**：修正 Lighter 交易所成交確認異常
+- **Paradex 成交訂單問題**：修復 Paradex 訂單狀態同步
+- **Aster 網格減倉掛單**：解決減倉掛單邏輯錯誤
+- **倉位處理邏輯增強**：確保正確解析 PositionInfo 並處理不同方向
+
+### 優化
+- **程式碼結構重構**：大規模重構以提升程式碼可讀性與維護性
+- **API 層效能優化**：改進 API 調用效率
+
+### 變更涉及檔案
+- `api/`: `__init__.py`, `apex_client.py`, `base_client.py`, `example_exchange_client.py`, `lighter_client.py`, `paradex_client.py`
+- `strategies/`: `grid_strategy.py`, `maker_taker_hedge.py`, `market_maker.py`, `perp_grid_strategy.py`, `perp_market_maker.py`
+- `cli/commands.py`, `utils/helpers.py`
+
 ## [2.5.0] - 2026-01-21
 
 ### 新增

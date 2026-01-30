@@ -417,6 +417,25 @@ python run.py --exchange apex --market-type perp --symbol BTCUSDT --strategy per
 
 ---
 
+## 文獻資料
+
+- **Backpack API**
+https://docs.backpack.exchange/
+
+- **Aster API**
+https://github.com/asterdex/api-docs/blob/master/aster-finance-futures-api-v3.md
+
+- **Paradex API**
+https://docs.paradex.trade/api/general-information/rate-limits/api
+
+- **Lighter API**
+https://apidocs.lighter.xyz/docs/get-started-for-programmers-1
+
+- **Apex API**
+https://api-docs.omni.apex.exchange/#introduction
+
+---
+
 ## 貢獻者
 
 感謝以下貢獻者對本項目的支持：
@@ -437,3 +456,9 @@ python run.py --exchange apex --market-type perp --symbol BTCUSDT --strategy per
     </td>
   </tr>
 </table>
+
+---
+
+## 授權
+
+本專案基於 [MIT License](LICENSE) 授權發布。

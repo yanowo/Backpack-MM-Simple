@@ -346,69 +346,13 @@ class GridStrategy(MarketMaker):
         # 批量下單
         placed_orders = 0
         if orders_to_place:
-            # 檢查客户端是否支持批量下單
-            has_batch_method = hasattr(self.client, 'execute_order_batch') and callable(getattr(self.client, 'execute_order_batch'))
+            logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
+            batch_response = self.client.execute_order_batch(orders_to_place)
 
-            if has_batch_method:
-                logger.info("準備批量下單: %d 個訂單", len(orders_to_place))
-                batch_response = self.client.execute_order_batch(orders_to_place)
-
-                if not batch_response.success:
-                    logger.error("批量下單失敗: %s", batch_response.error_message)
-                    # 如果批量下單失敗，回退到逐個下單
-                    logger.info("回退到逐個下單模式...")
-                    for i, order in enumerate(orders_to_place):
-                        price = float(order['price'])
-                        side = order['side']
-                        order_response = self.client.execute_order(order)
-
-                        if order_response.success:
-                            order_result = order_response.data
-                            order_id = order_result.order_id
-                            self._record_grid_order(order_id, price, side, self.order_quantity)
-                            placed_orders += 1
-                            logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
-                        else:
-                            logger.error("掛單失敗: %s", order_response.error_message)
-                else:
-                    # 批量下單成功，記錄所有訂單
-                    batch_result = batch_response.data
-                    if batch_result and batch_result.results:
-                        # 創建原始訂單的映射表 (price, side) -> order
-                        order_map = {}
-                        for order in orders_to_place:
-                            key = (float(order['price']), order['side'])
-                            order_map[key] = order
-
-                        for order_result in batch_result.results:
-                            if order_result.order_id:
-                                order_id = order_result.order_id
-                                # 從返回結果中獲取價格和方向
-                                result_price = float(order_result.price) if order_result.price else 0
-                                result_side = order_result.side or ''
-
-                                # 查找對應的原始訂單
-                                key = (result_price, result_side)
-                                if key in order_map:
-                                    original_order = order_map[key]
-                                    price = float(original_order['price'])
-                                    side = original_order['side']
-                                    quantity = float(original_order['quantity'])
-                                    self._record_grid_order(order_id, price, side, quantity)
-                                    placed_orders += 1
-                                else:
-                                    # 如果無法匹配，使用返回結果中的數據
-                                    logger.warning("無法匹配訂單 %s，使用返回數據", order_id)
-                                    price = result_price
-                                    side = result_side
-                                    # OrderResult 使用 size 而不是 quantity
-                                    quantity = float(order_result.size) if order_result.size else self.order_quantity
-                                    self._record_grid_order(order_id, price, side, quantity)
-                                    placed_orders += 1
-                        logger.info("批量下單成功: %d 個訂單", placed_orders)
-            else:
-                # 客户端不支持批量下單，直接逐個下單
-                logger.info("該交易所不支持批量下單，使用逐個下單模式: %d 個訂單", len(orders_to_place))
+            if not batch_response.success:
+                logger.error("批量下單失敗: %s", batch_response.error_message)
+                # 如果批量下單失敗，回退到逐個下單
+                logger.info("回退到逐個下單模式...")
                 for i, order in enumerate(orders_to_place):
                     price = float(order['price'])
                     side = order['side']
@@ -422,6 +366,58 @@ class GridStrategy(MarketMaker):
                         logger.info("成功掛單 %d/%d: %s %.4f", i+1, len(orders_to_place), side, price)
                     else:
                         logger.error("掛單失敗: %s", order_response.error_message)
+            else:
+                # 批量下單成功，記錄所有訂單
+                batch_result = batch_response.data
+                if not batch_result or not hasattr(batch_result, 'orders'):
+                    logger.error("批量下單回傳格式異常，無法解析訂單結果")
+                else:
+                    orders_list = batch_result.orders or []
+                    errors = [e for e in (batch_result.errors or []) if e is not None]
+
+                    if errors:
+                        logger.warning("批量下單部分失敗，錯誤數量: %d", len(errors))
+                        for error_info in errors[:3]:
+                            logger.warning("錯誤詳情: %s", error_info)
+
+                    if orders_list:
+                        # 創建原始訂單的映射表 (price, side) -> order
+                        order_map = {}
+                        for order in orders_to_place:
+                            key = (float(order['price']), order['side'])
+                            order_map[key] = order
+
+                        for order_result in orders_list:
+                            order_id = order_result.order_id
+                            if not order_id:
+                                logger.warning("批量下單返回缺少訂單ID，忽略該筆")
+                                continue
+
+                            result_price = float(order_result.price or 0)
+                            result_side = order_result.side or ''
+                            normalized_side = result_side
+                            if isinstance(result_side, str):
+                                if result_side.upper() in ('BUY', 'BID', 'LONG'):
+                                    normalized_side = 'Bid'
+                                elif result_side.upper() in ('SELL', 'ASK', 'SHORT'):
+                                    normalized_side = 'Ask'
+
+                            key = (result_price, normalized_side)
+                            if key in order_map:
+                                original_order = order_map[key]
+                                price = float(original_order['price'])
+                                side = original_order['side']
+                                quantity = float(original_order['quantity'])
+                            else:
+                                logger.warning("無法匹配訂單 %s，使用返回數據", order_id)
+                                price = result_price
+                                side = normalized_side
+                                quantity = float(order_result.size or order_result.filled_size or self.order_quantity)
+
+                            self._record_grid_order(order_id, price, side, quantity)
+                            placed_orders += 1
+
+                        logger.info("批量下單成功: %d 個訂單", placed_orders)
 
         logger.info("網格初始化完成: 共放置 %d 個訂單", placed_orders)
         self.grid_initialized = True
@@ -768,7 +764,7 @@ class GridStrategy(MarketMaker):
         """統計實際掛單數量（按價格/方向），從訂單列表中統計。
         
         Args:
-            open_orders: 現有訂單列表 (List[OrderInfo] 或 List[Dict])
+            open_orders: 現有訂單列表 (List[OrderInfo])
             
         Returns:
             {'Bid': {price: count}, 'Ask': {price: count}}
@@ -780,15 +776,11 @@ class GridStrategy(MarketMaker):
             return {'Bid': {}, 'Ask': {}}
 
         for order in open_orders:
-            # 支援 OrderInfo 或 Dict
-            if hasattr(order, 'side'):
-                side_raw = str(order.side or '').upper()
-                price_raw = order.price
-            elif isinstance(order, dict):
-                side_raw = str(order.get('side', '')).upper()
-                price_raw = order.get('price')
-            else:
+            if not hasattr(order, 'side'):
                 continue
+
+            side_raw = str(order.side or '').upper()
+            price_raw = order.price
 
             if price_raw is None:
                 continue

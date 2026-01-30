@@ -371,7 +371,7 @@ class BaseExchangeClient(ABC):
         """獲取抵押品餘額
         
         Returns:
-            ApiResponse with data: List[BalanceInfo]
+            ApiResponse with data: List[CollateralInfo]
         """
         return ApiResponse(success=False, error_message="Not implemented")
 
@@ -382,6 +382,53 @@ class BaseExchangeClient(ABC):
             ApiResponse with data: OrderResult
         """
         return ApiResponse(success=False, error_message="Not implemented")
+
+    def execute_order_batch(self, orders_details: List[Dict[str, Any]]) -> ApiResponse:
+        """批量執行訂單（默認逐筆執行）
+
+        Returns:
+            ApiResponse with data: BatchOrderResult
+        """
+        if not orders_details:
+            return ApiResponse.error("訂單列表為空")
+
+        order_results: List[OrderResult] = []
+        errors: List[str] = []
+        raw_results: List[Any] = []
+
+        for order in orders_details:
+            try:
+                response = self.execute_order(order)
+            except Exception as exc:
+                errors.append(str(exc))
+                continue
+
+            if response and response.success:
+                order_data = response.data
+                if isinstance(order_data, OrderResult):
+                    order_results.append(order_data)
+                else:
+                    order_results.append(OrderResult(success=True, raw=order_data))
+                if response.raw is not None:
+                    raw_results.append(response.raw)
+            else:
+                error_message = response.error_message if response else "Unknown error"
+                errors.append(str(error_message))
+                if response and response.raw is not None:
+                    raw_results.append(response.raw)
+
+        batch_result = BatchOrderResult(
+            success=len(order_results) > 0,
+            orders=order_results,
+            failed_count=len(errors),
+            errors=errors,
+            raw=raw_results or None,
+        )
+
+        if order_results:
+            return ApiResponse.ok(batch_result, raw=batch_result.raw)
+
+        return ApiResponse.error("批量下單全部失敗", raw={"errors": errors, "results": raw_results})
 
     def get_open_orders(self, symbol: Optional[str] = None) -> ApiResponse:
         """獲取開放訂單
