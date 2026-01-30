@@ -720,6 +720,10 @@ class BaseWebSocketClient(ABC):
         """訂閱行情數據"""
         channel = self._get_ticker_channel()
         return self._subscribe(channel, is_private=False)
+
+    def subscribe_bookTicker(self) -> bool:
+        """訂閱最優價格（兼容舊調用）"""
+        return self.subscribe_ticker()
     
     def subscribe_depth(self) -> bool:
         """訂閱深度數據"""
@@ -729,7 +733,24 @@ class BaseWebSocketClient(ABC):
     def subscribe_order_updates(self) -> bool:
         """訂閱訂單更新"""
         channel = self._get_order_update_channel()
+        if not channel:
+            self._logger.info("此交易所未提供可用的訂單更新頻道，跳過訂閱")
+            return False
         return self._subscribe(channel, is_private=True)
+
+    # ==================== 頻道名稱（公開方法） ====================
+
+    def get_ticker_channel(self) -> str:
+        """獲取行情頻道名稱（公開）"""
+        return self._get_ticker_channel()
+
+    def get_depth_channel(self) -> str:
+        """獲取深度頻道名稱（公開）"""
+        return self._get_depth_channel()
+
+    def get_order_update_channel(self) -> str:
+        """獲取訂單更新頻道名稱（公開）"""
+        return self._get_order_update_channel()
     
     def _subscribe(self, channel: str, is_private: bool = False) -> bool:
         """
