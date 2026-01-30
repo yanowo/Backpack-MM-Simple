@@ -16,6 +16,14 @@
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
+## API 文檔參考
+
+- Backpack API: https://docs.backpack.exchange/
+- Aster API: https://github.com/asterdex/api-docs/blob/master/aster-finance-futures-api-v3.md
+- Paradex API: https://docs.paradex.trade/api/general-information/rate-limits/api
+- Lighter API: https://apidocs.lighter.xyz/docs/get-started-for-programmers-1
+- Apex API: https://api-docs.omni.apex.exchange/#introduction
+
 ## 功能特點
 
 - **Web 控制枱**：直觀的圖形化界面，實時監控交易狀態和策略表現
