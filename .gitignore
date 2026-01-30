@@ -4,3 +4,4 @@ __pycache__/
 .env
 *.db
 .claude/settings.local.json
+CLAUDE.md
