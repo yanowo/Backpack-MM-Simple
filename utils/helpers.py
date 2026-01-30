@@ -2,8 +2,18 @@
 輔助函數模塊
 """
 import math
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 import numpy as np
 from typing import List, Union, Optional
+
+
+def _quantize_decimal(value: float, precision: int) -> Decimal:
+    """Quantize value to the given precision using floor rounding."""
+    if precision <= 0:
+        quant = Decimal("1")
+    else:
+        quant = Decimal("1").scaleb(-precision)
+    return Decimal(str(value)).quantize(quant, rounding=ROUND_FLOOR)
 
 def round_to_precision(value: float, precision: int) -> float:
     """
@@ -16,8 +26,11 @@ def round_to_precision(value: float, precision: int) -> float:
     Returns:
         向下取整的數值
     """
-    factor = 10 ** precision
-    return math.floor(value * factor) / factor
+    try:
+        return float(_quantize_decimal(value, precision))
+    except (InvalidOperation, ValueError, TypeError):
+        factor = 10 ** precision
+        return math.floor(value * factor) / factor
 
 
 def format_quantity(value: float, precision: int) -> str:
@@ -33,9 +46,14 @@ def format_quantity(value: float, precision: int) -> str:
     """
     if value == 0:
         return "0"
-    # 使用 f-string 格式化，確保不使用科學計數法
-    format_str = f"{{:.{precision}f}}"
-    return format_str.format(value)
+    try:
+        quantized = _quantize_decimal(value, precision)
+        format_str = f"{{0:.{precision}f}}"
+        return format_str.format(quantized)
+    except (InvalidOperation, ValueError, TypeError):
+        # 使用 f-string 格式化，確保不使用科學計數法
+        format_str = f"{{:.{precision}f}}"
+        return format_str.format(value)
 
 def round_to_tick_size(price: float, tick_size: float) -> float:
     """

@@ -584,6 +584,19 @@ class ParadexClient(BaseExchangeClient):
             self._last_market_fetch = now
             logger.info(f"已緩存 {len(self._market_info_cache)} 個市場信息")
 
+    @staticmethod
+    def _decimal_places_from_value(value: Any) -> Optional[int]:
+        """從數值字串推導小數位數（用於步長）"""
+        if value is None:
+            return None
+        try:
+            normalized = format(Decimal(str(value)), "f")
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+        if "." in normalized:
+            return len(normalized.split(".")[1].rstrip("0"))
+        return 0
+
     def get_balance(self) -> ApiResponse:
         """獲取賬户餘額
         
@@ -1150,6 +1163,19 @@ class ParadexClient(BaseExchangeClient):
         markets_raw = result.get("results", []) if isinstance(result, dict) else []
         markets: List[MarketInfo] = []
         for market in markets_raw:
+            size_increment = (
+                market.get("order_size_increment")
+                or market.get("size_increment")
+                or market.get("step_size")
+            )
+            base_precision = self._decimal_places_from_value(size_increment)
+            if base_precision is None:
+                base_precision = self._decimal_places_from_value(market.get("min_order_size")) or 8
+
+            tick_size_raw = market.get("price_tick_size") or market.get("tick_size")
+            quote_precision = self._decimal_places_from_value(tick_size_raw) or 2
+            tick_size = str(tick_size_raw) if tick_size_raw is not None else "0.1"
+            step_size = str(size_increment) if size_increment is not None else str(market.get("min_order_size", 0))
             markets.append(MarketInfo(
                 symbol=market.get("symbol"),
                 base_asset=market.get("base_currency"),
@@ -1157,9 +1183,10 @@ class ParadexClient(BaseExchangeClient):
                 market_type="PERP",
                 status=market.get("status"),
                 min_order_size=str(market.get("min_order_size", 0)),
-                tick_size=str(market.get("price_tick_size") or market.get("tick_size", "0.1")),
-                base_precision=market.get("base_precision"),
-                quote_precision=market.get("quote_precision"),
+                tick_size=tick_size,
+                step_size=step_size,
+                base_precision=base_precision,
+                quote_precision=quote_precision,
                 raw=market,
             ))
         return ApiResponse.ok(markets, raw=result)
@@ -1267,16 +1294,24 @@ class ParadexClient(BaseExchangeClient):
             logger.error(f"未找到交易對 {symbol} 的信息")
             return ApiResponse.error(f"未找到交易對 {symbol} 的信息")
 
-        # 獲取 tick_size，Paradex 使用 price_tick_size 字段
         tick_size_raw = market_info.get("price_tick_size") or market_info.get("tick_size")
-        if tick_size_raw:
+        if tick_size_raw is not None:
             tick_size = str(tick_size_raw)
         else:
-            # 默認值 0.1（適用於大多數 Paradex 合約）
             logger.warning(f"市場 {symbol} 未返回 tick_size，使用默認值 0.1")
             tick_size = "0.1"
 
-        logger.debug(f"市場 {symbol} 的 tick_size: {tick_size}")
+        size_increment = (
+            market_info.get("order_size_increment")
+            or market_info.get("size_increment")
+            or market_info.get("step_size")
+        )
+        base_precision = self._decimal_places_from_value(size_increment)
+        if base_precision is None:
+            base_precision = self._decimal_places_from_value(market_info.get("min_order_size")) or 8
+
+        quote_precision = self._decimal_places_from_value(tick_size_raw) or 2
+        step_size = str(size_increment) if size_increment is not None else str(market_info.get("min_order_size", 0))
 
         # 返回標準化格式
         market_limits = MarketInfo(
@@ -1287,8 +1322,9 @@ class ParadexClient(BaseExchangeClient):
             status=market_info.get("status", "ACTIVE"),
             min_order_size=str(market_info.get("min_order_size", 0)),
             tick_size=tick_size,
-            base_precision=market_info.get("base_precision", 8),
-            quote_precision=market_info.get("quote_precision", 2),
+            step_size=step_size,
+            base_precision=base_precision,
+            quote_precision=quote_precision,
             raw=market_info,
         )
         return ApiResponse.ok(market_limits, raw=market_info)
