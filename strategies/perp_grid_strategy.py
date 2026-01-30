@@ -1527,11 +1527,8 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
     def _use_reduce_only_for_close(self) -> bool:
         """判斷是否應使用 reduce_only 掛平倉單。"""
-        if self.grid_type == "neutral":
-            return False
-        if self.exchange in ('apex', 'aster'):
-            return False
-        return True
+        # 中性網格一律不使用 reduce_only；單邊網格一律使用
+        return self.grid_type != "neutral"
 
     def _requires_fill_verification(self) -> bool:
         """需要用成交歷史驗證訂單是否成交的交易所。"""
