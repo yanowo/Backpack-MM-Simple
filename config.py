@@ -61,7 +61,7 @@ PARADEX_JWT_REFRESH_BUFFER = int(os.getenv('PARADEX_JWT_REFRESH_BUFFER', '120'))
 
 # ==================== Lighter 交易所配置 ====================
 
-LIGHTER_WS_URL = os.getenv('LIGHTER_WS_URL', 'wss://api.lighter.xyz/ws')
+LIGHTER_WS_URL = os.getenv('LIGHTER_WS_URL', 'wss://mainnet.zklighter.elliot.ai/stream')
 
 # ==================== Apex 交易所配置 ====================
 
