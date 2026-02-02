@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import time
+import os
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -31,14 +32,21 @@ class ApexWebSocket(BaseWebSocketClient):
         self,
         api_key: Optional[str] = None,
         secret_key: Optional[str] = None,
+        passphrase: Optional[str] = None,
         symbol: str = "BTCUSDT",
+        enable_private: bool = False,
         on_message_callback: Optional[Callable[[str, Any], None]] = None,
         auto_reconnect: bool = True,
         proxy: Optional[str] = None,
         ws_url: Optional[str] = None,
     ) -> None:
-        self.api_key = api_key
-        self.secret_key = secret_key
+        self.api_key = api_key or os.getenv("APEX_API_KEY")
+        self.secret_key = secret_key or os.getenv("APEX_SECRET_KEY")
+        self.passphrase = passphrase or os.getenv("APEX_PASSPHRASE")
+        self.enable_private = enable_private
+        self._private_channel = "ws_zk_accounts_v3"
+        self._private_notify_channel = "ws_notify_v1"
+        self._private_ws_base = "wss://quote.omni.apex.exchange/realtime_private"
         self._client_cache: Dict[str, ApexClient] = {}
 
         config = WSConnectionConfig(
@@ -63,8 +71,22 @@ class ApexWebSocket(BaseWebSocketClient):
         return "Apex"
 
     def _create_auth_message(self) -> Optional[Dict[str, Any]]:
-        # Public WS 不需要認證
-        return None
+        if not self.enable_private or not self.api_key or not self.secret_key:
+            return None
+        timestamp = str(int(time.time() * 1000))
+        client = self._get_rest_client()
+        signature = client._sign_request("/ws/accounts", "GET", timestamp, {}, include_data=False)
+        login_payload = {
+            "type": "login",
+            "topics": [self._private_notify_channel, self._private_channel],
+            "httpMethod": "GET",
+            "requestPath": "/ws/accounts",
+            "apiKey": self.api_key,
+            "timestamp": timestamp,
+            "signature": signature,
+            "passphrase": self.passphrase or "",
+        }
+        return {"op": "login", "args": [json.dumps(login_payload)]}
 
     def _create_subscribe_message(self, channel: str, is_private: bool = False) -> Dict[str, Any]:
         return {"op": "subscribe", "args": [channel]}
@@ -78,8 +100,15 @@ class ApexWebSocket(BaseWebSocketClient):
         except json.JSONDecodeError:
             return None
 
-        if isinstance(payload, dict) and payload.get("topic") and "data" in payload:
-            return payload.get("topic"), payload.get("data")
+        if isinstance(payload, dict) and payload.get("op") in {"ping", "pong", "auth", "login"}:
+            return payload.get("op"), payload
+
+        if isinstance(payload, dict) and payload.get("topic") and ("data" in payload or "contents" in payload):
+            topic = payload.get("topic")
+            if topic in {self._private_channel, self._private_notify_channel}:
+                # 保留完整 payload，方便私有資料解析（訂單/成交可能深層嵌套）
+                return "private.accounts", payload
+            return topic, payload.get("data") if "data" in payload else payload.get("contents")
         return None
 
     def _get_ticker_channel(self) -> str:
@@ -91,7 +120,7 @@ class ApexWebSocket(BaseWebSocketClient):
         return f"orderBook25.H.{self.symbol}"
 
     def _get_order_update_channel(self) -> str:
-        return ""
+        return "private" if self.enable_private else ""
 
     def _handle_ticker_message(self, data: Any) -> Optional[WSTickerData]:
         if data is None:
@@ -149,21 +178,144 @@ class ApexWebSocket(BaseWebSocketClient):
         )
 
     def _handle_order_update_message(self, data: Any) -> Optional[WSOrderUpdateData]:
-        return None
+        if not isinstance(data, dict):
+            return None
+        if "data" in data and isinstance(data.get("data"), dict):
+            data = data.get("data")  # 公共/私有回傳 data
+        if "contents" in data and isinstance(data.get("contents"), dict):
+            data = data.get("contents")  # 私有頻道 delta 結構
+        orders = (
+            data.get("orders")
+            or data.get("order")
+            or data.get("orderUpdates")
+            or data.get("orderList")
+            or []
+        )
+        if isinstance(orders, dict):
+            orders = [orders]
+        if not orders:
+            return None
+
+        record = orders[0]
+        order_id = str(record.get("orderId") or record.get("id") or "")
+        side = "BUY" if str(record.get("side", "")).lower() in {"buy", "bid"} else "SELL"
+        status_raw = str(record.get("status") or "").upper()
+        status_map = {
+            "NEW": "NEW",
+            "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+            "FILLED": "FILLED",
+            "CANCELED": "CANCELLED",
+            "CANCELLED": "CANCELLED",
+            "EXPIRED": "CANCELLED",
+        }
+
+        return WSOrderUpdateData(
+            symbol=record.get("symbol") or self.symbol,
+            order_id=order_id,
+            side=side,
+            order_type=str(record.get("type") or record.get("orderType") or "LIMIT").upper(),
+            status=status_map.get(status_raw, status_raw or "NEW"),
+            price=self._to_decimal(record.get("price")),
+            quantity=self._to_decimal(record.get("size") or record.get("quantity")),
+            filled_quantity=self._to_decimal(record.get("filledSize") or record.get("filledQty")),
+            remaining_quantity=self._to_decimal(record.get("remainingSize") or record.get("remainingQty")),
+            timestamp=self._to_int(record.get("updatedTime") or record.get("timestamp")),
+            source="ws",
+        )
 
     def _handle_fill_message(self, data: Any) -> Optional[WSFillData]:
-        return None
+        if not isinstance(data, dict):
+            return None
+        if "data" in data and isinstance(data.get("data"), dict):
+            data = data.get("data")  # 公共/私有回傳 data
+        if "contents" in data and isinstance(data.get("contents"), dict):
+            data = data.get("contents")  # 私有頻道 delta 結構
+        fills = (
+            data.get("fills")
+            or data.get("trades")
+            or data.get("trade")
+            or data.get("fill")
+            or data.get("tradeList")
+            or []
+        )
+        if isinstance(fills, dict):
+            fills = [fills]
+        if not fills:
+            return None
+
+        record = fills[0]
+        side = "BUY" if str(record.get("side", "")).lower() in {"buy", "bid"} else "SELL"
+        price = self._to_decimal(record.get("price"))
+        qty = self._to_decimal(record.get("size") or record.get("quantity"))
+        if price <= 0 or qty <= 0:
+            return None
+
+        return WSFillData(
+            symbol=record.get("symbol") or self.symbol,
+            fill_id=str(record.get("tradeId") or record.get("id") or ""),
+            order_id=str(record.get("orderId") or ""),
+            side=side,
+            price=price,
+            quantity=qty,
+            fee=self._to_decimal(record.get("fee") or record.get("commission")),
+            fee_asset=record.get("feeAsset") or record.get("commissionAsset"),
+            is_maker=bool(record.get("maker", True)),
+            timestamp=self._to_int(record.get("timestamp") or record.get("time")),
+            source="ws",
+        )
 
     def _get_rest_client(self) -> ApexClient:
         cache_key = "apex_client"
         if cache_key not in self._client_cache:
-            self._client_cache[cache_key] = ApexClient({})
+            self._client_cache[cache_key] = ApexClient({
+                "api_key": self.api_key,
+                "secret_key": self.secret_key,
+                "passphrase": self.passphrase,
+            })
         return self._client_cache[cache_key]
 
     def _handle_ping(self, message: Any) -> Optional[Dict[str, Any]]:
         if isinstance(message, dict) and message.get("op") == "ping":
             return {"op": "pong", "args": message.get("args", [])}
         return None
+
+    def subscribe_order_updates(self) -> bool:
+        if self.enable_private:
+            return True
+        return super().subscribe_order_updates()
+
+    def connect(self):
+        if self.enable_private:
+            self.config.ws_url = self._build_private_ws_url()
+        super().connect()
+
+    def _on_open(self, ws_app):
+        super()._on_open(ws_app)
+        if not self.enable_private:
+            return
+        auth_message = self._create_auth_message()
+        if auth_message and self.ws:
+            self.ws.send(json.dumps(auth_message))
+            self.ws.send(json.dumps({"op": "subscribe", "args": [self._private_channel]}))
+            self.ws.send(json.dumps({"op": "subscribe", "args": [self._private_notify_channel]}))
+
+    def _build_private_ws_url(self) -> str:
+        timestamp = int(time.time() * 1000)
+        return f"{self._private_ws_base}?v=2&timestamp={timestamp}"
+
+    def _to_decimal(self, value: Any) -> Decimal:
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return Decimal("0")
+
+    def _to_int(self, value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
 
     # ==================== 內部工具 ====================
 

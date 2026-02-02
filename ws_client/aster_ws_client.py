@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import time
+import threading
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -32,6 +33,7 @@ class AsterWebSocket(BaseWebSocketClient):
         api_key: Optional[str] = None,
         secret_key: Optional[str] = None,
         symbol: str = "BTCUSDT",
+        enable_private: bool = False,
         on_message_callback: Optional[Callable[[str, Any], None]] = None,
         auto_reconnect: bool = True,
         proxy: Optional[str] = None,
@@ -40,6 +42,11 @@ class AsterWebSocket(BaseWebSocketClient):
         self.api_key = api_key or ASTER_API_KEY
         self.secret_key = secret_key or ASTER_SECRET_KEY
         self._client_cache: Dict[str, AsterClient] = {}
+        self.enable_private = enable_private
+        self._listen_key: Optional[str] = None
+        self._listen_key_lock = threading.Lock()
+        self._listen_key_thread: Optional[threading.Thread] = None
+        self._listen_key_keepalive_interval = 30 * 60
 
         config = WSConnectionConfig(
             ws_url=ws_url or ASTER_WS_URL,
@@ -63,7 +70,7 @@ class AsterWebSocket(BaseWebSocketClient):
         return "Aster"
 
     def _create_auth_message(self) -> Optional[Dict[str, Any]]:
-        # Aster 公共頻道不需要認證；私有頻道需 listenKey，暫不實作
+        # Aster 私有頻道使用 listenKey
         return None
 
     def _create_subscribe_message(self, channel: str, is_private: bool = False) -> Dict[str, Any]:
@@ -86,6 +93,9 @@ class AsterWebSocket(BaseWebSocketClient):
         except json.JSONDecodeError:
             return None
 
+        if isinstance(payload, dict) and payload.get("e") == "ORDER_TRADE_UPDATE":
+            return "private.orders", payload
+
         if isinstance(payload, dict) and "stream" in payload and "data" in payload:
             return payload["stream"], payload["data"]
         return None
@@ -99,8 +109,7 @@ class AsterWebSocket(BaseWebSocketClient):
         return f"{self.symbol.lower()}@depth@100ms"
 
     def _get_order_update_channel(self) -> str:
-        # 需要 listenKey 才能訂閱，先禁用
-        return ""
+        return "private" if self.enable_private else ""
 
     def _handle_ticker_message(self, data: Any) -> Optional[WSTickerData]:
         if not isinstance(data, dict):
@@ -176,10 +185,61 @@ class AsterWebSocket(BaseWebSocketClient):
         )
 
     def _handle_order_update_message(self, data: Any) -> Optional[WSOrderUpdateData]:
-        return None
+        if not isinstance(data, dict):
+            return None
+        order = data.get("o")
+        if not isinstance(order, dict):
+            return None
+
+        side = "BUY" if str(order.get("S", "")).upper() == "BUY" else "SELL"
+        status_raw = str(order.get("X", "")).upper()
+        status_map = {
+            "NEW": "NEW",
+            "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+            "FILLED": "FILLED",
+            "CANCELED": "CANCELLED",
+            "CANCELLED": "CANCELLED",
+            "EXPIRED": "CANCELLED",
+        }
+
+        return WSOrderUpdateData(
+            symbol=order.get("s") or self.symbol,
+            order_id=str(order.get("i") or ""),
+            side=side,
+            order_type=str(order.get("o") or "LIMIT").upper(),
+            status=status_map.get(status_raw, status_raw or "NEW"),
+            price=self._to_decimal(order.get("p")),
+            quantity=self._to_decimal(order.get("q")),
+            filled_quantity=self._to_decimal(order.get("z")),
+            remaining_quantity=self._to_decimal(order.get("q")) - self._to_decimal(order.get("z")),
+            timestamp=self._to_int(order.get("T") or data.get("T")),
+            source="ws",
+        )
 
     def _handle_fill_message(self, data: Any) -> Optional[WSFillData]:
-        return None
+        if not isinstance(data, dict):
+            return None
+        order = data.get("o")
+        if not isinstance(order, dict):
+            return None
+        last_qty = self._to_decimal(order.get("l"))
+        if last_qty <= Decimal("0"):
+            return None
+
+        side = "BUY" if str(order.get("S", "")).upper() == "BUY" else "SELL"
+        return WSFillData(
+            symbol=order.get("s") or self.symbol,
+            fill_id=str(order.get("t") or ""),
+            order_id=str(order.get("i") or ""),
+            side=side,
+            price=self._to_decimal(order.get("L")),
+            quantity=last_qty,
+            fee=self._to_decimal(order.get("n")),
+            fee_asset=order.get("N"),
+            is_maker=bool(order.get("m", True)),
+            timestamp=self._to_int(order.get("T") or data.get("T")),
+            source="ws",
+        )
 
     def _get_rest_client(self) -> AsterClient:
         cache_key = "aster_client"
@@ -189,3 +249,62 @@ class AsterWebSocket(BaseWebSocketClient):
                 "secret_key": self.secret_key,
             })
         return self._client_cache[cache_key]
+
+    def connect(self):
+        if self.enable_private:
+            self._refresh_listen_key()
+            if self._listen_key:
+                self.config.ws_url = f"wss://fstream.asterdex.com/ws/{self._listen_key}"
+        super().connect()
+
+    def subscribe_order_updates(self) -> bool:
+        if self.enable_private:
+            return True
+        return super().subscribe_order_updates()
+
+    def _refresh_listen_key(self) -> None:
+        if not self.api_key:
+            return
+        client = self._get_rest_client()
+        raw = client.make_request(
+            "POST",
+            "/fapi/v1/listenKey",
+            api_key=self.api_key,
+            instruction=False,
+        )
+        if isinstance(raw, dict) and raw.get("listenKey"):
+            with self._listen_key_lock:
+                self._listen_key = raw.get("listenKey")
+        if self._listen_key and (self._listen_key_thread is None or not self._listen_key_thread.is_alive()):
+            self._listen_key_thread = threading.Thread(target=self._keepalive_listen_key, daemon=True)
+            self._listen_key_thread.start()
+
+    def _keepalive_listen_key(self) -> None:
+        while self.running and self.enable_private:
+            time.sleep(self._listen_key_keepalive_interval)
+            with self._listen_key_lock:
+                listen_key = self._listen_key
+            if not listen_key:
+                continue
+            client = self._get_rest_client()
+            client.make_request(
+                "PUT",
+                "/fapi/v1/listenKey",
+                api_key=self.api_key,
+                instruction=False,
+                params={"listenKey": listen_key},
+            )
+
+    def _to_decimal(self, value: Any) -> Decimal:
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return Decimal("0")
+
+    def _to_int(self, value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None

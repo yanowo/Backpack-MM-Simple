@@ -32,6 +32,7 @@ class ParadexWebSocket(BaseWebSocketClient):
         account_address: Optional[str] = None,
         private_key: Optional[str] = None,
         symbol: str = "BTC-USD-PERP",
+        enable_private: bool = False,
         on_message_callback: Optional[Callable[[str, Any], None]] = None,
         auto_reconnect: bool = True,
         proxy: Optional[str] = None,
@@ -39,8 +40,13 @@ class ParadexWebSocket(BaseWebSocketClient):
     ) -> None:
         self.account_address = account_address or PARADEX_ACCOUNT_ADDRESS
         self.private_key = private_key or PARADEX_PRIVATE_KEY
+        self.enable_private = enable_private
+        self._auth_request_id: Optional[int] = None
+        self._auth_completed: bool = not enable_private
+        self._private_channels: List[str] = []
         self._client_cache: Dict[str, ParadexClient] = {}
         self._price_tick: Optional[str] = None
+        self._request_id: int = int(time.time() * 1000)
 
         config = WSConnectionConfig(
             ws_url=ws_url or PARADEX_WS_URL,
@@ -64,12 +70,30 @@ class ParadexWebSocket(BaseWebSocketClient):
         return "Paradex"
 
     def _create_auth_message(self) -> Optional[Dict[str, Any]]:
-        # 如需私有頻道（下單/成交推播），需 JWT 認證；此處僅實作公共行情
-        return None
+        if not self.enable_private:
+            return None
+        try:
+            client = self._get_rest_client()
+            client._ensure_jwt_valid()
+            token = getattr(client, "_jwt_token", None)
+            if not token:
+                logger.error("Paradex JWT token 生成失敗，無法訂閱私有頻道")
+                return None
+        except Exception as exc:
+            logger.error("Paradex 生成 JWT token 失敗: %s", exc)
+            return None
+
+        self._auth_request_id = self._next_request_id()
+        return {
+            "id": self._auth_request_id,
+            "jsonrpc": "2.0",
+            "method": "auth",
+            "params": {"bearer": token},
+        }
 
     def _create_subscribe_message(self, channel: str, is_private: bool = False) -> Dict[str, Any]:
         return {
-            "id": int(time.time() * 1000),
+            "id": self._next_request_id(),
             "jsonrpc": "2.0",
             "method": "subscribe",
             "params": {"channel": channel},
@@ -77,7 +101,7 @@ class ParadexWebSocket(BaseWebSocketClient):
 
     def _create_unsubscribe_message(self, channel: str) -> Dict[str, Any]:
         return {
-            "id": int(time.time() * 1000),
+            "id": self._next_request_id(),
             "jsonrpc": "2.0",
             "method": "unsubscribe",
             "params": {"channel": channel},
@@ -92,7 +116,14 @@ class ParadexWebSocket(BaseWebSocketClient):
         if isinstance(payload, dict):
             if payload.get("method") == "subscription":
                 params = payload.get("params", {})
-                return params.get("channel"), params.get("data")
+                channel = params.get("channel")
+                data = params.get("data")
+                if isinstance(channel, str):
+                    if channel.startswith("orders."):
+                        return "private.orders", data
+                    if channel.startswith("fills."):
+                        return "private.fills", data
+                return channel, data
         return None
 
     def _get_ticker_channel(self) -> str:
@@ -105,8 +136,17 @@ class ParadexWebSocket(BaseWebSocketClient):
         return f"order_book.{self.symbol}.{price_tick}.20.100"
 
     def _get_order_update_channel(self) -> str:
-        # 私有頻道未實作
-        return ""
+        return "private"
+
+    def subscribe_order_updates(self) -> bool:
+        """Paradex 私有訂單需先完成 auth，再訂閱 orders/fills，避免無效的 'private' 訂閱。"""
+        if not self.enable_private:
+            return False
+        if not self.connected:
+            return False
+        if self._auth_completed:
+            self._subscribe_private_channels()
+        return True
 
     def _handle_ticker_message(self, data: Any) -> Optional[WSTickerData]:
         if not isinstance(data, dict):
@@ -175,10 +215,90 @@ class ParadexWebSocket(BaseWebSocketClient):
         )
 
     def _handle_order_update_message(self, data: Any) -> Optional[WSOrderUpdateData]:
-        return None
+        if data is None:
+            return None
+        if isinstance(data, list) and data:
+            data = data[0]
+        if not isinstance(data, dict):
+            return None
+
+        order_id = str(data.get("id") or data.get("order_id") or data.get("orderId") or "")
+        if not order_id:
+            return None
+
+        side_raw = str(data.get("side") or "").upper()
+        side = "BUY" if side_raw in {"BUY", "BID"} else "SELL"
+
+        status_raw = str(data.get("status") or data.get("state") or "").upper()
+        status_map = {
+            "NEW": "NEW",
+            "OPEN": "NEW",
+            "PARTIAL": "PARTIALLY_FILLED",
+            "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+            "FILLED": "FILLED",
+            "CANCELLED": "CANCELLED",
+            "CANCELED": "CANCELLED",
+            "REJECTED": "CANCELLED",
+        }
+        status = status_map.get(status_raw, status_raw or "NEW")
+
+        price = self._to_decimal(data.get("price"))
+        quantity = self._to_decimal(data.get("size") or data.get("quantity"))
+        filled_quantity = self._to_decimal(data.get("filled_size") or data.get("filled") or data.get("filled_quantity"))
+        remaining_quantity = self._to_decimal(data.get("remaining_size") or data.get("remaining") or data.get("remaining_quantity"))
+
+        if remaining_quantity is None and quantity is not None and filled_quantity is not None:
+            remaining_quantity = max(quantity - filled_quantity, Decimal("0"))
+
+        return WSOrderUpdateData(
+            symbol=data.get("market") or self.symbol,
+            order_id=order_id,
+            side=side,
+            order_type=str(data.get("type") or data.get("orderType") or "LIMIT").upper(),
+            status=status,
+            price=price,
+            quantity=quantity,
+            filled_quantity=filled_quantity,
+            remaining_quantity=remaining_quantity,
+            timestamp=self._as_ts(data.get("timestamp") or data.get("created_at") or data.get("updated_at")),
+            source="ws",
+        )
 
     def _handle_fill_message(self, data: Any) -> Optional[WSFillData]:
-        return None
+        if data is None:
+            return None
+        if isinstance(data, list) and data:
+            data = data[0]
+        if not isinstance(data, dict):
+            return None
+
+        fill_id = str(data.get("id") or data.get("fill_id") or data.get("trade_id") or "")
+        order_id = str(data.get("order_id") or data.get("orderId") or "")
+        if not order_id:
+            return None
+
+        side_raw = str(data.get("side") or "").upper()
+        side = "BUY" if side_raw in {"BUY", "BID"} else "SELL"
+
+        price = self._to_decimal(data.get("price")) or Decimal("0")
+        quantity = self._to_decimal(data.get("size") or data.get("quantity")) or Decimal("0")
+        fee = self._to_decimal(data.get("fee") or data.get("fee_amount")) or Decimal("0")
+        fee_asset = data.get("fee_asset") or data.get("feeAsset")
+        is_maker = bool(data.get("is_maker") or data.get("maker") or data.get("liquidity") == "M")
+
+        return WSFillData(
+            symbol=data.get("market") or self.symbol,
+            fill_id=fill_id or f"{order_id}-{self._as_ts(data.get('timestamp'))}",
+            order_id=order_id,
+            side=side,
+            price=price,
+            quantity=quantity,
+            fee=fee,
+            fee_asset=fee_asset,
+            is_maker=is_maker,
+            timestamp=self._as_ts(data.get("timestamp") or data.get("created_at")),
+            source="ws",
+        )
 
     def _get_rest_client(self) -> ParadexClient:
         cache_key = "paradex_client"
@@ -190,6 +310,10 @@ class ParadexWebSocket(BaseWebSocketClient):
         return self._client_cache[cache_key]
 
     # ==================== 內部輔助 ====================
+
+    def _next_request_id(self) -> int:
+        self._request_id += 1
+        return self._request_id
 
     def _resolve_price_tick(self) -> str:
         if self._price_tick:
@@ -211,3 +335,62 @@ class ParadexWebSocket(BaseWebSocketClient):
         # fallback
         self._price_tick = "1"
         return self._price_tick
+
+    # ==================== 私有頻道支持 ====================
+
+    def _on_open(self, ws_app):
+        super()._on_open(ws_app)
+        if not self.enable_private:
+            return
+        auth_message = self._create_auth_message()
+        if auth_message and self.ws:
+            self.ws.send(json.dumps(auth_message))
+        else:
+            logger.error("Paradex 私有頻道認證消息建立失敗")
+
+    def _on_message(self, ws_app, message: str):
+        if self.enable_private:
+            try:
+                payload = json.loads(message)
+                if isinstance(payload, dict) and payload.get("id") == self._auth_request_id:
+                    if payload.get("error"):
+                        self._on_auth_failure(str(payload.get("error")))
+                    else:
+                        self._auth_completed = True
+                        self._on_auth_success()
+                        self._subscribe_private_channels()
+                    return
+            except Exception:
+                pass
+        super()._on_message(ws_app, message)
+
+    def _subscribe_private_channels(self):
+        if not self._auth_completed:
+            return
+        if not self._private_channels:
+            self._private_channels = [
+                f"orders.{self.symbol}",
+                f"fills.{self.symbol}",
+            ]
+        for channel in self._private_channels:
+            self._subscribe(channel, is_private=True)
+
+    @staticmethod
+    def _to_decimal(value: Any) -> Optional[Decimal]:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _as_ts(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return int(value)
+            return int(Decimal(str(value)))
+        except Exception:
+            return None
