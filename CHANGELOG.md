@@ -1,4 +1,37 @@
 # Changelog
+## [2.7.0] - 2026-02-02
+
+### 新增
+- **多交易所 WebSocket 客戶端**：新增 Apex、Aster、Lighter、Paradex 四個交易所的 WebSocket 客戶端實現
+  - 所有客戶端繼承自 `BaseWebSocketClient` 抽象基類，提供統一介面
+  - 支援公開頻道訂閱：行情 (Ticker)、訂單簿 (OrderBook)
+  - 支援私有頻道訂閱：訂單更新、成交回報
+- **私有頻道認證機制**：各交易所 WebSocket 客戶端支援 API Key / Secret / Passphrase 認證
+  - Apex: 基於 HMAC 簽名的 login 認證
+  - Aster: WebSocket 私有頻道認證
+  - Lighter: 原生 signer 整合認證
+  - Paradex: EIP-712 簽名認證
+- **標準化數據結構**：統一使用 `WSTickerData`、`WSOrderBookData`、`WSOrderUpdateData`、`WSFillData` 處理不同交易所訊息
+- **連線增強功能**：
+  - 支援 Proxy 代理配置
+  - 可配置的心跳 (Heartbeat) 與 Ping/Pong 機制
+  - 指數退避重連策略 (Exponential Backoff)
+
+### 修復
+- **Lighter 連線異常**：修正 `lighter_client.py` API 連線問題
+- **Paradex 連線異常**：修正 `paradex_client.py` API 連線問題
+- **WebSocket URL 配置**：修正 `config.py` 中的 WS URL 配置
+
+### 優化
+- **做市策略重構**：`market_maker.py` 重構以支援多交易所 WebSocket 整合
+- **模組導出更新**：`ws_client/__init__.py` 新增所有交易所客戶端導出
+
+### 變更涉及檔案
+- `ws_client/`: `apex_ws_client.py`, `aster_ws_client.py`, `lighter_ws_client.py`, `paradex_ws_client.py`, `base_ws_client.py`, `__init__.py`
+- `strategies/`: `market_maker.py`
+- `api/`: `lighter_client.py`, `paradex_client.py`
+- `config.py`, `README.md`
+
 ## [2.6.0] - 2026-01-30
 
 ### 新增
