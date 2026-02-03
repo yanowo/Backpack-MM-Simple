@@ -452,10 +452,17 @@ class MarketMaker:
             # 初始化訂單簿
             orderbook_initialized = self.ws.initialize_orderbook()
 
+            ticker_channel, depth_channel, _order_update_channel = self._get_ws_channel_names()
+
             # 訂閲深度流和行情數據
             if orderbook_initialized:
-                depth_subscribed = self.ws.subscribe_depth()
-                ticker_subscribed = self.ws.subscribe_bookTicker()
+                depth_subscribed = True
+                ticker_subscribed = True
+
+                if depth_channel:
+                    depth_subscribed = self.ws.subscribe_depth()
+                if ticker_channel:
+                    ticker_subscribed = self.ws.subscribe_ticker()
 
                 if depth_subscribed and ticker_subscribed:
                     logger.info("數據流訂閲成功!")
@@ -464,6 +471,55 @@ class MarketMaker:
             self.subscribe_order_updates()
         else:
             logger.info("WebSocket 初始連接未建立，使用 REST API 模式（WebSocket 將在後台自動重連）")
+
+    def _get_ws_channel_names(self) -> Tuple[str, str, str]:
+        """取得當前 WS 的行情/深度/私有頻道名稱。"""
+        if not self.ws:
+            return "", "", ""
+        ticker_channel = ""
+        depth_channel = ""
+        order_update_channel = ""
+        try:
+            ticker_channel = self.ws.get_ticker_channel() or ""
+        except Exception:
+            ticker_channel = ""
+        try:
+            depth_channel = self.ws.get_depth_channel() or ""
+        except Exception:
+            depth_channel = ""
+        try:
+            order_update_channel = self.ws.get_order_update_channel() or ""
+        except Exception:
+            order_update_channel = ""
+        return ticker_channel, depth_channel, order_update_channel
+
+    def _is_ws_channel_subscribed(self, channel: str) -> bool:
+        if not channel:
+            return True
+        if not self.ws:
+            return False
+        return channel in self.ws.subscriptions
+
+    def _has_private_subscription(self, channel: str) -> bool:
+        if not channel:
+            return True
+        if not self.ws:
+            return False
+        if channel == "private":
+            # Paradex/Lighter/Aster 等私有流不一定在 subscriptions 列表中
+            for sub in self.ws.subscriptions:
+                if sub.startswith(("orders.", "fills.", "account.", "order", "trade", "user")):
+                    return True
+            private_channels = getattr(self.ws, "_private_channels", None) or []
+            for sub in private_channels:
+                if sub in self.ws.subscriptions:
+                    return True
+            if getattr(self.ws, "_auth_completed", False) or getattr(self.ws, "_auth_sent", False):
+                return True
+            if getattr(self.ws, "enable_private", False) and self.exchange in ("aster", "lighter"):
+                return True
+            return False
+        return channel in self.ws.subscriptions
     
     def _load_trading_stats(self):
         """從數據庫加載交易統計數據"""
@@ -2344,25 +2400,22 @@ class MarketMaker:
         # 如果使用 Websea，不需要 WebSocket 數據流
         if self.ws is None:
             return
-        
-        # 構建完整的頻道名稱（包含 symbol）
-        depth_channel = f"depth.{self.symbol}"
-        ticker_channel = f"bookTicker.{self.symbol}"
-        order_update_channel = f"account.orderUpdate.{self.symbol}"
-            
+
+        ticker_channel, depth_channel, order_update_channel = self._get_ws_channel_names()
+
         # 檢查深度流訂閲
-        if depth_channel not in self.ws.subscriptions:
+        if depth_channel and not self._is_ws_channel_subscribed(depth_channel):
             logger.info("重新訂閲深度數據流...")
             self.ws.initialize_orderbook()  # 重新初始化訂單簿
             self.ws.subscribe_depth()
-        
+
         # 檢查行情數據訂閲
-        if ticker_channel not in self.ws.subscriptions:
+        if ticker_channel and not self._is_ws_channel_subscribed(ticker_channel):
             logger.info("重新訂閲行情數據...")
-            self.ws.subscribe_bookTicker()
-        
+            self.ws.subscribe_ticker()
+
         # 檢查私有訂單更新流
-        if order_update_channel not in self.ws.subscriptions:
+        if order_update_channel and not self._has_private_subscription(order_update_channel):
             logger.info("重新訂閲私有訂單更新流...")
             self.subscribe_order_updates()
 
@@ -2417,21 +2470,18 @@ class MarketMaker:
             # 先確保 WebSocket 連接可用
             connection_status = self.check_ws_connection()
             if connection_status and self.ws is not None:
-                # 構建完整的頻道名稱
-                depth_channel = f"depth.{self.symbol}"
-                ticker_channel = f"bookTicker.{self.symbol}"
-                order_update_channel = f"account.orderUpdate.{self.symbol}"
-                
+                ticker_channel, depth_channel, order_update_channel = self._get_ws_channel_names()
+
                 # 初始化訂單簿和數據流
                 if not self.ws.orderbook["bids"] and not self.ws.orderbook["asks"]:
                     self.ws.initialize_orderbook()
-                
+
                 # 檢查並確保所有數據流訂閲
-                if depth_channel not in self.ws.subscriptions:
+                if depth_channel and not self._is_ws_channel_subscribed(depth_channel):
                     self.ws.subscribe_depth()
-                if ticker_channel not in self.ws.subscriptions:
-                    self.ws.subscribe_bookTicker()
-                if order_update_channel not in self.ws.subscriptions:
+                if ticker_channel and not self._is_ws_channel_subscribed(ticker_channel):
+                    self.ws.subscribe_ticker()
+                if order_update_channel and not self._has_private_subscription(order_update_channel):
                     self.subscribe_order_updates()
             
             while time.time() - start_time < duration_seconds and not self._stop_flag:

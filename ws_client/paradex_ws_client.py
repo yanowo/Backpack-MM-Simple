@@ -284,7 +284,14 @@ class ParadexWebSocket(BaseWebSocketClient):
         quantity = self._to_decimal(data.get("size") or data.get("quantity")) or Decimal("0")
         fee = self._to_decimal(data.get("fee") or data.get("fee_amount")) or Decimal("0")
         fee_asset = data.get("fee_asset") or data.get("feeAsset")
-        is_maker = bool(data.get("is_maker") or data.get("maker") or data.get("liquidity") == "M")
+
+        liquidity = data.get("liquidity") or data.get("liquidity_type") or data.get("liquidityType")
+        maker_flag = self._parse_maker_flag(data.get("is_maker"))
+        if maker_flag is None:
+            maker_flag = self._parse_maker_flag(data.get("maker"))
+        if maker_flag is None:
+            maker_flag = self._parse_maker_flag(liquidity)
+        is_maker = bool(maker_flag) if maker_flag is not None else False
 
         return WSFillData(
             symbol=data.get("market") or self.symbol,
@@ -310,6 +317,22 @@ class ParadexWebSocket(BaseWebSocketClient):
         return self._client_cache[cache_key]
 
     # ==================== 內部輔助 ====================
+
+    @staticmethod
+    def _parse_maker_flag(value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return None
+        try:
+            text = str(value).strip().lower()
+        except Exception:
+            return None
+        if text in {"true", "1", "yes", "maker", "m"}:
+            return True
+        if text in {"false", "0", "no", "taker", "t"}:
+            return False
+        return None
 
     def _next_request_id(self) -> int:
         self._request_id += 1

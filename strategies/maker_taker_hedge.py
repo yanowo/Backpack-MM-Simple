@@ -190,15 +190,26 @@ class _MakerTakerHedgeMixin:
         side = fill_info.get("side")
         quantity = float(fill_info.get("quantity", 0) or 0)
         price = float(fill_info.get("price", 0) or 0)
+        order_id = fill_info.get("order_id")
+        client_id = fill_info.get("client_id")
         maker_flag = None
         for key in ("is_maker", "maker", "isMaker", "m"):
             if key in fill_info:
                 maker_flag = fill_info.get(key)
                 break
         is_maker = _to_bool(maker_flag)
-        if is_maker is False:
+
+        own_maker_order = self._is_own_maker_order(order_id, client_id)
+        if is_maker is False and not own_maker_order:
             logger.debug("忽略 Taker 成交事件，無需對沖")
             return
+
+        if is_maker is None and not own_maker_order:
+            logger.debug("成交未標記 Maker/Taker，且非本地掛單，跳過對沖")
+            return
+
+        if own_maker_order and is_maker is False:
+            logger.info("成交標記為 Taker，但屬於本地 Maker 掛單，仍執行對沖")
         
         if not side or quantity <= 0:
             logger.warning("成交資訊不完整，跳過對沖")
@@ -271,6 +282,25 @@ class _MakerTakerHedgeMixin:
             residual_amount,
             residual_side,
         )
+
+    def _is_own_maker_order(self, order_id: Optional[str], client_id: Optional[str]) -> bool:
+        """檢查成交是否來自本地掛出的 Maker 訂單。"""
+        if not order_id and not client_id:
+            return False
+
+        def _match(candidate: Optional[str], target: Optional[str]) -> bool:
+            if not candidate or not target:
+                return False
+            return str(candidate) == str(target)
+
+        for order in self.active_buy_orders + self.active_sell_orders:
+            if _match(getattr(order, "order_id", None), order_id) or _match(getattr(order, "order_id", None), client_id):
+                return True
+            if _match(getattr(order, "client_order_id", None), order_id) or _match(getattr(order, "client_order_id", None), client_id):
+                return True
+            if _match(getattr(order, "client_id", None), order_id) or _match(getattr(order, "client_id", None), client_id):
+                return True
+        return False
 
     def _execute_taker_hedge(
         self,
@@ -620,8 +650,10 @@ class _MakerTakerHedgeMixin:
             "timeInForce": "GTC",
         }
 
+        # Maker-Taker 策略需要確保掛單為 Maker
+        order["postOnly"] = True
+
         if getattr(self, "exchange", "backpack") == "backpack":
-            order["postOnly"] = True
             order["autoLendRedeem"] = True
             order["autoLend"] = True
 
