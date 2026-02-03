@@ -176,17 +176,48 @@ class MarketMaker:
         if exchange == 'backpack':
             self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
         elif exchange == 'aster':
-            self.ws = AsterWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+            self.ws = AsterWebSocket(
+                api_key=api_key,
+                secret_key=secret_key,
+                symbol=symbol,
+                enable_private=True,
+                on_message_callback=self.on_ws_message,
+                auto_reconnect=True,
+            )
         elif exchange == 'paradex':
-            self.ws = ParadexWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+            account_address = self.exchange_config.get('account_address') or api_key
+            private_key = self.exchange_config.get('private_key') or secret_key
+            self.ws = ParadexWebSocket(
+                account_address=account_address,
+                private_key=private_key,
+                symbol=symbol,
+                enable_private=True,
+                on_message_callback=self.on_ws_message,
+                auto_reconnect=True,
+            )
         elif exchange == 'lighter':
-            self.ws = LighterWebSocket(symbol, self.on_ws_message, auto_reconnect=True)
+            self.ws = LighterWebSocket(
+                symbol=symbol,
+                enable_private=True,
+                on_message_callback=self.on_ws_message,
+                auto_reconnect=True,
+            )
         elif exchange == 'apex':
-            self.ws = ApexWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+            passphrase = self.exchange_config.get('passphrase')
+            self.ws = ApexWebSocket(
+                api_key=api_key,
+                secret_key=secret_key,
+                passphrase=passphrase,
+                symbol=symbol,
+                enable_private=True,
+                on_message_callback=self.on_ws_message,
+                auto_reconnect=True,
+            )
         elif exchange == 'standx':
             self.ws = StandxWebSocket(
                 api_token=api_key,
                 symbol=symbol,
+                enable_private=True,
                 on_message_callback=self.on_ws_message,
                 auto_reconnect=True,
             )
@@ -201,6 +232,7 @@ class MarketMaker:
         self._processed_fill_ids: Set[str] = set()
         self._recent_fill_ids: Deque[str] = deque(maxlen=500)
         self._last_fill_timestamp: int = 0
+        self._processed_ws_order_ids: Set[str] = set()
 
         # 等待WebSocket連接建立並進行初始化訂閲
         self._initialize_websocket()
@@ -209,8 +241,8 @@ class MarketMaker:
         self._load_trading_stats()
         self._load_recent_trades()
 
-        # 針對無 WebSocket 的交易所使用 REST 成交同步
-        if self.exchange in ('aster', 'lighter', 'apex', 'standx'):
+        # 僅在沒有 WebSocket 時使用 REST 成交同步
+        if self.exchange in ('aster', 'lighter', 'apex', 'standx') and self.ws is None:
             self._bootstrap_fill_history()
         
         logger.info(f"初始化做市商: {symbol}")
@@ -873,38 +905,47 @@ class MarketMaker:
                 )
             elif self.exchange == 'aster':
                 self.ws = AsterWebSocket(
-                    self.api_key,
-                    self.secret_key,
-                    self.symbol,
-                    self.on_ws_message,
+                    api_key=self.api_key,
+                    secret_key=self.secret_key,
+                    symbol=self.symbol,
+                    enable_private=True,
+                    on_message_callback=self.on_ws_message,
                     auto_reconnect=True
                 )
             elif self.exchange == 'paradex':
+                account_address = self.exchange_config.get('account_address') or self.api_key
+                private_key = self.exchange_config.get('private_key') or self.secret_key
                 self.ws = ParadexWebSocket(
-                    self.api_key,
-                    self.secret_key,
-                    self.symbol,
-                    self.on_ws_message,
+                    account_address=account_address,
+                    private_key=private_key,
+                    symbol=self.symbol,
+                    enable_private=True,
+                    on_message_callback=self.on_ws_message,
                     auto_reconnect=True
                 )
             elif self.exchange == 'lighter':
                 self.ws = LighterWebSocket(
-                    self.symbol,
-                    self.on_ws_message,
+                    symbol=self.symbol,
+                    enable_private=True,
+                    on_message_callback=self.on_ws_message,
                     auto_reconnect=True
                 )
             elif self.exchange == 'apex':
+                passphrase = self.exchange_config.get('passphrase')
                 self.ws = ApexWebSocket(
-                    self.api_key,
-                    self.secret_key,
-                    self.symbol,
-                    self.on_ws_message,
+                    api_key=self.api_key,
+                    secret_key=self.secret_key,
+                    passphrase=passphrase,
+                    symbol=self.symbol,
+                    enable_private=True,
+                    on_message_callback=self.on_ws_message,
                     auto_reconnect=True
                 )
             elif self.exchange == 'standx':
                 self.ws = StandxWebSocket(
                     api_token=self.api_key,
                     symbol=self.symbol,
+                    enable_private=True,
                     on_message_callback=self.on_ws_message,
                     auto_reconnect=True,
                 )
@@ -941,70 +982,78 @@ class MarketMaker:
     
     def on_ws_message(self, stream, data):
         """處理WebSocket消息回調"""
-        if stream.startswith("account.orderUpdate."):
-            event_type = data.get('e')
-            
-            # 「訂單成交」事件
-            if event_type == 'orderFill':
-                try:
-                    side = data.get('S')
-                    quantity = float(data.get('l', '0'))
-                    price = float(data.get('L', '0'))
-                    order_id = data.get('i')
-                    maker = data.get('m', False)
-                    
-                    # 解析手續費信息（處理各種可能的字段名）
-                    fee = 0.0
-                    fee_asset = self.quote_asset
-                    fee_fields = [
-                        ('n', 'N'),  # n: fee amount, N: fee asset
-                        ('fee', 'fee_currency'),
-                        ('commission', 'commissionAsset')
-                    ]
-                    for amount_field, asset_field in fee_fields:
-                        fee_amount = data.get(amount_field)
-                        if fee_amount is not None:
-                            try:
-                                fee = float(fee_amount)
-                                fee_asset = data.get(asset_field, self.quote_asset)
-                                break
-                            except (TypeError, ValueError):
-                                continue
-                    
-                    trade_id = data.get('t')
-                    timestamp = data.get('T') or data.get('E')
+        if not self.ws:
+            return
 
-                    trade_id_str = str(trade_id) if trade_id is not None else None
-                    timestamp_int = None
-                    if timestamp is not None:
-                        try:
-                            timestamp_int = int(timestamp)
-                        except (TypeError, ValueError):
-                            timestamp_int = None
+        try:
+            # 使用 WS 私有頻道成交回報（所有交易所統一）
+            fill_data = None
+            if hasattr(self.ws, "_handle_fill_message"):
+                fill_data = self.ws._handle_fill_message(data)
 
-                    logger.info(
-                        f"WebSocket 成交通知: {'買' if side == 'BUY' else '賣'}單成交 "
-                        f"{quantity} @ {price}, "
-                        f"{'Maker' if maker else 'Taker'}, "
-                        f"手續費: {fee} {fee_asset}"
-                    )
+            if fill_data:
+                fill_id = getattr(fill_data, "fill_id", None)
+                timestamp = getattr(fill_data, "timestamp", None)
+                if timestamp is None:
+                    timestamp = int(time.time() * 1000)
 
-                    self._process_order_fill_event(
-                        side=side,
-                        quantity=quantity,
-                        price=price,
-                        order_id=order_id,
-                        maker=bool(maker),
-                        fee=fee,
-                        fee_asset=fee_asset,
-                        trade_id=trade_id_str,
-                        source=data.get('source', 'ws'),
-                        timestamp=timestamp_int,
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"處理訂單成交消息時出錯: {e}")
-                    traceback.print_exc()
+                if self._has_seen_fill(fill_id, timestamp):
+                    return
+
+                quantity = float(getattr(fill_data, "quantity", 0) or 0)
+                price = float(getattr(fill_data, "price", 0) or 0)
+                if quantity <= 0 or price <= 0:
+                    return
+
+                maker_flag = getattr(fill_data, "is_maker", None)
+                maker = bool(maker_flag) if maker_flag is not None else True
+
+                self._process_order_fill_event(
+                    side=getattr(fill_data, "side", ""),
+                    quantity=quantity,
+                    price=price,
+                    order_id=getattr(fill_data, "order_id", None),
+                    maker=maker,
+                    fee=float(getattr(fill_data, "fee", 0) or 0),
+                    fee_asset=getattr(fill_data, "fee_asset", None) or self.quote_asset,
+                    trade_id=fill_id,
+                    source='ws',
+                    timestamp=int(timestamp) if timestamp is not None else None,
+                )
+                return
+
+            order_update = None
+            if hasattr(self.ws, "_handle_order_update_message"):
+                order_update = self.ws._handle_order_update_message(data)
+
+            if order_update and str(order_update.status or "").upper() == "FILLED":
+                order_id = getattr(order_update, "order_id", None)
+                if order_id and order_id in self._processed_ws_order_ids:
+                    return
+                if order_id:
+                    self._processed_ws_order_ids.add(order_id)
+
+                quantity = float(getattr(order_update, "filled_quantity", None) or getattr(order_update, "quantity", 0) or 0)
+                price = float(getattr(order_update, "price", 0) or 0)
+                if quantity <= 0 or price <= 0:
+                    return
+
+                self._process_order_fill_event(
+                    side=getattr(order_update, "side", ""),
+                    quantity=quantity,
+                    price=price,
+                    order_id=order_id,
+                    maker=True,
+                    fee=0.0,
+                    fee_asset=self.quote_asset,
+                    trade_id=order_id,
+                    source='ws',
+                    timestamp=getattr(order_update, "timestamp", None),
+                )
+
+        except Exception as e:
+            logger.error(f"處理 WebSocket 成交消息時出錯: {e}")
+            traceback.print_exc()
     
     def on_order_update(self, order_data):
         """處理所有交易所的訂單更新消息 - 統一接口"""
@@ -2403,7 +2452,7 @@ class MarketMaker:
                 self.check_order_fills()
 
                 # 透過 REST API 同步最新成交
-                if self.exchange in ('aster', 'lighter', 'apex', 'standx'):
+                if self.exchange in ('aster', 'lighter', 'apex', 'standx') and self.ws is None:
                     self._sync_fill_history()
 
                 # 檢查是否需要重平衡倉位
