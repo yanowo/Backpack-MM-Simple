@@ -16,6 +16,7 @@ from ws_client import (
     ParadexWebSocket,
     LighterWebSocket,
     ApexWebSocket,
+    StandxWebSocket,
 )
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility, format_quantity
@@ -182,6 +183,13 @@ class MarketMaker:
             self.ws = LighterWebSocket(symbol, self.on_ws_message, auto_reconnect=True)
         elif exchange == 'apex':
             self.ws = ApexWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+        elif exchange == 'standx':
+            self.ws = StandxWebSocket(
+                api_token=api_key,
+                symbol=symbol,
+                on_message_callback=self.on_ws_message,
+                auto_reconnect=True,
+            )
 
         if self.ws:
             self.ws.connect()
@@ -202,7 +210,7 @@ class MarketMaker:
         self._load_recent_trades()
 
         # 針對無 WebSocket 的交易所使用 REST 成交同步
-        if self.exchange in ('aster', 'lighter', 'apex'):
+        if self.exchange in ('aster', 'lighter', 'apex', 'standx'):
             self._bootstrap_fill_history()
         
         logger.info(f"初始化做市商: {symbol}")
@@ -521,7 +529,7 @@ class MarketMaker:
 
     def _sync_fill_history(self, bootstrap: bool = False) -> None:
         """透過 REST API 同步最新成交"""
-        if self.exchange not in ('aster', 'lighter', 'apex'):
+        if self.exchange not in ('aster', 'lighter', 'apex', 'standx'):
             return
 
         exchange_label = self.exchange.capitalize()
@@ -892,6 +900,13 @@ class MarketMaker:
                     self.symbol,
                     self.on_ws_message,
                     auto_reconnect=True
+                )
+            elif self.exchange == 'standx':
+                self.ws = StandxWebSocket(
+                    api_token=self.api_key,
+                    symbol=self.symbol,
+                    on_message_callback=self.on_ws_message,
+                    auto_reconnect=True,
                 )
             else:
                 logger.info(f"{self.exchange} 交易所未配置 WebSocket 客戶端")
@@ -2388,7 +2403,7 @@ class MarketMaker:
                 self.check_order_fills()
 
                 # 透過 REST API 同步最新成交
-                if self.exchange in ('aster', 'lighter', 'apex'):
+                if self.exchange in ('aster', 'lighter', 'apex', 'standx'):
                     self._sync_fill_history()
 
                 # 檢查是否需要重平衡倉位

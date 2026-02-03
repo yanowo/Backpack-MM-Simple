@@ -1,6 +1,6 @@
 """
 配置文件 - 全局配置管理中心
-支持多交易所配置（Backpack, Aster, Paradex）
+支持多交易所配置（Backpack, Aster, Paradex, Lighter, Apex, StandX）
 """
 import os
 from dotenv import load_dotenv
@@ -66,6 +66,16 @@ LIGHTER_WS_URL = os.getenv('LIGHTER_WS_URL', 'wss://mainnet.zklighter.elliot.ai/
 # ==================== Apex 交易所配置 ====================
 
 APEX_WS_URL = os.getenv('APEX_WS_URL', 'wss://quote.omni.apex.exchange/realtime_public')
+
+# ==================== StandX 交易所配置 ====================
+
+# StandX API Token (JWT) 與簽名密鑰
+STANDX_API_TOKEN = os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT')
+STANDX_SIGNING_KEY = os.getenv('STANDX_SIGNING_KEY')
+
+# StandX API 端點
+STANDX_BASE_URL = os.getenv('STANDX_BASE_URL', 'https://perps.standx.com')
+STANDX_WS_URL = os.getenv('STANDX_WS_URL', 'wss://perps.standx.com/ws-stream/v1')
 
 # ==================== 向後兼容性（保留舊變數名） ====================
 # 注意：這些變數已被標記為 Deprecated，建議使用上面的 BACKPACK_ 前綴變數

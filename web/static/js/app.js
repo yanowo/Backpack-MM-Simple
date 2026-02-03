@@ -253,7 +253,7 @@ function adjustMarketTypeOptions() {
             perpOption.style.display = 'block';
         }
     } else {
-        // 其他交易所（Aster、Paradex、Lighter）只支持永續合約
+        // 其他交易所（Aster、Paradex、Lighter、APEX、StandX）只支持永續合約
         if (spotOption) {
             spotOption.disabled = true;
             spotOption.style.display = 'none';

@@ -36,6 +36,7 @@ from .aster_ws_client import AsterWebSocket
 from .paradex_ws_client import ParadexWebSocket
 from .lighter_ws_client import LighterWebSocket
 from .apex_ws_client import ApexWebSocket
+from .standx_ws_client import StandxWebSocket
 
 __all__ = [
     # 基類
@@ -52,4 +53,5 @@ __all__ = [
     "ParadexWebSocket",
     "LighterWebSocket",
     "ApexWebSocket",
+    "StandxWebSocket",
 ]

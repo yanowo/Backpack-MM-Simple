@@ -13,6 +13,7 @@
 | **Paradex** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.paradex.trade/r/yanowo) |
 | **Lighter** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
 | **APEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://join.omni.apex.exchange/yanowo) |
+| **StandX** | ❌ | ✅ | ✅ | ❌ | ✅ | — |
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
@@ -164,6 +165,14 @@ APEX_API_KEY=your_apex_api_key
 APEX_SECRET_KEY=your_apex_secret_key
 APEX_PASSPHRASE=your_apex_passphrase
 APEX_ZK_SEEDS=your_apex_zk_seeds
+
+# StandX Perps Exchange
+# 需先在 StandX 生成 API Token (JWT) 與 Request Sign Key
+STANDX_API_TOKEN=your_standx_api_token
+STANDX_SIGNING_KEY=your_standx_signing_key_base64
+STANDX_BASE_URL=https://perps.standx.com
+STANDX_WS_URL=wss://perps.standx.com/ws-stream/v1
+STANDX_SESSION_ID=
 
 # Optional Features
 # ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
@@ -434,6 +443,9 @@ https://apidocs.lighter.xyz/docs/get-started-for-programmers-1
 - **Apex API**
 https://api-docs.omni.apex.exchange/#introduction
 
+- **StandX API**
+https://docs.standx.com/standx-api/standx-api
+
 ### WebSocket 文獻資料
 
 - **Backpack WebSocket**
@@ -450,6 +462,9 @@ https://apidocs.lighter.xyz/docs/websocket-reference
 
 - **Apex WebSocket**
 https://api-docs.pro.apex.exchange/
+
+- **StandX WebSocket**
+https://docs.standx.com/standx-api/standx-api
 
 ---
 

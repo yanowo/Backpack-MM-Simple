@@ -12,6 +12,7 @@ from api.aster_client import AsterClient
 from api.paradex_client import ParadexClient
 from api.lighter_client import LighterClient
 from api.apex_client import ApexClient
+from api.standx_client import StandxClient
 from ws_client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -84,6 +85,14 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
         secret_candidates = [
             os.getenv("APEX_SECRET_KEY"),
         ]
+    elif exchange == "standx":
+        api_candidates = [
+            os.getenv("STANDX_API_TOKEN"),
+            os.getenv("STANDX_JWT"),
+        ]
+        secret_candidates = [
+            os.getenv("STANDX_SIGNING_KEY"),
+        ]
     else:
         api_candidates = [
             os.getenv("BACKPACK_KEY"),
@@ -103,7 +112,7 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
 def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_config=None):
     """獲取緩存的客户端實例，避免重複創建"""
     exchange = (exchange or 'backpack').lower()
-    if exchange not in ('backpack', 'aster', 'paradex', 'lighter', 'apex'):
+    if exchange not in ('backpack', 'aster', 'paradex', 'lighter', 'apex', 'standx'):
         raise ValueError(f"不支持的交易所: {exchange}")
 
     config = dict(exchange_config or {})
@@ -208,6 +217,8 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
             client_cls = ParadexClient
         elif exchange == 'lighter':
             client_cls = LighterClient
+        elif exchange == 'standx':
+            client_cls = StandxClient
         else:  # apex
             client_cls = ApexClient
         _client_cache[cache_key] = client_cls(config)
@@ -252,6 +263,11 @@ def get_balance_command(api_key, secret_key):
     if apex_api and apex_secret:
         exchanges_to_check.append(('apex', apex_api, apex_secret))
 
+    # 檢查 StandX
+    standx_api, standx_secret = _resolve_api_credentials('standx', None, None)
+    if standx_api and standx_secret:
+        exchanges_to_check.append(('standx', standx_api, standx_secret))
+
     if not exchanges_to_check:
         print("未找到任何已配置的交易所 API 密鑰")
         return
@@ -290,6 +306,12 @@ def get_balance_command(api_key, secret_key):
                     'secret_key': ex_secret_key,
                     'passphrase': os.getenv('APEX_PASSPHRASE', ''),
                     'base_url': os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange'),
+                }
+            elif exchange == 'standx':
+                exchange_config = {
+                    'api_token': ex_api_key,
+                    'signing_key': ex_secret_key,
+                    'base_url': os.getenv('STANDX_BASE_URL', 'https://perps.standx.com'),
                 }
             else:
                 exchange_config['secret_key'] = ex_secret_key
@@ -714,10 +736,10 @@ def configure_rebalance_settings():
 def run_market_maker_command(api_key, secret_key):
     """執行做市策略命令"""
     # [整合功能] 1. 增加交易所選擇
-    exchange_input = input("請選擇交易所 (backpack/aster/paradex/lighter/apex，默認 backpack): ").strip().lower()
+    exchange_input = input("請選擇交易所 (backpack/aster/paradex/lighter/apex/standx，默認 backpack): ").strip().lower()
 
     # 處理交易所選擇
-    if exchange_input in ('backpack', 'aster', 'paradex', 'lighter', 'apex', ''):
+    if exchange_input in ('backpack', 'aster', 'paradex', 'lighter', 'apex', 'standx', ''):
         exchange = exchange_input if exchange_input else 'backpack'
     else:
         print(f"警告: 不識別的交易所 '{exchange_input}'，使用默認 'backpack'")
@@ -775,6 +797,12 @@ def run_market_maker_command(api_key, secret_key):
             'secret_key': secret_key,
             'passphrase': os.getenv('APEX_PASSPHRASE', ''),
             'base_url': os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange'),
+        }
+    elif exchange == 'standx':
+        exchange_config = {
+            'api_token': api_key,
+            'signing_key': secret_key,
+            'base_url': os.getenv('STANDX_BASE_URL', 'https://perps.standx.com'),
         }
     else:
         print("錯誤：不支持的交易所。")
@@ -1520,6 +1548,7 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, enable_database=ENABLE_DATA
         'paradex': 'Paradex',
         'lighter': 'Lighter',
         'apex': 'APEX',
+        'standx': 'StandX',
     }.get(exchange.lower(), 'Backpack')
 
     while True:
