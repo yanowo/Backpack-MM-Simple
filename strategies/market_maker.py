@@ -10,7 +10,13 @@ from typing import Dict, List, Tuple, Optional, Union, Any, Set, Deque
 from concurrent.futures import ThreadPoolExecutor
 
 from api import get_client
-from ws_client import BackpackWebSocket
+from ws_client import (
+    BackpackWebSocket,
+    AsterWebSocket,
+    ParadexWebSocket,
+    LighterWebSocket,
+    ApexWebSocket,
+)
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility, format_quantity
 from logger import setup_logger
@@ -164,15 +170,21 @@ class MarketMaker:
         self._last_reconnect_attempt = 0
 
         # 添加代理參數
-        # 建立WebSocket連接（僅對Backpack）
+        # 建立 WebSocket 連接
+        self.ws = None
         if exchange == 'backpack':
             self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+        elif exchange == 'aster':
+            self.ws = AsterWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+        elif exchange == 'paradex':
+            self.ws = ParadexWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+        elif exchange == 'lighter':
+            self.ws = LighterWebSocket(symbol, self.on_ws_message, auto_reconnect=True)
+        elif exchange == 'apex':
+            self.ws = ApexWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+
+        if self.ws:
             self.ws.connect()
-        elif exchange == 'xx':
-            ...
-            self.ws = None
-        else:
-            self.ws = None  # 不使用WebSocket
         # 執行緒池用於後台任務
         self.executor = ThreadPoolExecutor(max_workers=3)
 
@@ -810,9 +822,6 @@ class MarketMaker:
     def check_ws_connection(self):
         """檢查並恢復WebSocket連接"""
         if not self.ws:
-            # aster, paradex, lighter, apex 沒有 WebSocket，直接返回 True
-            if self.exchange in ('aster', 'paradex', 'lighter', 'apex'):
-                return True
             logger.warning("WebSocket對象不存在，嘗試重新創建...")
             return self._recreate_websocket()
 
@@ -838,10 +847,6 @@ class MarketMaker:
     def _recreate_websocket(self):
         """重新創建WebSocket連接"""
         try:
-            if self.exchange == 'aster':
-                logger.info(f"{self.exchange} 交易所不使用 WebSocket")
-                return True
-            
             # 安全關閉現有連接
             if self.ws:
                 try:
@@ -851,7 +856,6 @@ class MarketMaker:
                 except Exception as e:
                     logger.debug(f"關閉現有WebSocket時的預期錯誤: {e}")
             if self.exchange == 'backpack':
-                # 創建新的連接
                 self.ws = BackpackWebSocket(
                     self.api_key,
                     self.secret_key,
@@ -859,8 +863,41 @@ class MarketMaker:
                     self.on_ws_message,
                     auto_reconnect=True
                 )
-            elif self.exchange == 'xx':
-                ...
+            elif self.exchange == 'aster':
+                self.ws = AsterWebSocket(
+                    self.api_key,
+                    self.secret_key,
+                    self.symbol,
+                    self.on_ws_message,
+                    auto_reconnect=True
+                )
+            elif self.exchange == 'paradex':
+                self.ws = ParadexWebSocket(
+                    self.api_key,
+                    self.secret_key,
+                    self.symbol,
+                    self.on_ws_message,
+                    auto_reconnect=True
+                )
+            elif self.exchange == 'lighter':
+                self.ws = LighterWebSocket(
+                    self.symbol,
+                    self.on_ws_message,
+                    auto_reconnect=True
+                )
+            elif self.exchange == 'apex':
+                self.ws = ApexWebSocket(
+                    self.api_key,
+                    self.secret_key,
+                    self.symbol,
+                    self.on_ws_message,
+                    auto_reconnect=True
+                )
+            else:
+                logger.info(f"{self.exchange} 交易所未配置 WebSocket 客戶端")
+                self.ws = None
+                return False
+
             self.ws.connect()
             
             # 等待連接建立，但不要等太久
@@ -1567,35 +1604,18 @@ class MarketMaker:
         if not self.ws or not self.ws.is_connected():
             logger.warning("無法訂閲訂單更新：WebSocket連接不可用")
             return False
-        
-        # 嘗試訂閲訂單更新流
-        stream = f"account.orderUpdate.{self.symbol}"
-        if stream not in self.ws.subscriptions:
-            retry_count = 0
-            max_retries = 3
+
+        try:
+            success = self.ws.subscribe_order_updates()
+        except Exception as e:
+            logger.error(f"訂閲訂單更新時發生異常: {e}")
             success = False
-            
-            while retry_count < max_retries and not success:
-                try:
-                    success = self.ws.private_subscribe(stream)
-                    if success:
-                        logger.info(f"成功訂閲訂單更新: {stream}")
-                        return True
-                    else:
-                        logger.warning(f"訂閲訂單更新失敗，嘗試重試... ({retry_count+1}/{max_retries})")
-                except Exception as e:
-                    logger.error(f"訂閲訂單更新時發生異常: {e}")
-                
-                retry_count += 1
-                if retry_count < max_retries:
-                    time.sleep(1)  # 重試前等待
-            
-            if not success:
-                logger.error(f"在 {max_retries} 次嘗試後仍無法訂閲訂單更新")
-                return False
+
+        if success:
+            logger.info("成功訂閲訂單更新")
         else:
-            logger.info(f"已經訂閲了訂單更新: {stream}")
-            return True
+            logger.info("訂單更新頻道不可用或訂閲失敗（可能為公共 WS 限制）")
+        return success
     
     def place_limit_orders(self):
         """下限價單（使用總餘額包含抵押品）"""

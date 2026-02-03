@@ -434,6 +434,23 @@ https://apidocs.lighter.xyz/docs/get-started-for-programmers-1
 - **Apex API**
 https://api-docs.omni.apex.exchange/#introduction
 
+### WebSocket 文獻資料
+
+- **Backpack WebSocket**
+https://docs.backpack.exchange/#tag/Streams
+
+- **Aster WebSocket**
+https://docs.asterdex.com/product/aster-pro/api/api-documentation
+
+- **Paradex WebSocket**
+https://docs.paradex.trade/websocket-reference/general-information/introduction
+
+- **Lighter WebSocket**
+https://apidocs.lighter.xyz/docs/websocket-reference
+
+- **Apex WebSocket**
+https://api-docs.pro.apex.exchange/
+
 ---
 
 ## 貢獻者

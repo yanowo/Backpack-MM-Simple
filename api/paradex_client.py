@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import os
 import base64
 import binascii
 import json
@@ -42,9 +43,13 @@ class ParadexClient(BaseExchangeClient):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         # Paradex 使用 StarkNet 認證，不需要傳統的 API Key
-        raw_private_key = config.get("private_key") or config.get("secret_key")
+        raw_private_key = (
+            config.get("private_key")
+            or config.get("secret_key")
+            or os.getenv("PARADEX_PRIVATE_KEY")
+        )
         self.private_key = raw_private_key.strip() if isinstance(raw_private_key, str) else raw_private_key  # StarkNet 私鑰
-        raw_account = config.get("account_address")
+        raw_account = config.get("account_address") or os.getenv("PARADEX_ACCOUNT_ADDRESS")
         self.account_address = raw_account.strip() if isinstance(raw_account, str) else raw_account  # StarkNet 賬户地址
 
         if isinstance(self.private_key, str) and self.private_key.startswith("0X"):
