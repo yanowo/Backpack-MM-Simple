@@ -71,7 +71,8 @@ APEX_WS_URL = os.getenv('APEX_WS_URL', 'wss://quote.omni.apex.exchange/realtime_
 
 # StandX API Token (JWT) 與簽名密鑰
 STANDX_API_TOKEN = os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT')
-STANDX_SIGNING_KEY = os.getenv('STANDX_SIGNING_KEY')
+# 兼容舊變數 STANDX_SIGNING_KEY
+STANDX_PRIVATE_KEY = os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY')
 
 # StandX API 端點
 STANDX_BASE_URL = os.getenv('STANDX_BASE_URL', 'https://perps.standx.com')

@@ -67,8 +67,8 @@ python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --st
 
 | 參數 | 説明 | 默認值 | 示例 |
 |------|------|--------|------|
-| `--exchange` | 交易所選擇 | - | `backpack`, `aster`, `paradex`, `lighter`, `apex` |
-| `--symbol` | 交易對 | - | `SOL_USDC` 或 `SOL_USDC_PERP` |
+| `--exchange` | 交易所選擇 | - | `backpack`, `aster`, `paradex`, `lighter`, `apex`, `standx` |
+| `--symbol` | 交易對 | - | `SOL_USDC`、`SOL_USDC_PERP` 或 `BTC-USD` |
 | `--strategy` | 策略類型 | `standard` | `grid` 或 `perp_grid` |
 | `--market-type` | 市場類型（永續合約必填） | `spot` | `perp` |
 | `--grid-upper` | 網格上限價格 | - | `160` |
@@ -178,6 +178,12 @@ python run.py --exchange apex --market-type perp --symbol BTCUSDT --strategy per
 
 # APEX 做多網格
 python run.py --exchange apex --market-type perp --symbol BTCUSDT --strategy perp_grid --grid-type long --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
+```
+
+### 6. StandX 永續合約網格
+```bash
+# StandX 中性網格
+python run.py --exchange standx --market-type perp --symbol BTC-USD --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
 ```
 
 ## 常見問題

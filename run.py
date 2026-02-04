@@ -163,7 +163,7 @@ def main():
         }
     elif exchange == 'standx':
         api_key = os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT', '')
-        secret_key = os.getenv('STANDX_SIGNING_KEY', '')
+        secret_key = os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY', '')
         base_url = os.getenv('STANDX_BASE_URL', 'https://perps.standx.com')
         session_id = os.getenv('STANDX_SESSION_ID')
 
@@ -196,7 +196,7 @@ def main():
             sys.exit(1)
     elif exchange == 'standx':
         if not api_key or not secret_key:
-            logger.error("缺少 StandX API Token 或簽名密鑰，請設置 STANDX_API_TOKEN/STANDX_JWT 與 STANDX_SIGNING_KEY")
+            logger.error("缺少 StandX API Token 或簽名密鑰，請設置 STANDX_API_TOKEN/STANDX_JWT 與 STANDX_PRIVATE_KEY")
             sys.exit(1)
     else:
         if not api_key or not secret_key:

@@ -180,7 +180,7 @@ def start_bot():
             }
         elif exchange == 'standx':
             api_key = os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT', '')
-            secret_key = os.getenv('STANDX_SIGNING_KEY', '')
+            secret_key = os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY', '')
             base_url = os.getenv('STANDX_BASE_URL', 'https://perps.standx.com')
             session_id = os.getenv('STANDX_SESSION_ID')
 
@@ -480,7 +480,7 @@ def get_config():
             'paradex': bool(os.getenv('PARADEX_PRIVATE_KEY') and os.getenv('PARADEX_ACCOUNT_ADDRESS')),
             'lighter': bool(os.getenv('LIGHTER_PRIVATE_KEY') and os.getenv('LIGHTER_PUBLIC_KEY')),
             'apex': bool(os.getenv('APEX_API_KEY') and os.getenv('APEX_SECRET_KEY')),
-            'standx': bool((os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT')) and os.getenv('STANDX_SIGNING_KEY'))
+            'standx': bool((os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT')) and (os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY')))
         }
     })
 

@@ -91,6 +91,7 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
             os.getenv("STANDX_JWT"),
         ]
         secret_candidates = [
+            os.getenv("STANDX_PRIVATE_KEY"),
             os.getenv("STANDX_SIGNING_KEY"),
         ]
     else:
