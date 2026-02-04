@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -120,6 +121,12 @@ class StandxWebSocket(BaseWebSocketClient):
 
         bid_price = self._to_decimal(data.get("spread_bid") or data.get("bid"))
         ask_price = self._to_decimal(data.get("spread_ask") or data.get("ask"))
+        spread = data.get("spread")
+        if isinstance(spread, (list, tuple)) and len(spread) >= 2:
+            if bid_price is None:
+                bid_price = self._to_decimal(spread[0])
+            if ask_price is None:
+                ask_price = self._to_decimal(spread[1])
         last_price = self._to_decimal(data.get("price"))
         if last_price is None and bid_price and ask_price:
             last_price = (bid_price + ask_price) / 2
@@ -129,7 +136,7 @@ class StandxWebSocket(BaseWebSocketClient):
             bid_price=bid_price,
             ask_price=ask_price,
             last_price=last_price,
-            timestamp=self._to_int(data.get("timestamp")),
+            timestamp=self._to_int(data.get("timestamp") or data.get("time")),
             source="ws",
         )
 
@@ -138,9 +145,17 @@ class StandxWebSocket(BaseWebSocketClient):
         if not bids and not asks:
             return None
 
+        # depth_book 為快照流，清空舊訂單簿避免殘留
+        self.orderbook = {"bids": [], "asks": []}
+
+        if bids:
+            bids.sort(key=lambda level: level[0], reverse=True)
+        if asks:
+            asks.sort(key=lambda level: level[0])
+
         timestamp = None
         if isinstance(data, dict):
-            timestamp = self._to_int(data.get("timestamp"))
+            timestamp = self._to_int(data.get("timestamp") or data.get("time"))
 
         return WSOrderBookData(
             symbol=self.symbol,
@@ -195,6 +210,15 @@ class StandxWebSocket(BaseWebSocketClient):
         if not (data.get("trade_id") or data.get("id")):
             return None
 
+        status_raw = str(data.get("status") or "").upper()
+        if status_raw and status_raw not in {"FILLED", "PARTIALLY_FILLED"}:
+            # 忽略非成交狀態的訂單回報，避免誤判為成交
+            return None
+
+        filled_qty = self._to_decimal(data.get("fill_qty") or data.get("filled_qty"))
+        if filled_qty is not None and filled_qty <= 0:
+            return None
+
         side_raw = str(data.get("side") or "").lower()
         side = "BUY" if side_raw in {"buy", "bid", "long"} else "SELL"
 
@@ -204,7 +228,10 @@ class StandxWebSocket(BaseWebSocketClient):
             order_id=str(data.get("order_id") or data.get("cl_ord_id") or ""),
             side=side,
             price=self._to_decimal(data.get("price")) or Decimal("0"),
-            quantity=self._to_decimal(data.get("qty")) or Decimal("0"),
+            quantity=filled_qty
+            or self._to_decimal(data.get("qty"))
+            or self._to_decimal(data.get("filled_size"))
+            or Decimal("0"),
             fee=self._to_decimal(data.get("fee_qty")) or Decimal("0"),
             fee_asset=data.get("fee_asset"),
             is_maker=None,
@@ -240,10 +267,19 @@ class StandxWebSocket(BaseWebSocketClient):
     def _to_int(value: Any) -> Optional[int]:
         if value is None:
             return None
-        try:
+        if isinstance(value, (int, float)):
             return int(value)
-        except Exception:
-            return None
+        if isinstance(value, str):
+            if value.isdigit():
+                return int(value)
+            try:
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return int(dt.timestamp() * 1000)
+            except Exception:
+                return None
+        return None
 
     def subscribe_order_updates(self) -> bool:
         if not self.enable_private:

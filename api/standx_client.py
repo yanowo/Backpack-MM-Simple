@@ -63,6 +63,10 @@ class StandxClient(BaseExchangeClient):
             logger.info("StandX 客户端已配置代理: %s", proxies)
 
         self._symbol_cache: Dict[str, Dict[str, Any]] = {}
+        self._signing_key_cache: Optional[bytes] = None
+
+        self._base58_alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        self._base58_index = {char: idx for idx, char in enumerate(self._base58_alphabet)}
 
     def get_exchange_name(self) -> str:
         return "StandX"
@@ -89,7 +93,9 @@ class StandxClient(BaseExchangeClient):
             return
 
         markets = response.raw or {}
-        if isinstance(markets, dict):
+        if isinstance(markets, list):
+            items = markets
+        elif isinstance(markets, dict):
             items = markets.get("data") or markets.get("result") or markets.get("symbols") or []
         else:
             items = []
@@ -159,17 +165,59 @@ class StandxClient(BaseExchangeClient):
             text = text.rstrip("0").rstrip(".")
         return text or "0"
 
-    def _sign_message(self, message: str) -> Optional[str]:
+    def _base58_decode(self, text: str) -> Optional[bytes]:
+        if not text:
+            return None
+        num = 0
+        for char in text:
+            if char not in self._base58_index:
+                return None
+            num = num * 58 + self._base58_index[char]
+
+        # Convert integer to bytes
+        if num == 0:
+            decoded = b""
+        else:
+            decoded = num.to_bytes((num.bit_length() + 7) // 8, "big")
+
+        # Add leading zero bytes for each leading '1'
+        padding = len(text) - len(text.lstrip("1"))
+        return b"\x00" * padding + decoded
+
+    def _decode_signing_key(self) -> Optional[bytes]:
+        if self._signing_key_cache:
+            return self._signing_key_cache
         if not self.signing_key:
             return None
-        try:
-            decoded = base64.b64decode(self.signing_key)
-        except Exception as exc:
-            logger.error("StandX 簽名密鑰解碼失敗: %s", exc)
+
+        key_text = str(self.signing_key).strip()
+        if not key_text:
             return None
 
-        if len(decoded) < 32:
+        # Try base58 first if all characters match base58 alphabet
+        decoded: Optional[bytes] = None
+        if all(char in self._base58_alphabet for char in key_text):
+            decoded = self._base58_decode(key_text)
+            if decoded and len(decoded) not in (32, 64):
+                decoded = None
+
+        if not decoded:
+            try:
+                decoded = base64.b64decode(key_text)
+            except Exception as exc:
+                logger.error("StandX 簽名密鑰解碼失敗: %s", exc)
+                return None
+
+        if not decoded or len(decoded) < 32:
             logger.error("StandX 簽名密鑰長度不足，無法簽名")
+            return None
+
+        self._signing_key_cache = decoded
+        return decoded
+
+    def _sign_message(self, message: str) -> Optional[str]:
+        decoded = self._decode_signing_key()
+        if not decoded:
             return None
 
         seed = decoded[:32]
@@ -310,7 +358,9 @@ class StandxClient(BaseExchangeClient):
         if error:
             return error
 
-        data = raw.get("data") if isinstance(raw, dict) else None
+        data = None
+        if isinstance(raw, dict):
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
         if not isinstance(data, dict):
             return ApiResponse.error("StandX balance response malformed", raw=raw)
 
@@ -336,7 +386,9 @@ class StandxClient(BaseExchangeClient):
         if error:
             return error
 
-        data = raw.get("data") if isinstance(raw, dict) else None
+        data = None
+        if isinstance(raw, dict):
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
         if not isinstance(data, dict):
             return ApiResponse.error("StandX balance response malformed", raw=raw)
 
@@ -366,7 +418,9 @@ class StandxClient(BaseExchangeClient):
             return error
 
         items = None
-        if isinstance(raw, dict):
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
             items = raw.get("data") or raw.get("result") or raw.get("symbols")
         if not isinstance(items, list):
             return ApiResponse.error("StandX symbol info response malformed", raw=raw)
@@ -413,7 +467,15 @@ class StandxClient(BaseExchangeClient):
         if error:
             return error
 
-        items = raw.get("data") if isinstance(raw, dict) else None
+        items: Optional[List[Dict[str, Any]]] = None
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            candidate = raw.get("data") or raw.get("result") or raw.get("symbols")
+            if isinstance(candidate, list):
+                items = candidate
+            elif raw.get("symbol"):
+                items = [raw]
         if not isinstance(items, list) or not items:
             return ApiResponse.error(f"StandX 未找到交易對資訊: {symbol}", raw=raw)
 
@@ -451,13 +513,21 @@ class StandxClient(BaseExchangeClient):
         if error:
             return error
 
-        data = raw.get("data") if isinstance(raw, dict) else None
+        data = None
+        if isinstance(raw, dict):
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
         if not isinstance(data, dict):
             return ApiResponse.error("StandX ticker response malformed", raw=raw)
 
         bid_price = self._parse_decimal(data.get("spread_bid") or data.get("bid_price") or data.get("bid"))
         ask_price = self._parse_decimal(data.get("spread_ask") or data.get("ask_price") or data.get("ask"))
-        last_price = self._parse_decimal(data.get("price") or data.get("last_price"))
+        spread = data.get("spread")
+        if isinstance(spread, (list, tuple)) and len(spread) >= 2:
+            if bid_price is None:
+                bid_price = self._parse_decimal(spread[0])
+            if ask_price is None:
+                ask_price = self._parse_decimal(spread[1])
+        last_price = self._parse_decimal(data.get("last_price") or data.get("price"))
         if last_price is None and bid_price and ask_price:
             last_price = (bid_price + ask_price) / 2
 
@@ -468,7 +538,7 @@ class StandxClient(BaseExchangeClient):
             ask_price=ask_price,
             mark_price=self._parse_decimal(data.get("mark_price")),
             index_price=self._parse_decimal(data.get("index_price")),
-            timestamp=self._parse_int(data.get("timestamp")),
+            timestamp=self._parse_timestamp_ms(data.get("timestamp") or data.get("time")),
             raw=data,
         )
         return ApiResponse.ok(ticker, raw=raw)
@@ -480,7 +550,9 @@ class StandxClient(BaseExchangeClient):
         if error:
             return error
 
-        data = raw.get("data") if isinstance(raw, dict) else None
+        data = None
+        if isinstance(raw, dict):
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
         if not isinstance(data, dict):
             return ApiResponse.error("StandX order book response malformed", raw=raw)
 
@@ -505,11 +577,16 @@ class StandxClient(BaseExchangeClient):
             except Exception:
                 continue
 
+        if bids:
+            bids.sort(key=lambda level: level.price, reverse=True)
+        if asks:
+            asks.sort(key=lambda level: level.price)
+
         order_book = OrderBookInfo(
             symbol=data.get("symbol") or symbol,
             bids=bids,
             asks=asks,
-            timestamp=self._parse_int(data.get("timestamp")),
+            timestamp=self._parse_timestamp_ms(data.get("timestamp") or data.get("time")),
             raw=data,
         )
         return ApiResponse.ok(order_book, raw=raw)
@@ -526,9 +603,13 @@ class StandxClient(BaseExchangeClient):
             return error
 
         data = raw.get("data") if isinstance(raw, dict) else None
-        orders_raw = data.get("result") if isinstance(data, dict) else None
-        if orders_raw is None:
-            orders_raw = raw.get("result") if isinstance(raw, dict) else None
+        orders_raw = None
+        if isinstance(raw, list):
+            orders_raw = raw
+        elif isinstance(data, dict):
+            orders_raw = data.get("result")
+        if orders_raw is None and isinstance(raw, dict):
+            orders_raw = raw.get("result")
 
         if not isinstance(orders_raw, list):
             return ApiResponse.error("StandX open orders response malformed", raw=raw)
@@ -621,9 +702,9 @@ class StandxClient(BaseExchangeClient):
 
         payload: Dict[str, Any] = {}
         if order_ids:
-            payload["order_id"] = order_ids
+            payload["order_id_list"] = order_ids
         if cl_ord_ids:
-            payload["cl_ord_id"] = cl_ord_ids
+            payload["cl_ord_id_list"] = cl_ord_ids
 
         raw = self.make_request("POST", "/api/cancel_orders", data=payload, instruction=True)
         error = self._check_raw_error(raw)
@@ -669,12 +750,15 @@ class StandxClient(BaseExchangeClient):
             "side": side,
             "order_type": order_type,
             "qty": self._format_decimal(qty),
+            "reduce_only": bool(reduce_only),
         }
 
         if order_type == "limit":
             payload["price"] = self._format_decimal(price)
-        if time_in_force:
-            payload["time_in_force"] = str(time_in_force).lower()
+
+        if not time_in_force:
+            time_in_force = "ioc" if order_type == "market" else "gtc"
+        payload["time_in_force"] = str(time_in_force).lower()
         if post_only and payload.get("time_in_force") in (None, "", "gtc"):
             payload["time_in_force"] = "alo"
         if reduce_only:
@@ -687,14 +771,26 @@ class StandxClient(BaseExchangeClient):
         if error:
             return error
 
-        data = raw.get("data") if isinstance(raw, dict) else None
+        data = None
+        if isinstance(raw, dict):
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
         if not isinstance(data, dict):
             return ApiResponse.error("StandX 下單回傳格式異常", raw=raw)
 
+        resolved_client_id = (
+            data.get("cl_ord_id")
+            or data.get("client_id")
+            or data.get("clientId")
+            or (str(client_id) if client_id else None)
+        )
+        order_id = data.get("order_id") or data.get("id") or data.get("orderId") or ""
+        if not order_id and resolved_client_id:
+            order_id = resolved_client_id
+
         result = OrderResult(
             success=True,
-            order_id=str(data.get("order_id") or ""),
-            client_order_id=str(data.get("cl_ord_id") or data.get("client_id") or "") or None,
+            order_id=str(order_id),
+            client_order_id=str(resolved_client_id) if resolved_client_id else None,
             symbol=data.get("symbol") or symbol,
             side="BUY" if str(data.get("side") or "").lower() == "buy" else "SELL",
             order_type=str(data.get("order_type") or data.get("type") or "").upper(),
@@ -718,10 +814,15 @@ class StandxClient(BaseExchangeClient):
         if error:
             return error
 
-        data = raw.get("data") if isinstance(raw, dict) else None
-        positions_raw = data.get("result") if isinstance(data, dict) else None
-        if positions_raw is None:
-            positions_raw = raw.get("result") if isinstance(raw, dict) else None
+        positions_raw = None
+        if isinstance(raw, list):
+            positions_raw = raw
+        elif isinstance(raw, dict):
+            data = raw.get("data")
+            if isinstance(data, dict):
+                positions_raw = data.get("result")
+            if positions_raw is None:
+                positions_raw = raw.get("result")
 
         if not isinstance(positions_raw, list):
             return ApiResponse.error("StandX positions response malformed", raw=raw)
@@ -772,10 +873,15 @@ class StandxClient(BaseExchangeClient):
         if error:
             return error
 
-        data = raw.get("data") if isinstance(raw, dict) else None
-        trades_raw = data.get("result") if isinstance(data, dict) else None
-        if trades_raw is None:
-            trades_raw = raw.get("result") if isinstance(raw, dict) else None
+        trades_raw = None
+        if isinstance(raw, list):
+            trades_raw = raw
+        elif isinstance(raw, dict):
+            data = raw.get("data")
+            if isinstance(data, dict):
+                trades_raw = data.get("result")
+            if trades_raw is None:
+                trades_raw = raw.get("result")
 
         if not isinstance(trades_raw, list):
             return ApiResponse.error("StandX trades response malformed", raw=raw)
