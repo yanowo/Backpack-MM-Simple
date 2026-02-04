@@ -29,6 +29,9 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 
 # APEX 永續做市
 python run.py --exchange apex --market-type perp --symbol BTCUSDT --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
+
+# StandX 永續做市
+python run.py --exchange standx --market-type perp --symbol BTC-USD --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
 ```
 
 ## 倉位管理邏輯
@@ -109,6 +112,7 @@ python run.py --exchange apex --market-type perp --symbol BTCUSDT --spread 0.01 
 | Paradex | JWT 自動刷新 | 保持認證狀態 |
 | Lighter | 簽名並獲取 index | zkLighter 鎖上簽名 |
 | APEX | zkLink 簽名 | 所有訂單需 zkLink 簽名 |
+| StandX | Request Sign Key | JWT + Request Sign Key |
 
 ## 風險提示
 

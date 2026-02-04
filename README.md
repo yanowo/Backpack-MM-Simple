@@ -13,13 +13,14 @@
 | **Paradex** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.paradex.trade/r/yanowo) |
 | **Lighter** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
 | **APEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://join.omni.apex.exchange/yanowo) |
+| **StandX** | ❌ | ✅ | ✅ | ❌ | ✅ | — |
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 ## 功能特點
 
 - **Web 控制枱**：直觀的圖形化界面，實時監控交易狀態和策略表現
-- **多交易所架構**：支援 Backpack、Aster、Paradex、Lighter、APEX，可擴展至其他交易所
+- **多交易所架構**：支援 Backpack、Aster、Paradex、Lighter、APEX、StandX，可擴展至其他交易所
 - **四種策略模式**：
   - [現貨做市](docs/SPOT_MARKET_MAKING.md)：多層訂單 + 智能重平衡
   - [永續做市](docs/PERP_MARKET_MAKING.md)：倉位管理 + 風險中性
@@ -165,6 +166,14 @@ APEX_SECRET_KEY=your_apex_secret_key
 APEX_PASSPHRASE=your_apex_passphrase
 APEX_ZK_SEEDS=your_apex_zk_seeds
 
+# StandX Perps Exchange
+# 需先在 StandX 生成 API Token (JWT) 與 Request Sign Key
+STANDX_API_TOKEN=your_standx_api_token
+STANDX_PRIVATE_KEY=your_standx_signing_key_base64
+STANDX_BASE_URL=https://perps.standx.com
+STANDX_WS_URL=wss://perps.standx.com/ws-stream/v1
+STANDX_SESSION_ID=
+
 # Optional Features
 # ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
 
@@ -218,7 +227,7 @@ http://localhost:5000
 - **實時監控**：查看交易統計、餘額、盈虧等實時數據（每5秒更新）
 - **策略管理**：啟動/停止做市策略，支持多種策略類型
 - **參數配置**：
-  - 交易所選擇（Backpack、Aster、Paradex、Lighter、APEX）
+  - 交易所選擇（Backpack、Aster、Paradex、Lighter、APEX、StandX）
   - 市場類型（現貨 / 永續合約）
   - 策略類型（標準做市 / Maker-Taker 對沖）
   - 交易對、價差、訂單數量等
@@ -319,6 +328,12 @@ python run.py --exchange apex --market-type perp --symbol BTCUSDT --spread 0.01 
 # APEX Maker-Taker 對沖
 python run.py --exchange apex --market-type perp --symbol BTCUSDT --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 
+# StandX 永續做市
+python run.py --exchange standx --market-type perp --symbol BTC-USD --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --inventory-skew 0 --stop-loss -10 --take-profit 20 --duration 3600 --interval 10
+
+# StandX Maker-Taker 對沖
+python run.py --exchange standx --market-type perp --symbol BTC-USD --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
+
 # BackPack 現貨網格交易（自動價格範圍）
 python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --grid-num 10 --quantity 0.1 --duration 3600 --interval 60
 
@@ -336,6 +351,9 @@ python run.py --exchange lighter --market-type perp --symbol BTC --strategy perp
 
 # APEX 永續合約網格交易（自動價格範圍）
 python run.py --exchange apex --market-type perp --symbol BTCUSDT --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
+
+# StandX 永續合約網格交易（自動價格範圍）
+python run.py --exchange standx --market-type perp --symbol BTC-USD --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
 ```
 
 > **適合場景**：自動化部署、定時任務、批量運行  
@@ -358,7 +376,7 @@ python run.py --exchange apex --market-type perp --symbol BTCUSDT --strategy per
 #### 基本參數
 - `--api-key`: API 密鑰 (可選，默認使用環境變數)
 - `--secret-key`: API 密鑰 (可選，默認使用環境變數)
-- `--exchange`: 交易所選擇 (`backpack`, `aster`, `paradex`, `lighter`, `apex`)
+- `--exchange`: 交易所選擇 (`backpack`, `aster`, `paradex`, `lighter`, `apex`, `standx`)
 - `--symbol`: 交易對 (例如: SOL_USDC)
 - `--spread`: 價差百分比 (例如: 0.5)
 - `--quantity`: 訂單數量 (可選)
@@ -434,6 +452,9 @@ https://apidocs.lighter.xyz/docs/get-started-for-programmers-1
 - **Apex API**
 https://api-docs.omni.apex.exchange/#introduction
 
+- **StandX API**
+https://docs.standx.com/standx-api/standx-api
+
 ### WebSocket 文獻資料
 
 - **Backpack WebSocket**
@@ -450,6 +471,9 @@ https://apidocs.lighter.xyz/docs/websocket-reference
 
 - **Apex WebSocket**
 https://api-docs.pro.apex.exchange/
+
+- **StandX WebSocket**
+https://docs.standx.com/standx-api/standx-api
 
 ---
 

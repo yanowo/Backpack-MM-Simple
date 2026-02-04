@@ -178,6 +178,19 @@ def start_bot():
                 'zk_seeds': zk_seeds,
                 'base_url': base_url,
             }
+        elif exchange == 'standx':
+            api_key = os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT', '')
+            secret_key = os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY', '')
+            base_url = os.getenv('STANDX_BASE_URL', 'https://perps.standx.com')
+            session_id = os.getenv('STANDX_SESSION_ID')
+
+            exchange_config = {
+                'api_token': api_key,
+                'signing_key': secret_key,
+                'base_url': base_url,
+            }
+            if session_id:
+                exchange_config['session_id'] = session_id
         else:
             return jsonify({'success': False, 'message': f'不支持的交易所: {exchange}'}), 400
 
@@ -188,6 +201,9 @@ def start_bot():
         elif exchange == 'apex':
             if not api_key or not secret_key:
                 return jsonify({'success': False, 'message': 'APEX API密鑰未配置，請檢查環境變量'}), 400
+        elif exchange == 'standx':
+            if not api_key or not secret_key:
+                return jsonify({'success': False, 'message': 'StandX API Token 或簽名密鑰未配置，請檢查環境變量'}), 400
         else:
             if not api_key or not secret_key:
                 return jsonify({'success': False, 'message': 'API密鑰未配置，請檢查環境變量'}), 400
@@ -455,7 +471,7 @@ def stop_bot():
 def get_config():
     """獲取配置信息"""
     return jsonify({
-        'exchanges': ['backpack', 'aster', 'paradex', 'lighter', 'apex'],
+        'exchanges': ['backpack', 'aster', 'paradex', 'lighter', 'apex', 'standx'],
         'market_types': ['spot', 'perp'],
         'strategies': ['standard', 'maker_hedge', 'grid'],
         'env_configured': {
@@ -463,7 +479,8 @@ def get_config():
             'aster': bool(os.getenv('ASTER_API_KEY') and os.getenv('ASTER_SECRET_KEY')),
             'paradex': bool(os.getenv('PARADEX_PRIVATE_KEY') and os.getenv('PARADEX_ACCOUNT_ADDRESS')),
             'lighter': bool(os.getenv('LIGHTER_PRIVATE_KEY') and os.getenv('LIGHTER_PUBLIC_KEY')),
-            'apex': bool(os.getenv('APEX_API_KEY') and os.getenv('APEX_SECRET_KEY'))
+            'apex': bool(os.getenv('APEX_API_KEY') and os.getenv('APEX_SECRET_KEY')),
+            'standx': bool((os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT')) and (os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY')))
         }
     })
 

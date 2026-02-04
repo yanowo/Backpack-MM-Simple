@@ -41,6 +41,7 @@ from .bp_client import BPClient
 from .aster_client import AsterClient
 from .lighter_client import LighterClient  # 輕量依賴，可安全頂層導入
 from .apex_client import ApexClient
+from .standx_client import StandxClient
 
 __all__ = [
     # 基礎類別
@@ -50,6 +51,7 @@ __all__ = [
     "AsterClient",
     "LighterClient",
     "ApexClient",
+    "StandxClient",
     # 標準化響應
     "ApiResponse",
     # 訂單相關
@@ -91,6 +93,8 @@ def get_client(name: str, *args, **kwargs):
         return AsterClient(*args, **kwargs)
     elif name == "apex":
         return ApexClient(*args, **kwargs)
+    elif name == "standx":
+        return StandxClient(*args, **kwargs)
     else:
         raise ValueError(f"未知交易所: {name}")
 

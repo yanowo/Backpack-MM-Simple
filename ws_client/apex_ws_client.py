@@ -109,6 +109,9 @@ class ApexWebSocket(BaseWebSocketClient):
                 # 保留完整 payload，方便私有資料解析（訂單/成交可能深層嵌套）
                 return "private.accounts", payload
             return topic, payload.get("data") if "data" in payload else payload.get("contents")
+        if isinstance(payload, dict) and payload.get("channel") and ("data" in payload or "contents" in payload):
+            channel = payload.get("channel")
+            return channel, payload.get("data") if "data" in payload else payload.get("contents")
         return None
 
     def _get_ticker_channel(self) -> str:
@@ -148,27 +151,9 @@ class ApexWebSocket(BaseWebSocketClient):
         )
 
     def _handle_depth_message(self, data: Any) -> Optional[WSOrderBookData]:
-        if not isinstance(data, dict):
+        bids, asks = self._extract_orderbook_levels(data, bid_keys=("b", "bids"), ask_keys=("a", "asks"))
+        if not bids and not asks:
             return None
-
-        bids: List[Tuple[Decimal, Decimal]] = []
-        asks: List[Tuple[Decimal, Decimal]] = []
-
-        for bid in data.get("b", []) or data.get("bids", []):
-            try:
-                price = Decimal(str(bid[0]))
-                qty = Decimal(str(bid[1]))
-                bids.append((price, qty))
-            except Exception:
-                continue
-
-        for ask in data.get("a", []) or data.get("asks", []):
-            try:
-                price = Decimal(str(ask[0]))
-                qty = Decimal(str(ask[1]))
-                asks.append((price, qty))
-            except Exception:
-                continue
 
         return WSOrderBookData(
             symbol=self.symbol,

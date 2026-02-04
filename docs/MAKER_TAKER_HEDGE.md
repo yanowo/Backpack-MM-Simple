@@ -21,6 +21,7 @@ Maker-Taker 對沖策略僅在買一/賣一掛單，當掛單成交後立即以�
 | Paradex | ❌ | ✅ | JWT 自動刷新 |
 | Lighter | ❌ | ✅ | zkLighter 鎖上簽名 |
 | APEX | ❌ | ✅ | zkLink 簽名，所有訂單需簽名 |
+| StandX | ❌ | ✅ | JWT + Request Sign Key |
 
 ## 啟動示例
 
@@ -48,6 +49,9 @@ python run.py --exchange lighter --market-type perp --symbol BTC --spread 0.01 -
 
 # APEX 永續對沖
 python run.py --exchange apex --market-type perp --symbol BTCUSDT --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
+
+# StandX 永續對沖
+python run.py --exchange standx --market-type perp --symbol BTC-USD --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 ```
 
 ## 執行流程示例

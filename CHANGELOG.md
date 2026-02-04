@@ -1,4 +1,33 @@
 # Changelog
+## [2.8.0] - 2026-02-04
+
+### 新增
+- **StandX 交易所完整支援**：新增 StandX 永續合約交易所整合
+  - 實現 `StandXClient` REST API 客戶端，支援訂單創建、取消、查詢
+  - 實現 `StandXWebSocket` 客戶端，支援公開與私有頻道訂閱
+  - 新增簽名密鑰解碼機制與訂單處理邏輯
+  - 支援倉位與餘額查詢、成交歷史同步
+- **成交資訊處理增強**：新增本地 Maker 訂單檢查機制
+- **WebSocket 頻道訂閱邏輯優化**：Paradex 新增頻道訂閱邏輯
+- CLI 命令行界面新增 StandX 交易所選項
+- Web 界面新增 StandX 交易所選項
+
+### 修復
+- **多交易所 WebSocket 報價獲取問題**：統一報價獲取邏輯至 `BaseWebSocketClient` 基類
+- **Backpack 私有頻道處理**：優化並精簡私有頻道處理邏輯
+
+### 優化
+- **WebSocket 基類重構**：將報價獲取邏輯統一至 `BaseWebSocketClient`，精簡各交易所客戶端冗餘代碼
+- **做市策略重構**：`market_maker.py` 重構以支援 StandX 交易所與多交易所 WebSocket 整合
+- **對沖策略增強**：`maker_taker_hedge.py` 新增本地 Maker 訂單檢查與成交資訊處理
+
+### 變更涉及檔案
+- `api/`: `standx_client.py` (新增), `__init__.py`
+- `ws_client/`: `standx_ws_client.py` (新增), `base_ws_client.py`, `backpack_ws_client.py`, `apex_ws_client.py`, `aster_ws_client.py`, `lighter_ws_client.py`, `paradex_ws_client.py`, `__init__.py`
+- `strategies/`: `market_maker.py`, `maker_taker_hedge.py`, `perp_grid_strategy.py`
+- `cli/commands.py`, `run.py`, `config.py`, `README.md`, `.env.example`
+- `web/`: `server.py`, `static/js/app.js`, `templates/index.html`
+
 ## [2.7.0] - 2026-02-02
 
 ### 新增

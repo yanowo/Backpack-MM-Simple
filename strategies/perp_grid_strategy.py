@@ -1532,7 +1532,9 @@ class PerpGridStrategy(PerpetualMarketMaker):
 
     def _requires_fill_verification(self) -> bool:
         """需要用成交歷史驗證訂單是否成交的交易所。"""
-        return self.exchange in ('paradex', 'aster', 'lighter')
+        if self.ws and self.ws.is_connected():
+            return False
+        return self.exchange in ('paradex', 'aster', 'lighter', 'standx')
 
     def _place_sync_close_orders(self, uncovered_qty: float, position_type: str, effective_min_size: float = None) -> None:
         """為未覆蓋的倉位補掛平倉單

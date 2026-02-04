@@ -133,7 +133,7 @@ class LighterWebSocket(BaseWebSocketClient):
                 return "private.orders", payload
             if channel_base in {"account_all_trades", "account_trades", "fills", "trades"}:
                 return "private.fills", payload
-            if channel_base in {"order_book", "book"}:
+            if channel_base in {"order_book", "book"} or str(channel_base).startswith(("order_book", "book")):
                 return "order_book", payload
             return channel, payload
         return None
@@ -163,36 +163,9 @@ class LighterWebSocket(BaseWebSocketClient):
         return None
 
     def _handle_depth_message(self, data: Any) -> Optional[WSOrderBookData]:
-        if not isinstance(data, dict):
+        bids, asks = self._extract_orderbook_levels(data, bid_keys=("bids", "b"), ask_keys=("asks", "a"))
+        if not bids and not asks:
             return None
-
-        bids: List[Tuple[Decimal, Decimal]] = []
-        asks: List[Tuple[Decimal, Decimal]] = []
-
-        for bid in data.get("bids", []):
-            try:
-                price = Decimal(str(bid.get("price")))
-                qty = Decimal(str(bid.get("size")))
-                bids.append((price, qty))
-            except Exception:
-                continue
-
-        for ask in data.get("asks", []):
-            try:
-                price = Decimal(str(ask.get("price")))
-                qty = Decimal(str(ask.get("size")))
-                asks.append((price, qty))
-            except Exception:
-                continue
-
-        # 更新最佳買賣價，避免缺少 ticker 造成價格不刷新
-        if bids:
-            self.bid_price = float(bids[0][0])
-        if asks:
-            self.ask_price = float(asks[0][0])
-        if self.bid_price and self.ask_price:
-            self.last_price = (self.bid_price + self.ask_price) / 2
-            self.add_price_to_history(self.last_price)
 
         return WSOrderBookData(
             symbol=self.symbol,

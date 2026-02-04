@@ -23,7 +23,7 @@ def parse_arguments():
     parser.add_argument('--web', action='store_true', help='啟動Web界面')
     
     # 基本參數
-    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex', 'lighter', 'apex'], default='backpack', help='交易所選擇 (backpack、aster、paradex、lighter 或 apex)')
+    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex', 'lighter', 'apex', 'standx'], default='backpack', help='交易所選擇 (backpack、aster、paradex、lighter、apex 或 standx)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
     
@@ -161,8 +161,21 @@ def main():
             'zk_seeds': zk_seeds,
             'base_url': base_url,
         }
+    elif exchange == 'standx':
+        api_key = os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT', '')
+        secret_key = os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY', '')
+        base_url = os.getenv('STANDX_BASE_URL', 'https://perps.standx.com')
+        session_id = os.getenv('STANDX_SESSION_ID')
+
+        exchange_config = {
+            'api_token': api_key,
+            'signing_key': secret_key,
+            'base_url': base_url,
+        }
+        if session_id:
+            exchange_config['session_id'] = session_id
     else:
-        logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex'、'lighter' 或 'apex'")
+        logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex'、'lighter'、'apex' 或 'standx'")
         sys.exit(1)
 
     # 檢查API密鑰
@@ -180,6 +193,10 @@ def main():
     elif exchange == 'apex':
         if not api_key or not secret_key:
             logger.error("缺少 APEX API 密鑰，請通過環境變量 APEX_API_KEY 和 APEX_SECRET_KEY 提供")
+            sys.exit(1)
+    elif exchange == 'standx':
+        if not api_key or not secret_key:
+            logger.error("缺少 StandX API Token 或簽名密鑰，請設置 STANDX_API_TOKEN/STANDX_JWT 與 STANDX_PRIVATE_KEY")
             sys.exit(1)
     else:
         if not api_key or not secret_key:
@@ -411,6 +428,7 @@ def main():
         print("  paradex   Paradex 永續合約交易所")
         print("  lighter   Lighter 永續合約交易所")
         print("  apex      APEX Omni 永續合約交易所")
+        print("  standx    StandX 永續合約交易所")
         print("\n資料庫參數：")
         print("  --enable-db            啟用資料庫寫入")
         print("  --disable-db           停用資料庫寫入 (預設)")
@@ -436,6 +454,8 @@ def main():
         print("  python run.py --exchange lighter --symbol BTCUSDT --spread 0.3 --market-type perp --max-position 0.5")
         print("  # APEX 永續合約做市")
         print("  python run.py --exchange apex --symbol BTC-USDT --spread 0.3 --market-type perp --max-position 0.5")
+        print("  # StandX 永續合約做市")
+        print("  python run.py --exchange standx --symbol BTC-PERP --spread 0.3 --market-type perp --max-position 0.5")
         print("\n=== 範例：永續合約網格 ===")
         print("  # Aster 永續網格（中性網格，自動價格）")
         print("  python run.py --exchange aster --symbol BTCUSDT --strategy perp_grid --auto-price --grid-num 10 --grid-type neutral")
