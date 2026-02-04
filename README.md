@@ -13,7 +13,7 @@
 | **Paradex** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.paradex.trade/r/yanowo) |
 | **Lighter** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
 | **APEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://join.omni.apex.exchange/yanowo) |
-| **StandX** | ❌ | ✅ | ✅ | ❌ | ✅ | — |
+| **StandX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://standx.com/referral?code=yanowo) |
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
