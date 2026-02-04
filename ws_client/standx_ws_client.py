@@ -134,29 +134,19 @@ class StandxWebSocket(BaseWebSocketClient):
         )
 
     def _handle_depth_message(self, data: Any) -> Optional[WSOrderBookData]:
-        if not isinstance(data, dict):
+        bids, asks = self._extract_orderbook_levels(data, bid_keys=("bids", "b"), ask_keys=("asks", "a"))
+        if not bids and not asks:
             return None
 
-        bids: List[Tuple[Decimal, Decimal]] = []
-        asks: List[Tuple[Decimal, Decimal]] = []
-
-        for bid in data.get("bids", []) or []:
-            try:
-                bids.append((Decimal(str(bid[0])), Decimal(str(bid[1]))))
-            except Exception:
-                continue
-
-        for ask in data.get("asks", []) or []:
-            try:
-                asks.append((Decimal(str(ask[0])), Decimal(str(ask[1]))))
-            except Exception:
-                continue
+        timestamp = None
+        if isinstance(data, dict):
+            timestamp = self._to_int(data.get("timestamp"))
 
         return WSOrderBookData(
             symbol=self.symbol,
             bids=bids,
             asks=asks,
-            timestamp=self._to_int(data.get("timestamp")),
+            timestamp=timestamp,
             source="ws",
         )
 

@@ -131,9 +131,24 @@ class ParadexWebSocket(BaseWebSocketClient):
         return f"bbo.{self.symbol}"
 
     def _get_depth_channel(self) -> str:
-        # order_book.{market_symbol}.{price_tick}.{price_tick_num_levels}.{refresh_rate}
+        # order_book.{market_symbol}.{feed_type}@15@{refresh_rate}[@{price_tick}]
+        feed_type = "deltas"
+        refresh_rate = "100ms"
         price_tick = self._resolve_price_tick()
-        return f"order_book.{self.symbol}.{price_tick}.20.100"
+        price_tick_fmt = self._format_price_tick(price_tick)
+        if price_tick_fmt:
+            return f"order_book.{self.symbol}.{feed_type}@15@{refresh_rate}@{price_tick_fmt}"
+        return f"order_book.{self.symbol}.{feed_type}@15@{refresh_rate}"
+
+    @staticmethod
+    def _format_price_tick(value: str) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        # Paradex order_book price_tick uses underscore notation in URL/examples (e.g., 0_0000001)
+        return text.replace(".", "_")
 
     def _get_order_update_channel(self) -> str:
         return "private"
@@ -188,24 +203,39 @@ class ParadexWebSocket(BaseWebSocketClient):
         if not isinstance(data, dict):
             return None
 
+        update_type = str(data.get("update_type") or data.get("type") or "").lower()
+        if update_type in {"s", "snapshot"}:
+            # 快照更新時重置訂單簿，避免殘留舊價格檔
+            self.orderbook = {"bids": [], "asks": []}
+
         bids: List[Tuple[Decimal, Decimal]] = []
         asks: List[Tuple[Decimal, Decimal]] = []
 
-        for bid in data.get("bids", []):
-            try:
-                price = Decimal(str(bid.get("price")))
-                qty = Decimal(str(bid.get("size")))
-                bids.append((price, qty))
-            except Exception:
-                continue
+        def _append_entries(entries: Any, *, force_size: Optional[str] = None) -> None:
+            if not isinstance(entries, list):
+                return
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                price = self._to_decimal(entry.get("price"))
+                size_value = force_size if force_size is not None else entry.get("size")
+                size = self._to_decimal(size_value)
+                if price is None or size is None:
+                    continue
+                side = str(entry.get("side", "")).upper()
+                if side in {"BUY", "BID"}:
+                    bids.append((price, size))
+                elif side in {"SELL", "ASK"}:
+                    asks.append((price, size))
 
-        for ask in data.get("asks", []):
-            try:
-                price = Decimal(str(ask.get("price")))
-                qty = Decimal(str(ask.get("size")))
-                asks.append((price, qty))
-            except Exception:
-                continue
+        _append_entries(data.get("updates"))
+        _append_entries(data.get("inserts"))
+        _append_entries(data.get("deletes"), force_size="0")
+
+        if not bids and not asks:
+            bids, asks = self._extract_orderbook_levels(data, bid_keys=("bids", "b"), ask_keys=("asks", "a"))
+            if not bids and not asks:
+                return None
 
         return WSOrderBookData(
             symbol=self.symbol,

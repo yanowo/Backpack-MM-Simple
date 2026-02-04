@@ -232,30 +232,10 @@ class BackpackWebSocket(BaseWebSocketClient):
             "a": [["42001.00", "2.0"], ...]   # 賣單列表
         }
         """
-        if not isinstance(data, dict):
+        bids, asks = self._extract_orderbook_levels(data, bid_keys=("b", "bids"), ask_keys=("a", "asks"))
+        if not bids and not asks:
             return None
-        
-        bids: List[Tuple[Decimal, Decimal]] = []
-        asks: List[Tuple[Decimal, Decimal]] = []
-        
-        if 'b' in data:
-            for bid in data['b']:
-                try:
-                    price = Decimal(str(bid[0]))
-                    quantity = Decimal(str(bid[1]))
-                    bids.append((price, quantity))
-                except:
-                    continue
-        
-        if 'a' in data:
-            for ask in data['a']:
-                try:
-                    price = Decimal(str(ask[0]))
-                    quantity = Decimal(str(ask[1]))
-                    asks.append((price, quantity))
-                except:
-                    continue
-        
+
         return WSOrderBookData(
             symbol=self.symbol,
             bids=bids,

@@ -152,6 +152,10 @@ class BaseWebSocketClient(ABC):
         self.last_heartbeat = time.time()
         self.heartbeat_interval = config.heartbeat_interval
         self.heartbeat_thread: Optional[threading.Thread] = None
+
+        # 行情/深度更新時間
+        self.last_ticker_update: float = 0.0
+        self.last_depth_update: float = 0.0
         
         # 代理設置
         self.proxy = config.proxy
@@ -339,6 +343,125 @@ class BaseWebSocketClient(ABC):
             pong 響應字典，如果不需要則返回 None
         """
         return None
+
+    # ==================== 公用解析工具 ====================
+
+    @staticmethod
+    def _safe_decimal(value: Any) -> Optional[Decimal]:
+        if value is None:
+            return None
+        if isinstance(value, Decimal):
+            return value
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
+    @classmethod
+    def _parse_orderbook_item(cls, item: Any) -> Optional[Tuple[Decimal, Decimal]]:
+        if item is None:
+            return None
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            price = cls._safe_decimal(item[0])
+            quantity = cls._safe_decimal(item[1])
+            if price is None or quantity is None:
+                return None
+            return price, quantity
+
+        if isinstance(item, dict):
+            price_val = None
+            qty_val = None
+            for key in ("price", "px", "p", "rate", "bidPrice", "askPrice"):
+                if key in item:
+                    price_val = item.get(key)
+                    break
+            for key in ("qty", "size", "q", "quantity", "amount", "vol", "volume", "sz"):
+                if key in item:
+                    qty_val = item.get(key)
+                    break
+
+            if price_val is None or qty_val is None:
+                if len(item) == 2:
+                    values = list(item.values())
+                    price_val = values[0]
+                    qty_val = values[1]
+
+            price = cls._safe_decimal(price_val)
+            quantity = cls._safe_decimal(qty_val)
+            if price is None or quantity is None:
+                return None
+            return price, quantity
+
+        return None
+
+    @classmethod
+    def _coerce_orderbook_levels(cls, levels_raw: Any) -> List[Tuple[Decimal, Decimal]]:
+        levels: List[Tuple[Decimal, Decimal]] = []
+        if levels_raw is None:
+            return levels
+
+        if isinstance(levels_raw, dict):
+            # 可能是 price -> qty 的映射
+            for key, value in levels_raw.items():
+                price = cls._safe_decimal(key)
+                quantity = cls._safe_decimal(value)
+                if price is None or quantity is None:
+                    continue
+                levels.append((price, quantity))
+            return levels
+
+        if not isinstance(levels_raw, list):
+            return levels
+
+        for item in levels_raw:
+            parsed = cls._parse_orderbook_item(item)
+            if parsed:
+                levels.append(parsed)
+        return levels
+
+    @classmethod
+    def _extract_orderbook_levels(
+        cls,
+        data: Any,
+        *,
+        bid_keys: Tuple[str, ...] = ("b", "bids"),
+        ask_keys: Tuple[str, ...] = ("a", "asks"),
+    ) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
+        if data is None:
+            return [], []
+
+        if isinstance(data, list) and data:
+            if len(data) == 1:
+                data = data[0]
+            elif isinstance(data[0], dict) and any(
+                key in data[0] for key in (*bid_keys, *ask_keys, "data", "result", "contents")
+            ):
+                data = data[0]
+
+        if isinstance(data, dict):
+            for wrapper_key in ("data", "result", "contents", "order_book", "orderbook", "book", "orderBook"):
+                inner = data.get(wrapper_key)
+                if isinstance(inner, dict) and any(key in inner for key in (*bid_keys, *ask_keys)):
+                    data = inner
+                    break
+
+        if not isinstance(data, dict):
+            return [], []
+
+        bids_raw = None
+        for key in bid_keys:
+            if key in data:
+                bids_raw = data.get(key)
+                break
+        asks_raw = None
+        for key in ask_keys:
+            if key in data:
+                asks_raw = data.get(key)
+                break
+
+        bids = cls._coerce_orderbook_levels(bids_raw)
+        asks = cls._coerce_orderbook_levels(asks_raw)
+        return bids, asks
     
     def _on_auth_success(self):
         """認證成功後的回調"""
@@ -645,11 +768,13 @@ class BaseWebSocketClient(ABC):
                     elif self.bid_price and self.ask_price:
                         self.last_price = (self.bid_price + self.ask_price) / 2
                         self.add_price_to_history(self.last_price)
+                    self.last_ticker_update = time.time()
             
             elif depth_channel and stream.startswith(depth_channel.split('.')[0]):
                 depth_data = self._handle_depth_message(data)
                 if depth_data:
                     self._update_orderbook_from_data(depth_data)
+                    self.last_depth_update = time.time()
             
             elif order_channel and stream.startswith(order_channel.split('.')[0]):
                 # 處理訂單更新
@@ -852,6 +977,7 @@ class BaseWebSocketClient(ABC):
             if self.bid_price and self.ask_price:
                 self.last_price = (self.bid_price + self.ask_price) / 2
                 self.add_price_to_history(self.last_price)
+            self.last_depth_update = time.time()
             
             return True
             
@@ -894,6 +1020,15 @@ class BaseWebSocketClient(ABC):
                 if not found:
                     self.orderbook["asks"].append([price_f, quantity_f])
                     self.orderbook["asks"] = sorted(self.orderbook["asks"], key=lambda x: x[0])
+
+        # 更新最佳買賣價與中間價，避免只有深度更新時價格停滯
+        if self.orderbook["bids"]:
+            self.bid_price = self.orderbook["bids"][0][0]
+        if self.orderbook["asks"]:
+            self.ask_price = self.orderbook["asks"][0][0]
+        if self.bid_price and self.ask_price:
+            self.last_price = (self.bid_price + self.ask_price) / 2
+            self.add_price_to_history(self.last_price)
     
     def add_price_to_history(self, price: float):
         """添加價格到歷史記錄"""
@@ -994,7 +1129,25 @@ class BaseWebSocketClient(ABC):
     
     def get_bid_ask(self) -> Tuple[Optional[float], Optional[float]]:
         """獲取買賣價"""
-        return self.bid_price, self.ask_price
+        bid = self.bid_price
+        ask = self.ask_price
+        orderbook_bid = None
+        orderbook_ask = None
+        if self.orderbook.get("bids"):
+            orderbook_bid = self.orderbook["bids"][0][0]
+        if self.orderbook.get("asks"):
+            orderbook_ask = self.orderbook["asks"][0][0]
+
+        if orderbook_bid is not None and orderbook_ask is not None:
+            # 若深度更新時間較新，優先使用訂單簿
+            if self.last_depth_update and self.last_depth_update >= self.last_ticker_update:
+                bid = orderbook_bid
+                ask = orderbook_ask
+            # 若 ticker 尚未可用，退回使用訂單簿
+            elif bid is None or ask is None:
+                bid = orderbook_bid
+                ask = orderbook_ask
+        return bid, ask
     
     def get_orderbook(self) -> Dict[str, List]:
         """獲取訂單簿"""

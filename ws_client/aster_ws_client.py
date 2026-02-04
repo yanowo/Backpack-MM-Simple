@@ -93,8 +93,15 @@ class AsterWebSocket(BaseWebSocketClient):
         except json.JSONDecodeError:
             return None
 
-        if isinstance(payload, dict) and payload.get("e") == "ORDER_TRADE_UPDATE":
-            return "private.orders", payload
+        if isinstance(payload, dict):
+            event_type = payload.get("e")
+            if event_type == "ORDER_TRADE_UPDATE":
+                return "private.orders", payload
+            # 兼容直接事件（未包 stream）
+            if event_type in {"bookTicker", "depthUpdate"}:
+                if event_type == "bookTicker":
+                    return self._get_ticker_channel(), payload
+                return self._get_depth_channel(), payload
 
         if isinstance(payload, dict) and "stream" in payload and "data" in payload:
             return payload["stream"], payload["data"]
@@ -155,27 +162,9 @@ class AsterWebSocket(BaseWebSocketClient):
         )
 
     def _handle_depth_message(self, data: Any) -> Optional[WSOrderBookData]:
-        if not isinstance(data, dict):
+        bids, asks = self._extract_orderbook_levels(data, bid_keys=("b", "bids"), ask_keys=("a", "asks"))
+        if not bids and not asks:
             return None
-
-        bids: List[Tuple[Decimal, Decimal]] = []
-        asks: List[Tuple[Decimal, Decimal]] = []
-
-        for bid in data.get("b", []) or data.get("bids", []):
-            try:
-                price = Decimal(str(bid[0]))
-                qty = Decimal(str(bid[1]))
-                bids.append((price, qty))
-            except Exception:
-                continue
-
-        for ask in data.get("a", []) or data.get("asks", []):
-            try:
-                price = Decimal(str(ask[0]))
-                qty = Decimal(str(ask[1]))
-                asks.append((price, qty))
-            except Exception:
-                continue
 
         return WSOrderBookData(
             symbol=self.symbol,
