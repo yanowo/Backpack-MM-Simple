@@ -5,4 +5,4 @@ __pycache__/
 *.db
 .claude/settings.local.json
 settings/tri_hedge_strategy.json
-
+tri_hedge_round_stats.json
