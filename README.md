@@ -12,7 +12,7 @@
 | **Aster** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://www.asterdex.com/referral/1a7b6E) |
 | **Paradex** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.paradex.trade/r/yanowo) |
 | **Lighter** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.lighter.xyz/?referral=YANOWO) |
-| **Lighter Robinhood Chain** | ❌ | ✅ | ✅ | ❌ | ✅ | [交易頁面](https://robinhoodchain.lighter.xyz/trade/LIT) |
+| **Lighter Robinhood** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://robinhoodchain.lighter.xyz/?referral=YANOWO) |
 | **APEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://join.omni.apex.exchange/yanowo) |
 | **StandX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://standx.com/referral?code=yanowo) |
 
