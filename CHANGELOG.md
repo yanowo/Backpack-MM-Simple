@@ -1,4 +1,13 @@
 # Changelog
+## [2.9.0] - 2026-08-17
+
+### 新增
+- **Lighter Robinhood Chain 支援**：新增 `lighter_robinhood` 交易所選項，共用 Lighter REST、簽名與策略邏輯
+- 預設使用 Robinhood Chain REST `https://api.rh.lighter.xyz`、WebSocket `wss://api.rh.lighter.xyz/stream` 與 chain ID `466324`
+- CLI、Web 控制台、WebSocket、永續做市與網格策略均可選擇 Robinhood Chain
+- 新增獨立 `LIGHTER_ROBINHOOD_*` 環境變量，避免與一般 Lighter 主網憑證混用
+- 新增 Robinhood Chain 設定、帳戶索引、REST 與 WebSocket 回歸測試
+
 ## [2.8.0] - 2026-02-04
 
 ### 新增

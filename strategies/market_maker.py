@@ -20,6 +20,7 @@ from ws_client import (
 )
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility, format_quantity
+from utils.lighter_config import is_lighter_exchange
 from logger import setup_logger
 import traceback
 
@@ -208,12 +209,14 @@ class MarketMaker:
                 on_message_callback=self.on_ws_message,
                 auto_reconnect=True,
             )
-        elif exchange == 'lighter':
+        elif is_lighter_exchange(exchange):
             self.ws = LighterWebSocket(
                 symbol=symbol,
                 enable_private=True,
                 on_message_callback=self.on_ws_message,
                 auto_reconnect=True,
+                exchange=exchange,
+                rest_config=self.exchange_config,
             )
         elif exchange == 'apex':
             passphrase = self.exchange_config.get('passphrase')
@@ -267,7 +270,7 @@ class MarketMaker:
         self._load_recent_trades()
 
         # 僅在沒有 WebSocket 時使用 REST 成交同步
-        if self.exchange in ('aster', 'lighter', 'apex', 'standx') and self.ws is None:
+        if (self.exchange in ('aster', 'apex', 'standx') or is_lighter_exchange(self.exchange)) and self.ws is None:
             self._bootstrap_fill_history()
         
         logger.info(f"初始化做市商: {symbol}")
@@ -546,7 +549,9 @@ class MarketMaker:
                     return True
             if getattr(ws, "_auth_completed", False) or getattr(ws, "_auth_sent", False):
                 return True
-            if getattr(ws, "enable_private", False) and self.exchange in ("aster", "lighter"):
+            if getattr(ws, "enable_private", False) and (
+                self.exchange == "aster" or is_lighter_exchange(self.exchange)
+            ):
                 return True
             return False
         return channel in ws.subscriptions
@@ -647,7 +652,7 @@ class MarketMaker:
 
     def _sync_fill_history(self, bootstrap: bool = False) -> None:
         """透過 REST API 同步最新成交"""
-        if self.exchange not in ('aster', 'lighter', 'apex', 'standx'):
+        if self.exchange not in ('aster', 'apex', 'standx') and not is_lighter_exchange(self.exchange):
             return
 
         exchange_label = self.exchange.capitalize()
@@ -1029,12 +1034,14 @@ class MarketMaker:
                     on_message_callback=self.on_ws_message,
                     auto_reconnect=True
                 )
-            elif self.exchange == 'lighter':
+            elif is_lighter_exchange(self.exchange):
                 self.ws = LighterWebSocket(
                     symbol=self.symbol,
                     enable_private=True,
                     on_message_callback=self.on_ws_message,
-                    auto_reconnect=True
+                    auto_reconnect=True,
+                    exchange=self.exchange,
+                    rest_config=self.exchange_config,
                 )
             elif self.exchange == 'apex':
                 passphrase = self.exchange_config.get('passphrase')
@@ -2584,7 +2591,7 @@ class MarketMaker:
                 self.check_order_fills()
 
                 # 透過 REST API 同步最新成交
-                if self.exchange in ('aster', 'lighter', 'apex', 'standx') and self.ws is None:
+                if (self.exchange in ('aster', 'apex', 'standx') or is_lighter_exchange(self.exchange)) and self.ws is None:
                     self._sync_fill_history()
 
                 # 檢查是否需要重平衡倉位

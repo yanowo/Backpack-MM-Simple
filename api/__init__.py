@@ -39,7 +39,7 @@ from .base_client import (
 )
 from .bp_client import BPClient
 from .aster_client import AsterClient
-from .lighter_client import LighterClient  # 輕量依賴，可安全頂層導入
+from .lighter_client import LighterClient, RobinhoodLighterClient  # 輕量依賴，可安全頂層導入
 from .apex_client import ApexClient
 from .standx_client import StandxClient
 
@@ -50,6 +50,7 @@ __all__ = [
     "BPClient",
     "AsterClient",
     "LighterClient",
+    "RobinhoodLighterClient",
     "ApexClient",
     "StandxClient",
     # 標準化響應
@@ -83,6 +84,8 @@ def get_client(name: str, *args, **kwargs):
     name = (name or "").lower()
     if name == "lighter":
         return LighterClient(*args, **kwargs)
+    elif name in ("lighter_robinhood", "lighter-robinhood", "lighter_rh", "lighter-rh", "robinhood_lighter"):
+        return RobinhoodLighterClient(*args, **kwargs)
     elif name == "paradex":
         # 只有真的需要時才導入，避免在 lighter 路徑拉起 starkware/cairo 舊依賴
         from .paradex_client import ParadexClient

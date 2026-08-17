@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any, Set, Iterable
 
 from logger import setup_logger
+from utils.lighter_config import is_lighter_exchange
 from strategies.perp_market_maker import PerpetualMarketMaker, format_balance
 from utils.helpers import round_to_precision, round_to_tick_size, format_quantity
 
@@ -1534,7 +1535,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         """需要用成交歷史驗證訂單是否成交的交易所。"""
         if self.ws and self.ws.is_connected():
             return False
-        return self.exchange in ('paradex', 'aster', 'lighter', 'standx')
+        return self.exchange in ('paradex', 'aster', 'standx') or is_lighter_exchange(self.exchange)
 
     def _place_sync_close_orders(self, uncovered_qty: float, position_type: str, effective_min_size: float = None) -> None:
         """為未覆蓋的倉位補掛平倉單

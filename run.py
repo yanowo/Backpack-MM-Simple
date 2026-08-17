@@ -10,6 +10,11 @@ import traceback
 from typing import Optional
 from config import ENABLE_DATABASE
 from logger import setup_logger
+from utils.lighter_config import (
+    LIGHTER_ROBINHOOD_EXCHANGE,
+    build_lighter_config_from_env,
+    is_lighter_exchange,
+)
 
 # 創建記錄器
 logger = setup_logger("main")
@@ -23,7 +28,7 @@ def parse_arguments():
     parser.add_argument('--web', action='store_true', help='啟動Web界面')
     
     # 基本參數
-    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex', 'lighter', 'apex', 'standx'], default='backpack', help='交易所選擇 (backpack、aster、paradex、lighter、apex 或 standx)')
+    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx'], default='backpack', help='交易所選擇 (backpack、aster、paradex、lighter、lighter_robinhood、apex 或 standx)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
     
@@ -127,26 +132,20 @@ def main():
             'account_address': account_address,
             'base_url': base_url,
         }
-    elif exchange == 'lighter':
-        api_key = os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
-        secret_key = os.getenv('LIGHTER_SECRET_KEY') or api_key
-        base_url = os.getenv('LIGHTER_BASE_URL')
-        account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
-        account_address = os.getenv('LIGHTER_ADDRESS')
-        if not account_index and account_address:
-            from api.lighter_client import _get_lihgter_account_index
-            account_index = _get_lihgter_account_index(account_address)
-        api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
-        chain_id = os.getenv('LIGHTER_CHAIN_ID')
-
-        exchange_config = {
-            'api_private_key': api_key,
-            'account_index': account_index,
-            'api_key_index': api_key_index,
-            'base_url': base_url,
-        }
-        if chain_id is not None:
-            exchange_config['chain_id'] = chain_id
+    elif is_lighter_exchange(exchange):
+        try:
+            exchange_config = build_lighter_config_from_env(
+                exchange,
+                resolve_account_index=True,
+            )
+        except ValueError as exc:
+            logger.error("Lighter 帳戶配置錯誤: %s", exc)
+            sys.exit(1)
+        api_key = args.api_key or exchange_config.get('api_private_key')
+        if api_key:
+            exchange_config['api_private_key'] = api_key
+        secret_key = args.secret_key or api_key
+        account_address = exchange_config.get('account_address')
     elif exchange == 'apex':
         api_key = os.getenv('APEX_API_KEY', '')
         secret_key = os.getenv('APEX_SECRET_KEY', '')
@@ -175,7 +174,7 @@ def main():
         if session_id:
             exchange_config['session_id'] = session_id
     else:
-        logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex'、'lighter'、'apex' 或 'standx'")
+        logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex'、'lighter'、'lighter_robinhood'、'apex' 或 'standx'")
         sys.exit(1)
 
     # 檢查API密鑰
@@ -183,12 +182,13 @@ def main():
         if not secret_key or not account_address:
             logger.error("Paradex 需要提供 StarkNet 私鑰與帳户地址，請確認環境變數已設定")
             sys.exit(1)
-    elif exchange == 'lighter':
+    elif is_lighter_exchange(exchange):
+        lighter_label = 'Lighter Robinhood Chain' if exchange == LIGHTER_ROBINHOOD_EXCHANGE else 'Lighter'
         if not api_key:
-            logger.error("缺少 Lighter 私鑰，請使用 --api-key 或環境變量 LIGHTER_PRIVATE_KEY 提供")
+            logger.error("缺少 %s API 私鑰，請使用 --api-key 或對應的環境變量提供", lighter_label)
             sys.exit(1)
-        if not exchange_config.get('account_index'):
-            logger.error("缺少 Lighter Account Index，請透過環境變量 LIGHTER_ACCOUNT_INDEX 提供")
+        if exchange_config.get('account_index') is None:
+            logger.error("缺少 %s Account Index，請透過對應的 ACCOUNT_INDEX 環境變量提供", lighter_label)
             sys.exit(1)
     elif exchange == 'apex':
         if not api_key or not secret_key:
@@ -427,6 +427,7 @@ def main():
         print("  aster     Aster 永續合約交易所")
         print("  paradex   Paradex 永續合約交易所")
         print("  lighter   Lighter 永續合約交易所")
+        print("  lighter_robinhood  Lighter Robinhood Chain 永續合約交易所")
         print("  apex      APEX Omni 永續合約交易所")
         print("  standx    StandX 永續合約交易所")
         print("\n資料庫參數：")
@@ -452,6 +453,8 @@ def main():
         print("  python run.py --exchange paradex --symbol BTC-USD-PERP --spread 0.3 --market-type perp --max-position 0.5")
         print("  # Lighter 永續合約做市")
         print("  python run.py --exchange lighter --symbol BTCUSDT --spread 0.3 --market-type perp --max-position 0.5")
+        print("  # Lighter Robinhood Chain LIT 永續合約做市")
+        print("  python run.py --exchange lighter_robinhood --symbol LIT --spread 0.3 --market-type perp --max-position 100")
         print("  # APEX 永續合約做市")
         print("  python run.py --exchange apex --symbol BTC-USDT --spread 0.3 --market-type perp --max-position 0.5")
         print("  # StandX 永續合約做市")

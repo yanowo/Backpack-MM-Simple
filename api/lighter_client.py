@@ -33,6 +33,16 @@ from .base_client import (
 )
 from .proxy_utils import get_proxy_config
 from logger import setup_logger
+from utils.lighter_config import (
+    LIGHTER_BASE_URL,
+    LIGHTER_EXCHANGE,
+    LIGHTER_ROBINHOOD_CHAIN_ID,
+    LIGHTER_ROBINHOOD_EXCHANGE,
+    apply_lighter_defaults,
+    get_lighter_account_index as resolve_lighter_account_index,
+    infer_lighter_chain_id,
+    normalize_lighter_exchange,
+)
 
 logger = setup_logger("api.lighter_client")
 
@@ -116,7 +126,11 @@ class SimpleSignerClient:
         self._nonce_lock = threading.Lock()
         self.session = session or requests.Session()
         self.private_key = self._sanitize_private_key(private_key)
-        self.chain_id = int(chain_id) if chain_id is not None else (304 if "mainnet" in self.base_url else 300)
+        self.chain_id = (
+            int(chain_id)
+            if chain_id is not None
+            else infer_lighter_chain_id(self.base_url)
+        )
 
         self.signer = self._load_library(signer_dir)
         self._configure_library()
@@ -551,32 +565,27 @@ class SimpleSignerClient:
 def _compact_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in data.items() if value is not None}
 
-def _get_lihgter_account_index(address):
-    # 通過錢包地址查找主賬户
-    from eth_utils import to_checksum_address
-    import requests
+def get_lighter_account_index(address: str, base_url: str = LIGHTER_BASE_URL) -> int:
+    """Resolve an account index on the selected Lighter deployment."""
+    return resolve_lighter_account_index(address, base_url)
 
-    # 轉換為 EIP-55 校驗格式
-    checksum_address = to_checksum_address(address.lower())
-    url = 'https://mainnet.zklighter.elliot.ai/api/v1/account?by=l1_address&value='
-    full_url = url + checksum_address
 
-    res = requests.get(full_url)
-    data = res.json()
-
-    # 提取 account_index
-    if 'accounts' in data:
-        account_index = data['accounts'][0]['account_index']
-        return int(account_index)
-    else:
-        raise ValueError(f"Account not found for address: {address}")
+def _get_lihgter_account_index(address: str, base_url: str = LIGHTER_BASE_URL) -> int:
+    """Backward-compatible wrapper for the historically misspelled helper."""
+    return get_lighter_account_index(address, base_url)
     
 class LighterClient(BaseExchangeClient):
     """HTTP-based Lighter exchange adapter compatible with the strategy layer."""
 
     def __init__(self, config: Dict[str, Any]):
+        deployment = normalize_lighter_exchange(config.get("deployment"))
+        if deployment is None and infer_lighter_chain_id(config.get("base_url")) == LIGHTER_ROBINHOOD_CHAIN_ID:
+            deployment = LIGHTER_ROBINHOOD_EXCHANGE
+        deployment = deployment or LIGHTER_EXCHANGE
+        config = apply_lighter_defaults(deployment, config)
         super().__init__(config)
-        self.base_url: str = (config.get("base_url") or "https://mainnet.zklighter.elliot.ai").rstrip("/")
+        self.deployment = deployment
+        self.base_url: str = str(config["base_url"]).rstrip("/")
         self.verify_ssl: bool = bool(config.get("verify_ssl", True))
         self.timeout: float = float(config.get("timeout", DEFAULT_HTTP_TIMEOUT) or DEFAULT_HTTP_TIMEOUT)
         self.session = requests.Session()
@@ -602,12 +611,14 @@ class LighterClient(BaseExchangeClient):
         self._market_id_map: Dict[int, Dict[str, Any]] = {}
         self._allow_fee_rate_inference: bool = bool(config.get("allow_fee_rate_inference", False))
 
-        self.account_index: Optional[int] = self._as_int(
-            config.get("account_index")
-            or config.get("accountIndex")
-            or config.get("account_id")
-            or config.get("accountId")
-        )
+        account_index_value = config.get("account_index")
+        if account_index_value is None:
+            account_index_value = config.get("accountIndex")
+        if account_index_value is None:
+            account_index_value = config.get("account_id")
+        if account_index_value is None:
+            account_index_value = config.get("accountId")
+        self.account_index: Optional[int] = self._as_int(account_index_value)
         self.api_key_index: int = self._as_int(config.get("api_key_index") or config.get("apiKeyIndex") or 0, default=0)
         self.private_key: Optional[str] = (
             config.get("api_private_key")
@@ -615,7 +626,10 @@ class LighterClient(BaseExchangeClient):
             or config.get("api_key")
         )
         self.signer_dir: Optional[str] = config.get("signer_lib_dir")
-        self.chain_id: Optional[int] = self._as_int(config.get("chain_id"))
+        self.chain_id: Optional[int] = self._as_int(
+            config.get("chain_id"),
+            default=infer_lighter_chain_id(self.base_url),
+        )
 
         self.auth_token_ttl: int = max(self._as_int(config.get("auth_token_ttl"), default=600) or 600, 120)
 
@@ -641,6 +655,8 @@ class LighterClient(BaseExchangeClient):
             pass
 
     def get_exchange_name(self) -> str:
+        if self.deployment == LIGHTER_ROBINHOOD_EXCHANGE:
+            return "Lighter Robinhood"
         return "Lighter"
 
     # ---- HTTP helpers ----------------------------------------------------------
@@ -879,7 +895,7 @@ class LighterClient(BaseExchangeClient):
         quote_asset = (
             (override.get("quote_asset") if override else None)
             or item.get("quote_asset")
-            or "USDT"
+            or "USDC"
         )
         market_type = (override.get("market_type") if override else None) or item.get("market_type") or "PERP"
         status = (override.get("status") if override else None) or item.get("status") or "TRADING"
@@ -2309,3 +2325,15 @@ class LighterClient(BaseExchangeClient):
             "timestamp": timestamp,
             "tx_hash": trade.get("tx_hash"),
         }
+
+
+class RobinhoodLighterClient(LighterClient):
+    """Lighter adapter pinned to the Robinhood Chain deployment."""
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            apply_lighter_defaults(
+                LIGHTER_ROBINHOOD_EXCHANGE,
+                config or {},
+            )
+        )

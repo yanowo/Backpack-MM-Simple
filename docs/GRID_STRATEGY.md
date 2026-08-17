@@ -67,7 +67,7 @@ python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --st
 
 | 參數 | 説明 | 默認值 | 示例 |
 |------|------|--------|------|
-| `--exchange` | 交易所選擇 | - | `backpack`, `aster`, `paradex`, `lighter`, `apex`, `standx` |
+| `--exchange` | 交易所選擇 | - | `backpack`, `aster`, `paradex`, `lighter`, `lighter_robinhood`, `apex`, `standx` |
 | `--symbol` | 交易對 | - | `SOL_USDC`、`SOL_USDC_PERP` 或 `BTC-USD` |
 | `--strategy` | 策略類型 | `standard` | `grid` 或 `perp_grid` |
 | `--market-type` | 市場類型（永續合約必填） | `spot` | `perp` |

@@ -6,12 +6,17 @@ from __future__ import annotations
 import json
 import time
 from decimal import Decimal
-import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from config import LIGHTER_WS_URL
 from api.lighter_client import LighterClient
 from logger import setup_logger
+from utils.lighter_config import (
+    LIGHTER_EXCHANGE,
+    LIGHTER_ROBINHOOD_EXCHANGE,
+    apply_lighter_defaults,
+    build_lighter_config_from_env,
+    normalize_lighter_exchange,
+)
 
 from .base_ws_client import (
     BaseWebSocketClient,
@@ -36,15 +41,24 @@ class LighterWebSocket(BaseWebSocketClient):
         auto_reconnect: bool = True,
         proxy: Optional[str] = None,
         ws_url: Optional[str] = None,
+        exchange: str = LIGHTER_EXCHANGE,
+        rest_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._client_cache: Dict[str, LighterClient] = {}
         self._market_id: Optional[int] = None
         self.enable_private = enable_private
         self._account_index: Optional[int] = None
         self._private_channels: List[str] = []
+        self.exchange = normalize_lighter_exchange(exchange) or LIGHTER_EXCHANGE
+        env_config = build_lighter_config_from_env(
+            self.exchange,
+            resolve_account_index=False,
+        )
+        env_config.update(rest_config or {})
+        self._rest_config = apply_lighter_defaults(self.exchange, env_config)
 
         config = WSConnectionConfig(
-            ws_url=ws_url or LIGHTER_WS_URL,
+            ws_url=ws_url or str(self._rest_config["ws_url"]),
             api_key=None,
             secret_key=None,
             proxy=proxy,
@@ -62,6 +76,8 @@ class LighterWebSocket(BaseWebSocketClient):
     # ==================== 抽象方法實現 ====================
 
     def get_exchange_name(self) -> str:
+        if self.exchange == LIGHTER_ROBINHOOD_EXCHANGE:
+            return "Lighter Robinhood"
         return "Lighter"
 
     def _create_auth_message(self) -> Optional[Dict[str, Any]]:
@@ -287,15 +303,9 @@ class LighterWebSocket(BaseWebSocketClient):
         )
 
     def _get_rest_client(self) -> LighterClient:
-        cache_key = "lighter_client"
+        cache_key = self.exchange
         if cache_key not in self._client_cache:
-            self._client_cache[cache_key] = LighterClient({
-                "api_private_key": os.getenv("LIGHTER_PRIVATE_KEY"),
-                "account_index": os.getenv("LIGHTER_ACCOUNT_INDEX"),
-                "api_key_index": os.getenv("LIGHTER_API_KEY_INDEX") or 0,
-                "signer_lib_dir": os.getenv("LIGHTER_SIGNER_LIB_DIR"),
-                "base_url": os.getenv("LIGHTER_BASE_URL") or "https://mainnet.zklighter.elliot.ai",
-            })
+            self._client_cache[cache_key] = LighterClient(dict(self._rest_config))
         return self._client_cache[cache_key]
 
     def _on_open(self, ws_app):
@@ -351,3 +361,11 @@ class LighterWebSocket(BaseWebSocketClient):
             return int(value)
         except Exception:
             return None
+
+
+class RobinhoodLighterWebSocket(LighterWebSocket):
+    """WebSocket client pinned to the Robinhood Chain Lighter deployment."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["exchange"] = LIGHTER_ROBINHOOD_EXCHANGE
+        super().__init__(*args, **kwargs)

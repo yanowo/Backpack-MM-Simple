@@ -34,7 +34,7 @@ from .base_ws_client import (
 from .backpack_ws_client import BackpackWebSocket
 from .aster_ws_client import AsterWebSocket
 from .paradex_ws_client import ParadexWebSocket
-from .lighter_ws_client import LighterWebSocket
+from .lighter_ws_client import LighterWebSocket, RobinhoodLighterWebSocket
 from .apex_ws_client import ApexWebSocket
 from .standx_ws_client import StandxWebSocket
 
@@ -52,6 +52,7 @@ __all__ = [
     "AsterWebSocket",
     "ParadexWebSocket",
     "LighterWebSocket",
+    "RobinhoodLighterWebSocket",
     "ApexWebSocket",
     "StandxWebSocket",
 ]

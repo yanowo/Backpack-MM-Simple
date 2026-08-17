@@ -1,6 +1,6 @@
 """
 配置文件 - 全局配置管理中心
-支持多交易所配置（Backpack, Aster, Paradex, Lighter, Apex, StandX）
+支持多交易所配置（Backpack, Aster, Paradex, Lighter, Lighter Robinhood, Apex, StandX）
 """
 import os
 from dotenv import load_dotenv
@@ -61,7 +61,24 @@ PARADEX_JWT_REFRESH_BUFFER = int(os.getenv('PARADEX_JWT_REFRESH_BUFFER', '120'))
 
 # ==================== Lighter 交易所配置 ====================
 
+LIGHTER_BASE_URL = os.getenv('LIGHTER_BASE_URL', 'https://mainnet.zklighter.elliot.ai')
 LIGHTER_WS_URL = os.getenv('LIGHTER_WS_URL', 'wss://mainnet.zklighter.elliot.ai/stream')
+LIGHTER_CHAIN_ID = int(os.getenv('LIGHTER_CHAIN_ID') or '304')
+
+# ==================== Lighter Robinhood Chain 配置 ====================
+
+LIGHTER_ROBINHOOD_BASE_URL = os.getenv(
+    'LIGHTER_ROBINHOOD_BASE_URL',
+    os.getenv('LIGHTER_RH_BASE_URL', 'https://api.rh.lighter.xyz'),
+)
+LIGHTER_ROBINHOOD_WS_URL = os.getenv(
+    'LIGHTER_ROBINHOOD_WS_URL',
+    os.getenv('LIGHTER_RH_WS_URL', 'wss://api.rh.lighter.xyz/stream'),
+)
+LIGHTER_ROBINHOOD_CHAIN_ID = int(os.getenv(
+    'LIGHTER_ROBINHOOD_CHAIN_ID',
+    os.getenv('LIGHTER_RH_CHAIN_ID', '466324'),
+) or '466324')
 
 # ==================== Apex 交易所配置 ====================
 

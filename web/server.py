@@ -17,6 +17,11 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from logger import setup_logger
+from utils.lighter_config import (
+    LIGHTER_ROBINHOOD_EXCHANGE,
+    build_lighter_config_from_env,
+    is_lighter_exchange,
+)
 
 logger = setup_logger("web_server")
 
@@ -125,31 +130,17 @@ def start_bot():
                 'api_key': api_key,
                 'secret_key': secret_key,
             }
-        elif exchange == 'lighter':
-            api_key = os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY')
-            secret_key = os.getenv('LIGHTER_SECRET_KEY') or api_key
-            base_url = os.getenv('LIGHTER_BASE_URL')
-            account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
-            account_address = os.getenv('LIGHTER_ADDRESS')
-            if not account_index:
-                from api.lighter_client import _get_lihgter_account_index
-                account_index = _get_lihgter_account_index(account_address)
-            api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
-            chain_id = os.getenv('LIGHTER_CHAIN_ID')
-
-            exchange_config = {
-                'api_private_key': api_key,
-                'account_index': account_index,
-                'api_key_index': api_key_index,
-                'base_url': base_url,
-            }
-            if chain_id is not None:
-                exchange_config['chain_id'] = chain_id
-            if not api_key:
-                logger.error("缺少 Lighter 私鑰，請使用 --api-key 或環境變量 LIGHTER_PRIVATE_KEY 提供")
-                sys.exit(1)
-            if not exchange_config.get('account_index'):
-                logger.error("缺少 Lighter Account Index，請透過環境變量 LIGHTER_ACCOUNT_INDEX 提供")
+        elif is_lighter_exchange(exchange):
+            try:
+                exchange_config = build_lighter_config_from_env(
+                    exchange,
+                    resolve_account_index=True,
+                )
+            except ValueError as exc:
+                return jsonify({'success': False, 'message': f'Lighter 帳戶配置錯誤: {exc}'}), 400
+            api_key = exchange_config.get('api_private_key')
+            secret_key = api_key
+            account_address = exchange_config.get('account_address')
 
         elif exchange == 'paradex':
             private_key = os.getenv('PARADEX_PRIVATE_KEY', '')
@@ -198,6 +189,9 @@ def start_bot():
         if exchange == 'paradex':
             if not secret_key or not account_address:
                 return jsonify({'success': False, 'message': 'Paradex需要提供StarkNet私鑰與帳户地址'}), 400
+        elif is_lighter_exchange(exchange):
+            if not api_key or exchange_config.get('account_index') is None:
+                return jsonify({'success': False, 'message': 'Lighter API 私鑰或 Account Index 未配置，請檢查對應的環境變量'}), 400
         elif exchange == 'apex':
             if not api_key or not secret_key:
                 return jsonify({'success': False, 'message': 'APEX API密鑰未配置，請檢查環境變量'}), 400
@@ -471,14 +465,26 @@ def stop_bot():
 def get_config():
     """獲取配置信息"""
     return jsonify({
-        'exchanges': ['backpack', 'aster', 'paradex', 'lighter', 'apex', 'standx'],
+        'exchanges': ['backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx'],
         'market_types': ['spot', 'perp'],
         'strategies': ['standard', 'maker_hedge', 'grid'],
         'env_configured': {
             'backpack': bool(os.getenv('BACKPACK_KEY') and os.getenv('BACKPACK_SECRET')),
             'aster': bool(os.getenv('ASTER_API_KEY') and os.getenv('ASTER_SECRET_KEY')),
             'paradex': bool(os.getenv('PARADEX_PRIVATE_KEY') and os.getenv('PARADEX_ACCOUNT_ADDRESS')),
-            'lighter': bool(os.getenv('LIGHTER_PRIVATE_KEY') and os.getenv('LIGHTER_PUBLIC_KEY')),
+            'lighter': bool(
+                (os.getenv('LIGHTER_PRIVATE_KEY') or os.getenv('LIGHTER_API_KEY'))
+                and (os.getenv('LIGHTER_ACCOUNT_INDEX') or os.getenv('LIGHTER_ADDRESS'))
+            ),
+            LIGHTER_ROBINHOOD_EXCHANGE: bool(
+                (os.getenv('LIGHTER_ROBINHOOD_PRIVATE_KEY') or os.getenv('LIGHTER_RH_PRIVATE_KEY'))
+                and (
+                    os.getenv('LIGHTER_ROBINHOOD_ACCOUNT_INDEX')
+                    or os.getenv('LIGHTER_RH_ACCOUNT_INDEX')
+                    or os.getenv('LIGHTER_ROBINHOOD_ADDRESS')
+                    or os.getenv('LIGHTER_RH_ADDRESS')
+                )
+            ),
             'apex': bool(os.getenv('APEX_API_KEY') and os.getenv('APEX_SECRET_KEY')),
             'standx': bool((os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT')) and (os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY')))
         }
@@ -594,7 +600,7 @@ def collect_strategy_stats():
                                 quote_asset_key = 'USDC'
 
                         # Lighter 特殊處理：統一使用 USDC（因為返回了別名）
-                        if current_strategy.exchange.lower() == 'lighter':
+                        if is_lighter_exchange(current_strategy.exchange):
                             if 'USDC' in balances:
                                 quote_asset_key = 'USDC'
 
