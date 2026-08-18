@@ -1,9 +1,10 @@
 import os
 import json
 import unittest
+from decimal import Decimal
 from unittest.mock import Mock, patch
 
-from api import RobinhoodLighterClient, get_client
+from api import ApiResponse, OrderInfo, RobinhoodLighterClient, get_client
 from api.lighter_client import LighterClient
 from utils.lighter_config import (
     LIGHTER_ROBINHOOD_BASE_URL,
@@ -93,6 +94,57 @@ class LighterRobinhoodConfigTests(unittest.TestCase):
             params={"l1_address": "0x0000000000000000000000000000000000000001"},
             timeout=10.0,
         )
+
+    def test_execute_order_uses_order_info_size_when_new_order_is_immediately_visible(self):
+        client = RobinhoodLighterClient({})
+        signer = Mock()
+        signer.create_order.return_value = (
+            {"client_order_index": 123},
+            {"code": 200, "tx_hash": "0xtest"},
+            None,
+        )
+        open_order = OrderInfo(
+            order_id="456",
+            client_order_id="123",
+            symbol="LIT",
+            side="Bid",
+            order_type="LIMIT",
+            size=Decimal("0.15"),
+            price=Decimal("75.5"),
+            status="open",
+            filled_size=Decimal("0"),
+            remaining_size=Decimal("0.15"),
+            raw={"clientOrderIndex": 123},
+        )
+
+        with (
+            patch.object(client, "_ensure_signer_client", return_value=signer),
+            patch.object(
+                client,
+                "_lookup_market",
+                return_value={
+                    "market_id": 5,
+                    "base_precision": 3,
+                    "quote_precision": 3,
+                    "min_order_size": 0.001,
+                },
+            ),
+            patch.object(client, "get_open_orders", return_value=ApiResponse.ok([open_order])),
+        ):
+            result = client.execute_order(
+                {
+                    "symbol": "LIT",
+                    "side": "Bid",
+                    "type": "LIMIT",
+                    "price": "75.5",
+                    "quantity": "0.15",
+                    "clientOrderIndex": 123,
+                }
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.data.order_id, "456")
+        self.assertEqual(result.data.size, Decimal("0.15"))
 
 
 if __name__ == "__main__":

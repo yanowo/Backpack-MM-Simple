@@ -1677,12 +1677,13 @@ class LighterClient(BaseExchangeClient):
                         raw["order_id"] = exchange_order_id
                         raw["client_order_index"] = client_order_index
                         return ApiResponse.ok(OrderResult(
+                            success=True,
                             order_id=exchange_order_id,  # 使用交易所訂單 ID
                             client_order_id=str(client_order_index),  # 保留 clientOrderIndex
                             symbol=symbol,
                             side="Ask" if is_ask else "Bid",
                             price=order.price,
-                            size=order.quantity,
+                            size=order.size,
                             status=order.status or "pending",
                             raw=raw,
                         ), raw=raw)
