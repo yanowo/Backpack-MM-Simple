@@ -520,7 +520,7 @@ https://docs.standx.com/standx-api/standx-api
     </td>
     <td align="center">
       <a href="https://x.com/0xYuCry">
-        <img src="https://github.com/soyucry" width="100px;" alt="0xYuCry"/><br />
+        <img src="https://github.com/soyucry.png" width="100px;" alt="0xYuCry"/><br />
         <sub><b>0xYuCry</b></sub>
       </a><br />
     </td>
