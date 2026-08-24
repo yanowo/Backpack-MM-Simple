@@ -17,6 +17,7 @@ from ws_client import (
     LighterWebSocket,
     ApexWebSocket,
     StandxWebSocket,
+    PopdexWebSocket,
 )
 from database.db import Database
 from utils.helpers import round_to_precision, round_to_tick_size, calculate_volatility, format_quantity
@@ -247,6 +248,16 @@ class MarketMaker:
                 on_message_callback=self.on_ws_message,
                 auto_reconnect=True,
             )
+        elif exchange == 'popdex':
+            self.ws = PopdexWebSocket(
+                account_address=self.exchange_config.get('account_address') or api_key,
+                symbol=symbol,
+                enable_private=True,
+                on_message_callback=self.on_ws_message,
+                auto_reconnect=True,
+                ws_url=self.exchange_config.get('ws_url'),
+                rest_config=self.exchange_config,
+            )
 
         if self.ws:
             self.ws.connect()
@@ -270,7 +281,7 @@ class MarketMaker:
         self._load_recent_trades()
 
         # 僅在沒有 WebSocket 時使用 REST 成交同步
-        if (self.exchange in ('aster', 'apex', 'standx') or is_lighter_exchange(self.exchange)) and self.ws is None:
+        if (self.exchange in ('aster', 'apex', 'standx', 'popdex') or is_lighter_exchange(self.exchange)) and self.ws is None:
             self._bootstrap_fill_history()
         
         logger.info(f"初始化做市商: {symbol}")
@@ -652,7 +663,7 @@ class MarketMaker:
 
     def _sync_fill_history(self, bootstrap: bool = False) -> None:
         """透過 REST API 同步最新成交"""
-        if self.exchange not in ('aster', 'apex', 'standx') and not is_lighter_exchange(self.exchange):
+        if self.exchange not in ('aster', 'apex', 'standx', 'popdex') and not is_lighter_exchange(self.exchange):
             return
 
         exchange_label = self.exchange.capitalize()
@@ -751,7 +762,7 @@ class MarketMaker:
             raw = t.raw if hasattr(t, 'raw') and t.raw else {}
             client_id = None
             if isinstance(raw, dict):
-                client_id = raw.get('clientId') or raw.get('client_id') or raw.get('clientOrderId')
+                client_id = raw.get('clientId') or raw.get('client_id') or raw.get('clientOrderId') or raw.get('clientOid')
 
             result.append({
                 'fill_id': t.trade_id,
@@ -1070,6 +1081,16 @@ class MarketMaker:
                     enable_private=True,
                     on_message_callback=self.on_ws_message,
                     auto_reconnect=True,
+                )
+            elif self.exchange == 'popdex':
+                self.ws = PopdexWebSocket(
+                    account_address=self.exchange_config.get('account_address') or self.api_key,
+                    symbol=self.symbol,
+                    enable_private=True,
+                    on_message_callback=self.on_ws_message,
+                    auto_reconnect=True,
+                    ws_url=self.exchange_config.get('ws_url'),
+                    rest_config=self.exchange_config,
                 )
             else:
                 logger.info(f"{self.exchange} 交易所未配置 WebSocket 客戶端")
@@ -2591,7 +2612,7 @@ class MarketMaker:
                 self.check_order_fills()
 
                 # 透過 REST API 同步最新成交
-                if (self.exchange in ('aster', 'apex', 'standx') or is_lighter_exchange(self.exchange)) and self.ws is None:
+                if (self.exchange in ('aster', 'apex', 'standx', 'popdex') or is_lighter_exchange(self.exchange)) and self.ws is None:
                     self._sync_fill_history()
 
                 # 檢查是否需要重平衡倉位

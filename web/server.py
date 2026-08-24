@@ -22,6 +22,7 @@ from utils.lighter_config import (
     build_lighter_config_from_env,
     is_lighter_exchange,
 )
+from utils.popdex_config import build_popdex_config_from_env
 
 logger = setup_logger("web_server")
 
@@ -182,6 +183,11 @@ def start_bot():
             }
             if session_id:
                 exchange_config['session_id'] = session_id
+        elif exchange == 'popdex':
+            exchange_config = build_popdex_config_from_env()
+            api_key = exchange_config.get('account_address', '')
+            secret_key = exchange_config.get('agent_private_key', '')
+            account_address = api_key
         else:
             return jsonify({'success': False, 'message': f'不支持的交易所: {exchange}'}), 400
 
@@ -198,6 +204,9 @@ def start_bot():
         elif exchange == 'standx':
             if not api_key or not secret_key:
                 return jsonify({'success': False, 'message': 'StandX API Token 或簽名密鑰未配置，請檢查環境變量'}), 400
+        elif exchange == 'popdex':
+            if not account_address or not secret_key:
+                return jsonify({'success': False, 'message': 'POPDEX 帳戶地址或 Agent Key 未配置，請檢查 POPDEX_ACCOUNT_ADDRESS/POPDEX_AGENT_PRIVATE_KEY'}), 400
         else:
             if not api_key or not secret_key:
                 return jsonify({'success': False, 'message': 'API密鑰未配置，請檢查環境變量'}), 400
@@ -212,6 +221,9 @@ def start_bot():
         market_type = data.get('market_type', 'spot')
         strategy_name = data.get('strategy', 'standard')
         enable_db = data.get('enable_db', False)
+
+        if exchange == 'popdex' and market_type != 'perp':
+            return jsonify({'success': False, 'message': 'POPDEX 目前僅支援永續合約'}), 400
 
         # 永續合約參數
         target_position = float(data.get('target_position', 1.0))
@@ -465,7 +477,7 @@ def stop_bot():
 def get_config():
     """獲取配置信息"""
     return jsonify({
-        'exchanges': ['backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx'],
+        'exchanges': ['backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx', 'popdex'],
         'market_types': ['spot', 'perp'],
         'strategies': ['standard', 'maker_hedge', 'grid'],
         'env_configured': {
@@ -486,7 +498,8 @@ def get_config():
                 )
             ),
             'apex': bool(os.getenv('APEX_API_KEY') and os.getenv('APEX_SECRET_KEY')),
-            'standx': bool((os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT')) and (os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY')))
+            'standx': bool((os.getenv('STANDX_API_TOKEN') or os.getenv('STANDX_JWT')) and (os.getenv('STANDX_PRIVATE_KEY') or os.getenv('STANDX_SIGNING_KEY'))),
+            'popdex': bool(os.getenv('POPDEX_ACCOUNT_ADDRESS') and os.getenv('POPDEX_AGENT_PRIVATE_KEY')),
         }
     })
 

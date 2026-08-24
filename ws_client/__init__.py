@@ -37,6 +37,7 @@ from .paradex_ws_client import ParadexWebSocket
 from .lighter_ws_client import LighterWebSocket, RobinhoodLighterWebSocket
 from .apex_ws_client import ApexWebSocket
 from .standx_ws_client import StandxWebSocket
+from .popdex_ws_client import PopdexWebSocket
 
 __all__ = [
     # 基類
@@ -55,4 +56,5 @@ __all__ = [
     "RobinhoodLighterWebSocket",
     "ApexWebSocket",
     "StandxWebSocket",
+    "PopdexWebSocket",
 ]

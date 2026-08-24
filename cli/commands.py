@@ -13,6 +13,7 @@ from api.paradex_client import ParadexClient
 from api.lighter_client import LighterClient
 from api.apex_client import ApexClient
 from api.standx_client import StandxClient
+from api.popdex_client import PopdexClient
 from ws_client import BackpackWebSocket
 from strategies.market_maker import MarketMaker
 from strategies.perp_market_maker import PerpetualMarketMaker
@@ -30,6 +31,7 @@ from utils.lighter_config import (
     is_lighter_exchange,
     normalize_lighter_exchange,
 )
+from utils.popdex_config import build_popdex_config_from_env
 
 logger = setup_logger("cli")
 
@@ -94,6 +96,9 @@ def _resolve_api_credentials(exchange: str, api_key: Optional[str], secret_key: 
             os.getenv("STANDX_PRIVATE_KEY"),
             os.getenv("STANDX_SIGNING_KEY"),
         ]
+    elif exchange == "popdex":
+        api_candidates = [os.getenv("POPDEX_ACCOUNT_ADDRESS")]
+        secret_candidates = [os.getenv("POPDEX_AGENT_PRIVATE_KEY")]
     else:
         api_candidates = [
             os.getenv("BACKPACK_KEY"),
@@ -116,7 +121,7 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
     lighter_exchange = normalize_lighter_exchange(exchange)
     if lighter_exchange:
         exchange = lighter_exchange
-    if exchange not in ('backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx'):
+    if exchange not in ('backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx', 'popdex'):
         raise ValueError(f"不支持的交易所: {exchange}")
 
     if is_lighter_exchange(exchange):
@@ -125,8 +130,8 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
         config = apply_lighter_defaults(exchange, config)
     else:
         config = dict(exchange_config or {})
-    config_api_key = api_key or config.get('api_key')
-    config_secret_key = secret_key or config.get('secret_key') or config.get('private_key')
+    config_api_key = api_key or config.get('api_key') or config.get('account_address')
+    config_secret_key = secret_key or config.get('secret_key') or config.get('private_key') or config.get('agent_private_key')
 
     # Lighter特殊處理：api_key是private_key，secret_key是account_index
     if is_lighter_exchange(exchange):
@@ -158,6 +163,14 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
             config['zk_seeds'] = os.getenv('APEX_ZK_SEEDS', '')
         if 'base_url' not in config:
             config['base_url'] = os.getenv('APEX_BASE_URL', 'https://omni.apex.exchange')
+    elif exchange == 'popdex':
+        env_config = build_popdex_config_from_env()
+        env_config.update(config)
+        config = env_config
+        if config_api_key:
+            config['account_address'] = config_api_key
+        if config_secret_key:
+            config['agent_private_key'] = config_secret_key
     # 其他交易所使用傳統的api_key/secret_key
     else:
         if config_api_key:
@@ -194,6 +207,12 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
             if config.get('api_key') or config.get('secret_key')
             else 'public'
         )
+    elif exchange == 'popdex':
+        cache_suffix = (
+            f"{config.get('account_address', '')}_{config.get('agent_private_key', '')}"
+            if config.get('account_address') or config.get('agent_private_key')
+            else 'public'
+        )
     else:
         # 其他交易所使用api_key/secret_key
         cache_suffix = (
@@ -214,6 +233,8 @@ def _get_client(api_key=None, secret_key=None, exchange='backpack', exchange_con
             client_cls = LighterClient
         elif exchange == 'standx':
             client_cls = StandxClient
+        elif exchange == 'popdex':
+            client_cls = PopdexClient
         else:  # apex
             client_cls = ApexClient
         _client_cache[cache_key] = client_cls(config)
@@ -276,6 +297,11 @@ def get_balance_command(api_key, secret_key):
     if standx_api and standx_secret:
         exchanges_to_check.append(('standx', standx_api, standx_secret))
 
+    # 檢查 POPDEX
+    popdex_account, popdex_agent_key = _resolve_api_credentials('popdex', None, None)
+    if popdex_account and popdex_agent_key:
+        exchanges_to_check.append(('popdex', popdex_account, popdex_agent_key))
+
     if not exchanges_to_check:
         print("未找到任何已配置的交易所 API 密鑰")
         return
@@ -317,6 +343,12 @@ def get_balance_command(api_key, secret_key):
                     'signing_key': ex_secret_key,
                     'base_url': os.getenv('STANDX_BASE_URL', 'https://perps.standx.com'),
                 }
+            elif exchange == 'popdex':
+                exchange_config = build_popdex_config_from_env()
+                exchange_config.update({
+                    'account_address': ex_api_key,
+                    'agent_private_key': ex_secret_key,
+                })
             else:
                 exchange_config['secret_key'] = ex_secret_key
             
@@ -740,13 +772,13 @@ def configure_rebalance_settings():
 def run_market_maker_command(api_key, secret_key):
     """執行做市策略命令"""
     # [整合功能] 1. 增加交易所選擇
-    exchange_input = input("請選擇交易所 (backpack/aster/paradex/lighter/lighter_robinhood/apex/standx，默認 backpack): ").strip().lower()
+    exchange_input = input("請選擇交易所 (backpack/aster/paradex/lighter/lighter_robinhood/apex/standx/popdex，默認 backpack): ").strip().lower()
     normalized_lighter = normalize_lighter_exchange(exchange_input)
     if normalized_lighter:
         exchange_input = normalized_lighter
 
     # 處理交易所選擇
-    if exchange_input in ('backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx', ''):
+    if exchange_input in ('backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx', 'popdex', ''):
         exchange = exchange_input if exchange_input else 'backpack'
     else:
         print(f"警告: 不識別的交易所 '{exchange_input}'，使用默認 'backpack'")
@@ -805,6 +837,12 @@ def run_market_maker_command(api_key, secret_key):
             'signing_key': secret_key,
             'base_url': os.getenv('STANDX_BASE_URL', 'https://perps.standx.com'),
         }
+    elif exchange == 'popdex':
+        exchange_config = build_popdex_config_from_env()
+        exchange_config.update({
+            'account_address': api_key,
+            'agent_private_key': secret_key,
+        })
     else:
         print("錯誤：不支持的交易所。")
         return
@@ -821,6 +859,10 @@ def run_market_maker_command(api_key, secret_key):
     else:
         print(f"警告: 不識別的市場類型 '{market_type_input}'，使用默認 'spot'")
         market_type = "spot"
+
+    if exchange == 'popdex' and market_type != 'perp':
+        print("提示: POPDEX 僅支援永續合約，已自動切換為 'perp'")
+        market_type = 'perp'
 
     # 策略選擇（支援拼寫糾正）
     strategy_input = input("請選擇策略 (standard/maker_hedge/grid，默認 standard): ").strip().lower()
@@ -1551,6 +1593,7 @@ def main_cli(api_key=API_KEY, secret_key=SECRET_KEY, enable_database=ENABLE_DATA
         LIGHTER_ROBINHOOD_EXCHANGE: 'Lighter Robinhood Chain',
         'apex': 'APEX',
         'standx': 'StandX',
+        'popdex': 'POPDEX',
     }.get(exchange.lower(), 'Backpack')
 
     while True:

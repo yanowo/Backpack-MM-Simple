@@ -15,13 +15,14 @@
 | **Lighter Robinhood** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://robinhoodchain.lighter.xyz/?referral=YANOWO) |
 | **APEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://join.omni.apex.exchange/yanowo) |
 | **StandX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://standx.com/referral?code=yanowo) |
+| **POPDEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [官方網站](https://popdex.xyz/) |
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
 ## 功能特點
 
 - **Web 控制枱**：直觀的圖形化界面，實時監控交易狀態和策略表現
-- **多交易所架構**：支援 Backpack、Aster、Paradex、Lighter、Lighter Robinhood Chain、APEX、StandX，可擴展至其他交易所
+- **多交易所架構**：支援 Backpack、Aster、Paradex、Lighter、Lighter Robinhood Chain、APEX、StandX、POPDEX，可擴展至其他交易所
 - **四種策略模式**：
   - [現貨做市](docs/SPOT_MARKET_MAKING.md)：多層訂單 + 智能重平衡
   - [永續做市](docs/PERP_MARKET_MAKING.md)：倉位管理 + 風險中性
@@ -125,7 +126,7 @@ pip install -r requirements.txt
 
 ```
 # ==================== 全局代理配置 ====================
-# HTTP/HTTPS 代理（支持所有交易所：Backpack、Aster、Paradex、Lighter、APEX）
+# HTTP/HTTPS 代理（支持所有交易所：Backpack、Aster、Paradex、Lighter、APEX、StandX、POPDEX）
 # 格式: http://USER:PASS@HOST:PORT 或 https://USER:PASS@HOST:PORT
 # 若不需要代理，留空即可
 HTTP_PROXY=
@@ -188,6 +189,16 @@ STANDX_BASE_URL=https://perps.standx.com
 STANDX_WS_URL=wss://perps.standx.com/ws-stream/v1
 STANDX_SESSION_ID=
 
+# POPDEX Futures（Agent Key 需先在 POPDEX 授權）
+POPDEX_ACCOUNT_ADDRESS=0xyour_popdex_wallet_address
+POPDEX_AGENT_PRIVATE_KEY=0xyour_authorized_agent_private_key
+POPDEX_NETWORK=mainnet
+POPDEX_BASE_URL=https://api.popdex.xyz
+POPDEX_RPC_URL=https://api.popdex.xyz/api/v1/web3/rpc
+POPDEX_WS_URL=wss://ws.popdex.xyz/v1/ws/public
+POPDEX_CHAIN_ID=2184
+POPDEX_MARKET_SLIPPAGE=0.01
+
 # Optional Features
 # ENABLE_DATABASE=1  # 啟用資料庫寫入 (預設0關閉)
 
@@ -241,7 +252,7 @@ http://localhost:5000
 - **實時監控**：查看交易統計、餘額、盈虧等實時數據（每5秒更新）
 - **策略管理**：啟動/停止做市策略，支持多種策略類型
 - **參數配置**：
-  - 交易所選擇（Backpack、Aster、Paradex、Lighter、Lighter Robinhood、APEX、StandX）
+  - 交易所選擇（Backpack、Aster、Paradex、Lighter、Lighter Robinhood、APEX、StandX、POPDEX）
   - 市場類型（現貨 / 永續合約）
   - 策略類型（標準做市 / Maker-Taker 對沖）
   - 交易對、價差、訂單數量等
@@ -351,6 +362,12 @@ python run.py --exchange standx --market-type perp --symbol BTC-USD --spread 0.0
 # StandX Maker-Taker 對沖
 python run.py --exchange standx --market-type perp --symbol BTC-USD --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
 
+# POPDEX 永續做市（交易對使用 POPDEX symbol）
+python run.py --exchange popdex --market-type perp --symbol BTCUSDT --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 10
+
+# POPDEX Maker-Taker 對沖
+python run.py --exchange popdex --market-type perp --symbol BTCUSDT --spread 0.01 --quantity 0.001 --strategy maker_hedge --target-position 0 --max-position 1 --position-threshold 0.1 --duration 3600 --interval 8
+
 # BackPack 現貨網格交易（自動價格範圍）
 python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price --grid-num 10 --quantity 0.1 --duration 3600 --interval 60
 
@@ -374,6 +391,9 @@ python run.py --exchange apex --market-type perp --symbol BTCUSDT --strategy per
 
 # StandX 永續合約網格交易（自動價格範圍）
 python run.py --exchange standx --market-type perp --symbol BTC-USD --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
+
+# POPDEX 永續合約網格交易（自動價格範圍）
+python run.py --exchange popdex --market-type perp --symbol BTCUSDT --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
 ```
 
 > **適合場景**：自動化部署、定時任務、批量運行  
@@ -388,6 +408,7 @@ python run.py --exchange standx --market-type perp --symbol BTC-USD --strategy p
 - [永續合約做市策略](docs/PERP_MARKET_MAKING.md) - 倉位管理、風險中性
 - [Maker-Taker 對沖策略](docs/MAKER_TAKER_HEDGE.md) - 即時對沖、零持倉
 - [網格交易策略](docs/GRID_STRATEGY.md) - 區間震盪、自動套利
+- [POPDEX 接入與 Agent Key 設定](docs/POPDEX.md) - 錢包授權、主網/測試網與執行方式
 
 ---
 
@@ -396,7 +417,7 @@ python run.py --exchange standx --market-type perp --symbol BTC-USD --strategy p
 #### 基本參數
 - `--api-key`: API 密鑰 (可選，默認使用環境變數)
 - `--secret-key`: API 密鑰 (可選，默認使用環境變數)
-- `--exchange`: 交易所選擇 (`backpack`, `aster`, `paradex`, `lighter`, `lighter_robinhood`, `apex`, `standx`)
+- `--exchange`: 交易所選擇 (`backpack`, `aster`, `paradex`, `lighter`, `lighter_robinhood`, `apex`, `standx`, `popdex`)
 - `--symbol`: 交易對 (例如: SOL_USDC)
 - `--spread`: 價差百分比 (例如: 0.5)
 - `--quantity`: 訂單數量 (可選)
@@ -480,6 +501,9 @@ https://api-docs.omni.apex.exchange/#introduction
 
 - **StandX API**
 https://docs.standx.com/standx-api/standx-api
+
+- **POPDEX API / Product Docs**
+https://popdex.xyz/docs/product-docs/intro
 
 ### WebSocket 文獻資料
 

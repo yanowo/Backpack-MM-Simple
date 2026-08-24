@@ -15,6 +15,7 @@ from utils.lighter_config import (
     build_lighter_config_from_env,
     is_lighter_exchange,
 )
+from utils.popdex_config import build_popdex_config_from_env
 
 # 創建記錄器
 logger = setup_logger("main")
@@ -28,7 +29,7 @@ def parse_arguments():
     parser.add_argument('--web', action='store_true', help='啟動Web界面')
     
     # 基本參數
-    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx'], default='backpack', help='交易所選擇 (backpack、aster、paradex、lighter、lighter_robinhood、apex 或 standx)')
+    parser.add_argument('--exchange', type=str, choices=['backpack', 'aster', 'paradex', 'lighter', LIGHTER_ROBINHOOD_EXCHANGE, 'apex', 'standx', 'popdex'], default='backpack', help='交易所選擇 (backpack、aster、paradex、lighter、lighter_robinhood、apex、standx 或 popdex)')
     parser.add_argument('--api-key', type=str, help='API Key (可選，默認使用環境變數或配置文件)')
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
     
@@ -173,8 +174,15 @@ def main():
         }
         if session_id:
             exchange_config['session_id'] = session_id
+    elif exchange == 'popdex':
+        exchange_config = build_popdex_config_from_env()
+        api_key = args.api_key or exchange_config.get('account_address', '')
+        secret_key = args.secret_key or exchange_config.get('agent_private_key', '')
+        exchange_config['account_address'] = api_key
+        exchange_config['agent_private_key'] = secret_key
+        account_address = api_key
     else:
-        logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex'、'lighter'、'lighter_robinhood'、'apex' 或 'standx'")
+        logger.error("不支持的交易所，請選擇 'backpack'、'aster'、'paradex'、'lighter'、'lighter_robinhood'、'apex'、'standx' 或 'popdex'")
         sys.exit(1)
 
     # 檢查API密鑰
@@ -197,6 +205,10 @@ def main():
     elif exchange == 'standx':
         if not api_key or not secret_key:
             logger.error("缺少 StandX API Token 或簽名密鑰，請設置 STANDX_API_TOKEN/STANDX_JWT 與 STANDX_PRIVATE_KEY")
+            sys.exit(1)
+    elif exchange == 'popdex':
+        if not account_address or not secret_key:
+            logger.error("缺少 POPDEX 帳戶地址或 Agent Key，請設置 POPDEX_ACCOUNT_ADDRESS 與 POPDEX_AGENT_PRIVATE_KEY")
             sys.exit(1)
     else:
         if not api_key or not secret_key:
@@ -238,6 +250,10 @@ def main():
             
             # 處理重平設置
             market_type = args.market_type
+
+            if exchange == 'popdex' and market_type != 'perp' and args.strategy != 'perp_grid':
+                logger.error("POPDEX 目前僅支援永續合約，請加上 --market-type perp")
+                sys.exit(1)
 
             strategy_name = args.strategy
 

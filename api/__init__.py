@@ -53,6 +53,7 @@ __all__ = [
     "RobinhoodLighterClient",
     "ApexClient",
     "StandxClient",
+    "PopdexClient",
     # 標準化響應
     "ApiResponse",
     # 訂單相關
@@ -98,6 +99,9 @@ def get_client(name: str, *args, **kwargs):
         return ApexClient(*args, **kwargs)
     elif name == "standx":
         return StandxClient(*args, **kwargs)
+    elif name == "popdex":
+        from .popdex_client import PopdexClient
+        return PopdexClient(*args, **kwargs)
     else:
         raise ValueError(f"未知交易所: {name}")
 
@@ -106,4 +110,7 @@ def __getattr__(name: str):
     if name == "ParadexClient":
         from .paradex_client import ParadexClient
         return ParadexClient
+    if name == "PopdexClient":
+        from .popdex_client import PopdexClient
+        return PopdexClient
     raise AttributeError(name)

@@ -9,3 +9,4 @@ flask-socketio
 python-socketio
 werkzeug
 apexomni
+eth-account

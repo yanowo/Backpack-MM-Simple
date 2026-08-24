@@ -1535,7 +1535,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         """需要用成交歷史驗證訂單是否成交的交易所。"""
         if self.ws and self.ws.is_connected():
             return False
-        return self.exchange in ('paradex', 'aster', 'standx') or is_lighter_exchange(self.exchange)
+        return self.exchange in ('paradex', 'aster', 'standx', 'popdex') or is_lighter_exchange(self.exchange)
 
     def _place_sync_close_orders(self, uncovered_qty: float, position_type: str, effective_min_size: float = None) -> None:
         """為未覆蓋的倉位補掛平倉單
@@ -2020,7 +2020,7 @@ class PerpGridStrategy(PerpetualMarketMaker):
         )
 
         should_try_reduce_only = self._use_reduce_only_for_close()
-        if should_try_reduce_only and self.exchange in ('backpack', 'aster', 'paradex'):
+        if should_try_reduce_only and self.exchange in ('backpack', 'aster', 'paradex', 'popdex'):
             conflict_side = 'Ask' if is_long else 'Bid'
             self._cancel_conflicting_open_order_at_price(next_price, conflict_side)
 
