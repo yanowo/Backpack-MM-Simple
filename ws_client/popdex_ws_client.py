@@ -58,10 +58,13 @@ class PopdexWebSocket(BaseWebSocketClient):
         self.position_updates: Dict[str, Dict[str, Any]] = {}
 
         normalized_symbol = PopdexClient._symbol_key(symbol)
+        # An explicitly selected network must not inherit a stale WS endpoint
+        # from the opposite network in the process environment.
+        has_explicit_network = bool(self.rest_config.get("network"))
         configured_url = (
             ws_url
             or self.rest_config.get("ws_url")
-            or os.getenv("POPDEX_WS_URL")
+            or (None if has_explicit_network else os.getenv("POPDEX_WS_URL"))
             or self._default_ws_url()
         )
         config = WSConnectionConfig(

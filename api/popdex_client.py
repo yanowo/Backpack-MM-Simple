@@ -63,6 +63,10 @@ class PopdexClient(BaseExchangeClient):
     ORDER_ALL_CANCEL_EVENT = keccak(
         text="OrderAllCancel(address,uint16,(bool,uint8),(bool,uint8),(bool,bool),bool,uint32)"
     ).hex()
+    ORDER_ERROR_MESSAGES = {
+        15002: "Hedge mode order requires position_side",
+        15003: "position_side is not allowed in one-way position mode",
+    }
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -88,6 +92,9 @@ class PopdexClient(BaseExchangeClient):
         self.receipt_timeout = float(config.get("receipt_timeout", 8))
         self.receipt_poll_interval = float(config.get("receipt_poll_interval", 0.2))
         self.wait_for_receipt = bool(config.get("wait_for_receipt", True))
+        configured_position_mode = str(config.get("position_mode") or "").strip()
+        self._position_mode = self._normalize_position_mode(configured_position_mode)
+        self._position_mode_checked = bool(self._position_mode)
         configured_slippage = self._decimal(config.get("market_slippage"))
         self.market_slippage = (
             configured_slippage if configured_slippage is not None else Decimal("0.01")
@@ -242,6 +249,63 @@ class PopdexClient(BaseExchangeClient):
             return None
         return f"/api/v1/account/{self.account_address}{suffix}"
 
+    @staticmethod
+    def _normalize_position_mode(value: Any) -> Optional[str]:
+        normalized = str(value or "").strip().replace("_", "").replace("-", "").upper()
+        if normalized in {"ONEWAY", "HEDGE"}:
+            return normalized
+        return None
+
+    def _get_position_mode(self) -> Optional[str]:
+        """Load the account mode once so orderParams[7] matches POPDEX settings."""
+        if self._position_mode_checked:
+            return self._position_mode
+        self._position_mode_checked = True
+        path = self._private_path("/settings")
+        if not path:
+            return None
+        raw = self.make_request("GET", path)
+        error = self._api_error(raw)
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if error or not isinstance(data, dict):
+            logger.warning(
+                "Unable to load POPDEX position mode; defaulting order position_side to None: %s",
+                error.error_message if error else "malformed account settings",
+            )
+            return None
+        self._position_mode = self._normalize_position_mode(data.get("positionMode"))
+        if not self._position_mode:
+            logger.warning(
+                "Unknown POPDEX position mode %r; defaulting order position_side to None",
+                data.get("positionMode"),
+            )
+        else:
+            logger.info("POPDEX account position mode: %s", self._position_mode)
+        return self._position_mode
+
+    def _apply_account_position_mode(self, order_details: Dict[str, Any]) -> Dict[str, Any]:
+        """Return an order copy with a position side valid for One-way/Hedge mode."""
+        prepared = dict(order_details)
+        mode = self._get_position_mode()
+        if mode == "ONEWAY" or mode is None:
+            # POPDEX error 15003: One-way accounts must use PositionSide.None.
+            prepared["positionSide"] = "None"
+            return prepared
+
+        explicit = str(
+            prepared.get("positionSide") or prepared.get("position_side") or ""
+        ).upper()
+        if explicit in {"LONG", "SHORT", "1", "2"}:
+            return prepared
+
+        side = str(prepared.get("side") or "").upper()
+        reduce_only = bool(prepared.get("reduceOnly") or prepared.get("reduce_only"))
+        if reduce_only:
+            prepared["positionSide"] = "Short" if side in {"BUY", "BID", "LONG"} else "Long"
+        else:
+            prepared["positionSide"] = "Long" if side in {"BUY", "BID", "LONG"} else "Short"
+        return prepared
+
     def _require_account(self) -> Optional[ApiResponse]:
         if not self.account_address or not is_address(self.account_address):
             return ApiResponse.error("POPDEX_ACCOUNT_ADDRESS is missing or invalid")
@@ -358,7 +422,10 @@ class PopdexClient(BaseExchangeClient):
                 order_id = str(decoded[0])
                 client_id = bytes(decoded[1]).rstrip(b"\x00").decode("utf-8", errors="ignore") or None
                 if not bool(decoded[6]) or int(decoded[7]) != 0:
-                    return None, f"POPDEX OrderCreate rejected with code {decoded[7]}"
+                    code = int(decoded[7])
+                    description = self.ORDER_ERROR_MESSAGES.get(code)
+                    suffix = f": {description}" if description else ""
+                    return None, f"POPDEX OrderCreate rejected with code {code}{suffix}"
                 return order_id, client_id
             except Exception:
                 continue
@@ -418,9 +485,9 @@ class PopdexClient(BaseExchangeClient):
             return 2
         if explicit in {"NONE", "NET", "0"}:
             return 0
-        if reduce_only:
-            return 2 if side == 0 else 1
-        return 1 if side == 0 else 2
+        # PositionSide.None is required for One-way accounts. Hedge-mode
+        # inference is applied by _apply_account_position_mode before packing.
+        return 0
 
     @classmethod
     def _pack_order_params(cls, order_details: Dict[str, Any]) -> bytes:
@@ -799,7 +866,8 @@ class PopdexClient(BaseExchangeClient):
             slippage = self.market_slippage if order_type.upper() == "MARKET" else 0
 
         try:
-            params = self._pack_order_params(order_details)
+            prepared_order = self._apply_account_position_mode(order_details)
+            params = self._pack_order_params(prepared_order)
             client_id, client_id_bytes = self._client_id_bytes(
                 order_details.get("clientId")
                 or order_details.get("clientOrderId")
@@ -827,11 +895,11 @@ class PopdexClient(BaseExchangeClient):
         if send_error:
             return ApiResponse.error(send_error, raw=raw)
         receipt = self._wait_receipt(tx_hash)
-        if not self._receipt_succeeded(receipt):
-            return ApiResponse.error("POPDEX order transaction reverted", raw={"txHash": tx_hash, "receipt": receipt})
         order_id, event_error = self._order_from_receipt(receipt)
         if event_error:
             return ApiResponse.error(event_error, raw={"txHash": tx_hash, "receipt": receipt})
+        if not self._receipt_succeeded(receipt):
+            return ApiResponse.error("POPDEX order transaction reverted", raw={"txHash": tx_hash, "receipt": receipt})
 
         lookup_data: Optional[Dict[str, Any]] = None
         if not order_id and self.wait_for_receipt:

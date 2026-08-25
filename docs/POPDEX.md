@@ -76,6 +76,8 @@ python run.py --exchange popdex --market-type perp --symbol BTCUSDT --spread 0.0
 
 交易寫入使用 POPDEX 官方規格：Order 合約 `0x0000000000000000000000000000000000001000`、legacy transaction、`gasPrice=0`、`gas=1,000,000`，Agent Key nonce 使用單調遞增的毫秒時間戳。價格、數量、滑點與 builder fee rate 在合約參數中均使用 18 位定點數。策略未單獨提供滑點時，市價單預設使用 `POPDEX_MARKET_SLIPPAGE=0.01`（1%）；設為 `0` 代表官方語意的「不限滑點」，請謹慎使用。
 
+程式會在首次下單前讀取 `/api/v1/account/{walletId}/settings`，依帳戶的 `Oneway`／`Hedge` 模式設定 Order 合約的 `positionSide`。One-way 模式固定使用 `None`；Hedge 模式才會使用 `Long`／`Short`，避免 POPDEX 錯誤碼 `15002`／`15003`。
+
 ## 驗證
 
 先用小額與測試網驗證 Agent Key 權限、交易對最小數量、PostOnly 行為與 reduce-only 平倉。程式會等待上鏈 receipt；超過 `POPDEX_RECEIPT_TIMEOUT` 時會回傳 client order ID，之後可以該 ID 撤單，不會重送可能已上鏈的訂單。

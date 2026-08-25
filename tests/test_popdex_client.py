@@ -20,6 +20,7 @@ class PopdexClientTest(unittest.TestCase):
             "account_address": ACCOUNT,
             "agent_private_key": AGENT_KEY,
             "wait_for_receipt": False,
+            "position_mode": "Oneway",
         }
         config.update(overrides)
         return PopdexClient(config)
@@ -32,7 +33,7 @@ class PopdexClientTest(unittest.TestCase):
                 "postOnly": True,
             }
         )
-        self.assertEqual(packed[:10], bytes([2, 0, 0, 4, 0, 0, 0, 1, 0, 0]))
+        self.assertEqual(packed[:10], bytes([2, 0, 0, 4, 0, 0, 0, 0, 0, 0]))
         self.assertEqual(len(packed), 32)
 
     def test_pack_reduce_only_buy_closes_short(self):
@@ -48,7 +49,36 @@ class PopdexClientTest(unittest.TestCase):
         self.assertEqual(packed[2], 0)
         self.assertEqual(packed[3], 2)
         self.assertEqual(packed[6], 1)
-        self.assertEqual(packed[7], 2)
+        self.assertEqual(packed[7], 0)
+
+    def test_account_position_mode_sets_valid_position_side(self):
+        oneway = self.make_client(position_mode="Oneway")
+        hedge = self.make_client(position_mode="Hedge")
+
+        oneway_buy = oneway._apply_account_position_mode({"side": "Bid"})
+        hedge_buy = hedge._apply_account_position_mode({"side": "Bid"})
+        hedge_reduce_buy = hedge._apply_account_position_mode(
+            {"side": "Bid", "reduceOnly": True}
+        )
+
+        self.assertEqual(oneway_buy["positionSide"], "None")
+        self.assertEqual(hedge_buy["positionSide"], "Long")
+        self.assertEqual(hedge_reduce_buy["positionSide"], "Short")
+
+    def test_position_mode_is_loaded_from_account_settings(self):
+        client = self.make_client(position_mode="")
+        client.make_request = Mock(
+            return_value={
+                "code": "200",
+                "data": {"positionMode": "Oneway"},
+            }
+        )
+        prepared = client._apply_account_position_mode({"side": "Ask"})
+        self.assertEqual(prepared["positionSide"], "None")
+        self.assertEqual(client._position_mode, "ONEWAY")
+        client.make_request.assert_called_once_with(
+            "GET", f"/api/v1/account/{ACCOUNT}/settings"
+        )
 
     def test_market_and_ticker_mapping(self):
         client = self.make_client()
@@ -189,6 +219,39 @@ class PopdexClientTest(unittest.TestCase):
             "OrderCancel",
         )
         self.assertEqual(error, "POPDEX OrderCancel rejected with code 7001")
+
+    def test_order_business_error_is_reported_before_reverted_status(self):
+        client = self.make_client(wait_for_receipt=True)
+        client._market_cache["BTCUSDT"] = {"symbol": "BTCUSDT", "symbolId": "20000"}
+        client._send_contract_call = Mock(return_value=("0xdeadbeef", None, {}))
+        client._wait_receipt = Mock(
+            return_value={
+                "status": "0x0",
+                "logs": [
+                    {
+                        "topics": ["0x" + client.ORDER_CREATE_EVENT],
+                        "data": "0x"
+                        + abi_encode(
+                            ["uint128", "bytes32", "int256", "int256", "int256", "uint8", "bool", "uint32"],
+                            [0, bytes(32), 0, 0, 0, 0, False, 15003],
+                        ).hex(),
+                    }
+                ],
+            }
+        )
+        response = client.execute_order(
+            {
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Bid",
+                "price": "80000",
+                "quantity": "0.0002",
+                "postOnly": True,
+            }
+        )
+        self.assertFalse(response.success)
+        self.assertIn("code 15003", response.error_message)
+        self.assertIn("one-way position mode", response.error_message)
 
     def test_fill_mapping_uses_popdex_exec_fields(self):
         client = self.make_client()
