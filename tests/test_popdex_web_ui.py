@@ -52,6 +52,15 @@ class PopdexWebUiTest(unittest.TestCase):
         self.assertIn("https://github.com/yanowo/Backpack-MM-Simple", html)
         self.assertIn("YanOwO", html)
 
+    def test_quantitative_trading_brand_copy_is_concise(self):
+        from web.server import app
+
+        html = app.test_client().get("/").get_data(as_text=True)
+        self.assertIn("量化交易控制台", html)
+        self.assertNotIn("做市交易控制枱", html)
+        self.assertNotIn("專業交易儀錶板", html)
+        self.assertNotIn("Backpack 做市交易儀錶板", html)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the JavaScript regression test")
     def test_wallet_discovery_merges_eip6963_and_legacy_duplicates(self):
         script = r"""

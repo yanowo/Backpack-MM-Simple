@@ -139,14 +139,6 @@ body {
     text-transform: uppercase;
 }
 
-.brand-subtitle {
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-}
-
 .navbar-contact-links {
     display: flex;
     min-width: 0;
@@ -1526,22 +1518,6 @@ body.agent-modal-open {
     gap: var(--spacing-md);
 }
 
-.footer-product {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-md);
-}
-
-.footer-text {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-    font-weight: 500;
-}
-
-.footer-divider {
-    color: var(--border-secondary);
-}
-
 .footer-meta {
     font-size: 0.75rem;
     color: var(--text-muted);
@@ -1674,8 +1650,7 @@ body.agent-modal-open {
         grid-template-columns: 1fr;
     }
 
-    .footer-content,
-    .footer-product {
+    .footer-content {
         flex-wrap: wrap;
         justify-content: center;
     }

@@ -1,4 +1,44 @@
 # Changelog
+
+## [2.10.0] - 2026-08-25
+
+### 新增
+- **POPDEX 交易所完整支援**：新增 POPDEX 永續合約 REST、鏈上交易與 WebSocket 整合
+  - 支援市場規格、行情、訂單簿、餘額、訂單、倉位與成交查詢
+  - 透過官方 Order precompile 與 Agent Key 簽署下單、撤單及全部撤單交易
+  - 訂閱 `ticker`、`books5`、`order`、`fill`、`position`、`account` 即時頻道，支援心跳、重連與 REST 備援
+  - CLI、Web 控制台、永續做市、Maker-Taker 對沖與永續網格策略均可選擇 POPDEX
+- **POPDEX Agent Web 授權精靈**：支援 EIP-6963／EIP-1193 瀏覽器 EVM 錢包，不限定 MetaMask
+  - 可偵測 OKX Wallet、Phantom、MetaMask、Backpack、Rabby 等注入式 EVM 錢包
+  - 頁面開啟時即預先檢查本機金鑰與鏈上授權，不需先選擇 POPDEX
+  - 支援建立本機 Agent Key、切換 POPDEX 網路、設定授權期限與子帳戶範圍
+- **Agent 授權管理**：新增備份後更換與取消授權功能
+  - 使用官方 `replaceAgent` 原子更換為全新 Agent 地址
+  - 使用官方 `revokeAgent` 取消鏈上交易授權
+  - 操作前只備份 `POPDEX_*` 設定至 `.popdex-agent-backups/`，交易確認後才更新或清除本機金鑰
+
+### 修復
+- **POPDEX 倉位模式**：依帳戶 `Oneway`／`Hedge` 模式正確編碼 `positionSide`，避免方向參數遭拒
+- **POPDEX 下單結果判定**：區分交易 receipt、WebSocket 業務錯誤與 client order ID，避免實際掛單成功卻被記錄為失敗
+- **POPDEX 錯誤資訊**：優先顯示官方 Order／Cancel 業務錯誤碼與原因，改善下單失敗診斷
+- **EVM 錢包重複偵測**：合併 EIP-6963 與舊式 injected provider 公告，避免同一錢包重複顯示
+- **Lighter 訂單解析**：修正新訂單立即可見時的訂單數量解析，避免策略因回應格式差異中斷
+
+### 優化
+- POPDEX Agent 授權精靈改為基本設置旁的條件式按鈕與彈出視窗，減少策略配置頁面佔用
+- Web UI 重構為石墨黑與暖銅色交易終端風格，改善資訊層級、響應式排版與操作狀態提示
+- 新增 Phantom、MetaMask 本機備援 Logo，錢包未提供圖示時仍可正確辨識
+- Agent 設定與管理 API 僅允許本機 loopback 存取，且不向瀏覽器回傳或顯示私鑰
+
+### 安全
+- Agent 更換一律產生全新地址，避免重新授權已撤銷地址造成交易重放風險
+- Agent 備份目錄加入 Git 忽略；待確認的新金鑰只暫存於本機，鏈上交易失敗或遭拒時會清除
+- 主錢包僅負責確認鏈上授權與權限管理，策略執行仍只使用不具提款權限的 Agent Key
+
+### 文檔與測試
+- 新增 `docs/POPDEX.md`，整理 REST、WebSocket、鏈上交易、環境變數與 Agent 授權管理流程
+- 新增 POPDEX client、WebSocket、Agent calldata、備份流程、Web UI 與錢包去重回歸測試
+
 ## [2.9.0] - 2026-08-17
 
 ### 新增
