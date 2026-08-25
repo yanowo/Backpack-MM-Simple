@@ -200,7 +200,23 @@
                     <div class="config-compact">
                         <!-- Basic Settings -->
                         <div class="config-block">
-                            <h3 class="block-title">基本設置</h3>
+                            <div class="block-title-row">
+                                <h3 class="block-title">基本設置</h3>
+                                <button type="button" id="popdexAgentLauncher" class="popdex-agent-launcher is-idle" hidden
+                                        aria-haspopup="dialog" aria-controls="popdexAgentModal" aria-expanded="false">
+                                    <span class="popdex-launcher-icon" aria-hidden="true">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                                            <path d="m9 12 2 2 4-4"/>
+                                        </svg>
+                                    </span>
+                                    <span class="popdex-launcher-copy">
+                                        <strong id="popdexAgentLauncherText">設定 POPDEX Agent</strong>
+                                        <small id="popdexAgentLauncherStatus">尚未設定</small>
+                                    </span>
+                                    <span class="popdex-launcher-dot"></span>
+                                </button>
+                            </div>
                             <div class="form-grid-compact">
                                 <div class="form-field">
                                     <label class="field-label">交易所</label>
@@ -420,20 +436,31 @@
                 </form>
             </section>
 
-            <!-- POPDEX Agent Setup -->
-            <section id="popdexAgentPanel" class="agent-panel" hidden>
-                <div class="agent-panel-glow" aria-hidden="true"></div>
-                <div class="section-header-bar agent-header">
-                    <div class="header-left">
-                        <div class="agent-eyebrow">POPDEX / LOCAL SECURITY MODULE</div>
-                        <h2 class="section-title">Agent 授權精靈</h2>
-                        <span class="section-subtitle">連接任一 EVM 錢包，建立不具提款權限的交易 Agent</span>
+            <!-- POPDEX Agent Setup Modal -->
+            <div id="popdexAgentModal" class="agent-modal" hidden role="dialog" aria-modal="true"
+                 aria-labelledby="popdexAgentModalTitle">
+                <div class="agent-modal-backdrop" data-agent-modal-close aria-hidden="true"></div>
+                <section id="popdexAgentPanel" class="agent-panel agent-modal-card" tabindex="-1">
+                    <div class="agent-panel-glow" aria-hidden="true"></div>
+                    <div class="section-header-bar agent-header">
+                        <div class="header-left">
+                            <div class="agent-eyebrow">POPDEX / LOCAL SECURITY MODULE</div>
+                            <h2 id="popdexAgentModalTitle" class="section-title">Agent 授權精靈</h2>
+                            <span class="section-subtitle">連接任一 EVM 錢包，建立不具提款權限的交易 Agent</span>
+                        </div>
+                        <div class="agent-header-actions">
+                            <div id="popdexAgentBadge" class="agent-status-badge is-idle">
+                                <span class="agent-status-dot"></span>
+                                <span id="popdexAgentBadgeText">尚未設定</span>
+                            </div>
+                            <button type="button" id="closePopdexAgentModal" class="agent-modal-close"
+                                    aria-label="關閉 POPDEX Agent 授權精靈">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                                    <path d="M6 6l12 12M18 6 6 18"/>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
-                    <div id="popdexAgentBadge" class="agent-status-badge is-idle">
-                        <span class="agent-status-dot"></span>
-                        <span id="popdexAgentBadgeText">尚未設定</span>
-                    </div>
-                </div>
 
                 <div class="agent-security-banner">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -543,7 +570,8 @@
                     <span>LOCAL ONLY</span>
                     私鑰只會寫入本機 <code>.env</code>，API 不會回傳或顯示私鑰。Agent 僅可交易，不能提款。
                 </div>
-            </section>
+                </section>
+            </div>
 
             <!-- Activity Log -->
             <section class="log-panel">

@@ -8,6 +8,10 @@ let activeEvmWallet = null;
 let activeEvmAccount = null;
 let preparedPopdexAgent = null;
 let popdexAgentNetworkInitialized = false;
+let lastAgentModalFocus = null;
+let anonymousEvmWalletId = 0;
+let evmWalletProviderKeys = new WeakMap();
+let walletRenderScheduled = false;
 const discoveredEvmWallets = new Map();
 const boundEvmProviders = new WeakSet();
 
@@ -46,7 +50,12 @@ const maxOrdersPerpField = document.getElementById('maxOrdersPerpField');
 const targetPositionField = document.getElementById('targetPositionField');
 const positionThresholdField = document.getElementById('positionThresholdField');
 const inventorySkewField = document.getElementById('inventorySkewField');
+const popdexAgentModal = document.getElementById('popdexAgentModal');
 const popdexAgentPanel = document.getElementById('popdexAgentPanel');
+const popdexAgentLauncher = document.getElementById('popdexAgentLauncher');
+const popdexAgentLauncherText = document.getElementById('popdexAgentLauncherText');
+const popdexAgentLauncherStatus = document.getElementById('popdexAgentLauncherStatus');
+const closePopdexAgentModalBtn = document.getElementById('closePopdexAgentModal');
 const popdexAgentNetwork = document.getElementById('popdexAgentNetwork');
 const popdexAgentExpiry = document.getElementById('popdexAgentExpiry');
 const popdexAgentGlobal = document.getElementById('popdexAgentGlobal');
@@ -198,12 +207,16 @@ function setupEventListeners() {
 // ==================== POPDEX Agent / 通用 EVM 錢包 ====================
 
 function initPopdexAgentSetup() {
-    if (!popdexAgentPanel) {
+    if (!popdexAgentPanel || !popdexAgentModal || !popdexAgentLauncher) {
         return;
     }
 
+    popdexAgentLauncher.addEventListener('click', openPopdexAgentModal);
+    closePopdexAgentModalBtn.addEventListener('click', closePopdexAgentModal);
+    popdexAgentModal.querySelector('.agent-modal-backdrop').addEventListener('click', closePopdexAgentModal);
+    document.addEventListener('keydown', handlePopdexAgentModalKeydown);
     connectEvmWalletBtn.addEventListener('click', showEvmWalletPicker);
-    refreshWalletsBtn.addEventListener('click', () => requestEvmWalletDiscovery(true));
+    refreshWalletsBtn.addEventListener('click', () => requestEvmWalletDiscovery(true, true));
     preparePopdexAgentBtn.addEventListener('click', preparePopdexAgent);
     authorizePopdexAgentBtn.addEventListener('click', authorizePopdexAgent);
 
@@ -215,19 +228,76 @@ function initPopdexAgentSetup() {
     popdexAgentExpiry.addEventListener('change', clearPreparedAgent);
     popdexAgentGlobal.addEventListener('change', clearPreparedAgent);
 
-    requestEvmWalletDiscovery(false);
     togglePopdexAgentPanel();
 }
 
 function togglePopdexAgentPanel() {
-    if (!popdexAgentPanel) {
+    if (!popdexAgentLauncher) {
         return;
     }
     const visible = exchangeSelect.value === 'popdex';
-    popdexAgentPanel.hidden = !visible;
+    popdexAgentLauncher.hidden = !visible;
     if (visible) {
         loadPopdexAgentStatus();
-        requestEvmWalletDiscovery(false);
+    } else {
+        closePopdexAgentModal();
+    }
+}
+
+function openPopdexAgentModal() {
+    if (!popdexAgentModal || exchangeSelect.value !== 'popdex') {
+        return;
+    }
+    lastAgentModalFocus = document.activeElement;
+    popdexAgentModal.hidden = false;
+    popdexAgentLauncher.setAttribute('aria-expanded', 'true');
+    document.body.classList.add('agent-modal-open');
+    loadPopdexAgentStatus();
+    requestEvmWalletDiscovery(false);
+    window.requestAnimationFrame(() => popdexAgentPanel.focus());
+}
+
+function closePopdexAgentModal() {
+    if (!popdexAgentModal || popdexAgentModal.hidden) {
+        return;
+    }
+    popdexAgentModal.hidden = true;
+    popdexAgentLauncher.setAttribute('aria-expanded', 'false');
+    document.body.classList.remove('agent-modal-open');
+    if (lastAgentModalFocus && typeof lastAgentModalFocus.focus === 'function') {
+        lastAgentModalFocus.focus();
+    }
+    lastAgentModalFocus = null;
+}
+
+function handlePopdexAgentModalKeydown(event) {
+    if (!popdexAgentModal || popdexAgentModal.hidden) {
+        return;
+    }
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closePopdexAgentModal();
+        return;
+    }
+    if (event.key !== 'Tab') {
+        return;
+    }
+    const focusable = Array.from(popdexAgentPanel.querySelectorAll(
+        'button:not([disabled]), select:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )).filter(element => !element.hidden && element.offsetParent !== null);
+    if (!focusable.length) {
+        event.preventDefault();
+        popdexAgentPanel.focus();
+        return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
     }
 }
 
@@ -235,23 +305,31 @@ function registerEvmWallet(provider, info = {}) {
     if (!provider || typeof provider.request !== 'function') {
         return;
     }
-    for (const entry of discoveredEvmWallets.values()) {
-        if (entry.provider === provider) {
-            if (info.name && entry.info.name === 'EVM Wallet') {
-                entry.info = normalizeWalletInfo(provider, info);
-            }
-            renderEvmWalletList();
-            return;
-        }
-    }
 
     const normalizedInfo = normalizeWalletInfo(provider, info);
-    let key = normalizedInfo.uuid || normalizedInfo.rdns;
-    if (!key || discoveredEvmWallets.has(key)) {
-        key = `${normalizedInfo.rdns || 'wallet'}-${discoveredEvmWallets.size + 1}`;
+    const knownKey = evmWalletProviderKeys.get(provider);
+    if (knownKey && discoveredEvmWallets.has(knownKey)) {
+        const existing = discoveredEvmWallets.get(knownKey);
+        existing.info = mergeWalletInfo(existing.info, normalizedInfo);
+        scheduleEvmWalletRender();
+        return;
+    }
+
+    const key = canonicalWalletKey(normalizedInfo);
+    if (discoveredEvmWallets.has(key)) {
+        const existing = discoveredEvmWallets.get(key);
+        existing.info = mergeWalletInfo(existing.info, normalizedInfo);
+        // Prefer the standards-announced provider over a legacy aggregate.
+        if (normalizedInfo.uuid) {
+            existing.provider = provider;
+        }
+        evmWalletProviderKeys.set(provider, key);
+        scheduleEvmWalletRender();
+        return;
     }
     discoveredEvmWallets.set(key, {provider, info: normalizedInfo});
-    renderEvmWalletList();
+    evmWalletProviderKeys.set(provider, key);
+    scheduleEvmWalletRender();
 }
 
 function normalizeWalletInfo(provider, info = {}) {
@@ -262,7 +340,13 @@ function normalizeWalletInfo(provider, info = {}) {
         rdns = 'io.rabby';
     } else if (provider.isOkxWallet || provider.isOKExWallet) {
         detectedName = 'OKX Wallet';
-        rdns = 'com.okex.wallet';
+        rdns = 'com.okx.wallet';
+    } else if (provider.isBackpack) {
+        detectedName = 'Backpack';
+        rdns = 'app.backpack';
+    } else if (provider.isPhantom) {
+        detectedName = 'Phantom';
+        rdns = 'app.phantom';
     } else if (provider.isCoinbaseWallet) {
         detectedName = 'Coinbase Wallet';
         rdns = 'com.coinbase.wallet';
@@ -276,6 +360,54 @@ function normalizeWalletInfo(provider, info = {}) {
         icon: info.icon || null,
         rdns: info.rdns || rdns,
     };
+}
+
+function canonicalWalletKey(info) {
+    const rdns = String(info.rdns || '').trim().toLowerCase();
+    const label = `${info.name || ''} ${rdns}`.toLowerCase();
+    const knownWallets = [
+        ['okx', ['okx', 'okex']],
+        ['backpack', ['backpack']],
+        ['phantom', ['phantom']],
+        ['rabby', ['rabby']],
+        ['coinbase', ['coinbase']],
+        ['metamask', ['metamask']],
+    ];
+    for (const [identity, aliases] of knownWallets) {
+        if (aliases.some(alias => label.includes(alias))) {
+            return `wallet:${identity}`;
+        }
+    }
+    if (rdns && rdns !== 'injected.evm.wallet') {
+        return `rdns:${rdns}`;
+    }
+    if (info.uuid) {
+        return `uuid:${String(info.uuid).toLowerCase()}`;
+    }
+    anonymousEvmWalletId += 1;
+    return `provider:${anonymousEvmWalletId}`;
+}
+
+function mergeWalletInfo(existing, incoming) {
+    const existingName = existing.name || 'EVM Wallet';
+    const incomingName = incoming.name || 'EVM Wallet';
+    return {
+        uuid: incoming.uuid || existing.uuid || null,
+        name: existingName === 'EVM Wallet' ? incomingName : existingName,
+        icon: incoming.icon || existing.icon || null,
+        rdns: incoming.rdns !== 'injected.evm.wallet' ? incoming.rdns : existing.rdns,
+    };
+}
+
+function scheduleEvmWalletRender() {
+    if (walletRenderScheduled) {
+        return;
+    }
+    walletRenderScheduled = true;
+    window.requestAnimationFrame(() => {
+        walletRenderScheduled = false;
+        renderEvmWalletList();
+    });
 }
 
 function collectLegacyEvmWallets() {
@@ -295,7 +427,13 @@ function collectLegacyEvmWallets() {
     candidates.forEach(provider => registerEvmWallet(provider));
 }
 
-function requestEvmWalletDiscovery(showPicker) {
+function requestEvmWalletDiscovery(showPicker, reset = false) {
+    if (reset) {
+        discoveredEvmWallets.clear();
+        evmWalletProviderKeys = new WeakMap();
+        anonymousEvmWalletId = 0;
+        renderEvmWalletList();
+    }
     try {
         window.dispatchEvent(new Event('eip6963:requestProvider'));
     } catch (error) {
@@ -304,7 +442,7 @@ function requestEvmWalletDiscovery(showPicker) {
     collectLegacyEvmWallets();
     window.setTimeout(() => {
         collectLegacyEvmWallets();
-        renderEvmWalletList();
+        scheduleEvmWalletRender();
         if (showPicker) {
             evmWalletPicker.hidden = false;
         }
@@ -450,7 +588,7 @@ function clearPreparedAgent() {
 }
 
 async function loadPopdexAgentStatus() {
-    if (!popdexAgentPanel || popdexAgentPanel.hidden) {
+    if (!popdexAgentPanel || exchangeSelect.value !== 'popdex') {
         return null;
     }
     try {
@@ -687,6 +825,19 @@ function setAgentBadge(state, text) {
     popdexAgentBadge.classList.remove('is-idle', 'is-pending', 'is-ready', 'is-error');
     popdexAgentBadge.classList.add(`is-${state}`);
     popdexAgentBadgeText.textContent = text;
+    if (!popdexAgentLauncher) {
+        return;
+    }
+    popdexAgentLauncher.classList.remove('is-idle', 'is-pending', 'is-ready', 'is-error');
+    popdexAgentLauncher.classList.add(`is-${state}`);
+    popdexAgentLauncherStatus.textContent = text;
+    popdexAgentLauncherText.textContent = state === 'ready'
+        ? '管理 POPDEX Agent'
+        : state === 'pending'
+            ? '繼續 POPDEX 授權'
+            : state === 'error'
+                ? '檢查 POPDEX Agent'
+                : '設定 POPDEX Agent';
 }
 
 function setAgentMessage(message, type = '') {

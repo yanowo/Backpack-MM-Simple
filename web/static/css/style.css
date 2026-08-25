@@ -485,6 +485,118 @@ section:hover {
     min-width: 0;
 }
 
+.block-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-md);
+    margin-bottom: var(--spacing-md);
+    padding-bottom: var(--spacing-sm);
+    border-bottom: 1px solid var(--border-primary);
+}
+
+.block-title-row .block-title {
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.popdex-agent-launcher {
+    display: inline-grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 0.62rem;
+    min-width: 218px;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid rgba(243, 182, 63, 0.3);
+    border-radius: var(--radius-md);
+    background: linear-gradient(115deg, rgba(243, 182, 63, 0.12), rgba(15, 20, 25, 0.76));
+    color: #f8e4b5;
+    cursor: pointer;
+    text-align: left;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+    transition: transform var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.popdex-agent-launcher:hover {
+    transform: translateY(-1px);
+    border-color: rgba(243, 182, 63, 0.62);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2), 0 0 16px rgba(243, 182, 63, 0.08);
+}
+
+.popdex-launcher-icon {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: rgba(243, 182, 63, 0.14);
+    color: #f3b63f;
+}
+
+.popdex-launcher-icon svg {
+    width: 17px;
+    height: 17px;
+}
+
+.popdex-launcher-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.08rem;
+}
+
+.popdex-launcher-copy strong {
+    overflow: hidden;
+    color: currentColor;
+    font-size: 0.75rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.popdex-launcher-copy small {
+    color: var(--text-muted);
+    font-family: 'Cascadia Code', Consolas, monospace;
+    font-size: 0.6rem;
+}
+
+.popdex-launcher-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+.popdex-agent-launcher.is-pending .popdex-launcher-dot {
+    background: #f3b63f;
+    box-shadow: 0 0 9px rgba(243, 182, 63, 0.62);
+}
+
+.popdex-agent-launcher.is-ready {
+    color: var(--success-light);
+    border-color: rgba(52, 211, 153, 0.32);
+    background: linear-gradient(115deg, rgba(16, 185, 129, 0.11), rgba(15, 20, 25, 0.76));
+}
+
+.popdex-agent-launcher.is-ready .popdex-launcher-icon {
+    color: var(--success-light);
+    background: rgba(16, 185, 129, 0.12);
+}
+
+.popdex-agent-launcher.is-ready .popdex-launcher-dot {
+    background: var(--success-light);
+    box-shadow: 0 0 9px rgba(52, 211, 153, 0.56);
+}
+
+.popdex-agent-launcher.is-error {
+    color: var(--danger-light);
+    border-color: rgba(248, 113, 113, 0.34);
+}
+
+.popdex-agent-launcher.is-error .popdex-launcher-dot {
+    background: var(--danger-light);
+}
+
 .block-title {
     font-size: 0.875rem;
     font-weight: 600;
@@ -714,6 +826,107 @@ section:hover {
 }
 
 /* ==================== POPDEX Agent Setup ==================== */
+body.agent-modal-open {
+    overflow: hidden;
+}
+
+.agent-modal[hidden] {
+    display: none !important;
+}
+
+.agent-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    display: grid;
+    place-items: center;
+    padding: clamp(0.75rem, 3vw, 2.5rem);
+}
+
+.agent-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background:
+        radial-gradient(circle at 50% 15%, rgba(243, 182, 63, 0.09), transparent 42%),
+        rgba(5, 8, 12, 0.82);
+    backdrop-filter: blur(9px);
+    animation: agent-backdrop-in 160ms ease-out both;
+}
+
+.agent-modal-card {
+    z-index: 1;
+    width: min(1120px, 100%);
+    max-height: min(860px, calc(100vh - clamp(1.5rem, 6vw, 5rem)));
+    margin: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    box-shadow: 0 28px 90px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(243, 182, 63, 0.08);
+    animation: agent-modal-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.agent-modal-card:hover {
+    border-color: rgba(243, 182, 63, 0.34);
+}
+
+.agent-header-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.agent-modal-close {
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border: 1px solid var(--border-secondary);
+    border-radius: 50%;
+    background: rgba(15, 20, 25, 0.72);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: transform var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.agent-modal-close:hover {
+    transform: rotate(4deg);
+    color: var(--agent-accent);
+    border-color: var(--agent-accent);
+}
+
+.popdex-agent-launcher:focus-visible,
+.agent-modal-close:focus-visible,
+.wallet-refresh-btn:focus-visible,
+.wallet-provider-card:focus-visible,
+.agent-action-btn:focus-visible {
+    outline: 2px solid var(--agent-accent, #f3b63f);
+    outline-offset: 2px;
+}
+
+.agent-modal-close svg {
+    width: 18px;
+    height: 18px;
+}
+
+@keyframes agent-backdrop-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes agent-modal-in {
+    from { opacity: 0; transform: translateY(14px) scale(0.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-modal-backdrop,
+    .agent-modal-card {
+        animation: none;
+    }
+}
+
 .agent-panel {
     --agent-accent: #f3b63f;
     --agent-accent-soft: rgba(243, 182, 63, 0.12);
@@ -1349,6 +1562,15 @@ section:hover {
         grid-template-columns: 1fr;
     }
 
+    .block-title-row {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .popdex-agent-launcher {
+        width: 100%;
+    }
+
     .action-buttons {
         flex-direction: column;
     }
@@ -1365,6 +1587,32 @@ section:hover {
 
     .agent-status-badge {
         align-self: flex-start;
+    }
+
+    .agent-modal {
+        padding: 0;
+        place-items: stretch;
+    }
+
+    .agent-modal-card {
+        width: 100%;
+        max-height: 100vh;
+        min-height: 100vh;
+        margin: 0;
+        border: 0;
+        border-radius: 0;
+    }
+
+    @supports (height: 100dvh) {
+        .agent-modal-card {
+            max-height: 100dvh;
+            min-height: 100dvh;
+        }
+    }
+
+    .agent-header-actions {
+        width: 100%;
+        justify-content: space-between;
     }
 
     .metrics-grid-secondary {
