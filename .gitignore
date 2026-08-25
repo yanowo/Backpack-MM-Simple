@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+.popdex-agent-backups/
 *.db
 .claude/settings.local.json
 CLAUDE.md

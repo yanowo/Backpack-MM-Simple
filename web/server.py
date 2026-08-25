@@ -24,7 +24,13 @@ from utils.lighter_config import (
     is_lighter_exchange,
 )
 from utils.popdex_config import build_popdex_config_from_env
-from utils.popdex_agent_setup import get_agent_setup_status, prepare_agent_setup
+from utils.popdex_agent_setup import (
+    abort_agent_management,
+    finalize_agent_management,
+    get_agent_setup_status,
+    prepare_agent_management,
+    prepare_agent_setup,
+)
 
 logger = setup_logger("web_server")
 
@@ -137,6 +143,78 @@ def popdex_agent_prepare():
     except Exception as exc:
         logger.error("準備 POPDEX Agent 失敗: %s", exc)
         return jsonify({'success': False, 'message': '無法準備 POPDEX Agent 設定'}), 500
+
+
+@app.route('/api/popdex-agent/manage', methods=['POST'])
+def popdex_agent_manage():
+    """Back up the current key and prepare an unsigned revoke/replace call."""
+    if not _is_local_request():
+        return jsonify({
+            'success': False,
+            'message': 'POPDEX Agent 設定只允許從本機存取',
+        }), 403
+    try:
+        data = request.get_json(silent=True) or {}
+        result = prepare_agent_management(
+            action=str(data.get('action') or ''),
+            main_address=str(data.get('account_address') or ''),
+            network=data.get('network'),
+            expires_in_days=data.get('expires_in_days', 90),
+        )
+        logger.info(
+            "POPDEX Agent 管理交易已準備（action=%s, network=%s, backup=%s）",
+            result.get('action'),
+            result.get('network'),
+            result.get('backup_file'),
+        )
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    except Exception as exc:
+        logger.error("準備 POPDEX Agent 管理交易失敗: %s", exc)
+        return jsonify({'success': False, 'message': '無法準備 Agent 管理交易'}), 500
+
+
+@app.route('/api/popdex-agent/manage/finalize', methods=['POST'])
+def popdex_agent_manage_finalize():
+    """Apply the staged local key change after on-chain confirmation."""
+    if not _is_local_request():
+        return jsonify({
+            'success': False,
+            'message': 'POPDEX Agent 設定只允許從本機存取',
+        }), 403
+    try:
+        data = request.get_json(silent=True) or {}
+        result = finalize_agent_management(str(data.get('operation_id') or ''))
+        logger.info(
+            "POPDEX Agent 管理作業完成（action=%s, backup=%s）",
+            result.get('action'),
+            result.get('backup_file'),
+        )
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 409
+    except Exception as exc:
+        logger.error("完成 POPDEX Agent 管理作業失敗: %s", exc)
+        return jsonify({'success': False, 'message': '無法完成 Agent 管理作業'}), 500
+
+
+@app.route('/api/popdex-agent/manage/abort', methods=['POST'])
+def popdex_agent_manage_abort():
+    """Discard a staged key if the wallet rejects or reverts the transaction."""
+    if not _is_local_request():
+        return jsonify({
+            'success': False,
+            'message': 'POPDEX Agent 設定只允許從本機存取',
+        }), 403
+    try:
+        data = request.get_json(silent=True) or {}
+        return jsonify(abort_agent_management(str(data.get('operation_id') or '')))
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    except Exception as exc:
+        logger.error("取消 POPDEX Agent 管理作業失敗: %s", exc)
+        return jsonify({'success': False, 'message': '無法取消 Agent 管理作業'}), 500
 
 
 @app.route('/api/start', methods=['POST'])

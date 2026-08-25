@@ -1,7 +1,9 @@
 """Local-only POPDEX Agent onboarding helpers for the Web dashboard."""
 from __future__ import annotations
 
+import json
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -19,6 +21,8 @@ from eth_utils import is_address, keccak, to_checksum_address
 
 ACCOUNT_CONTRACT = "0x0000000000000000000000000000000000001008"
 APPROVE_AGENT_SIGNATURE = "approveAgent(address,address,bytes32,uint64,uint64,bool)"
+REVOKE_AGENT_SIGNATURE = "revokeAgent(address)"
+REPLACE_AGENT_SIGNATURE = "replaceAgent(address,address,uint64,uint64)"
 GET_ACCOUNT_INFO_SIGNATURE = "getAccountInfo(address)"
 GET_ACCOUNT_INFO_TYPES = [
     "bool",
@@ -33,7 +37,19 @@ GET_ACCOUNT_INFO_TYPES = [
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = PROJECT_ROOT / ".env"
+BACKUP_DIR = PROJECT_ROOT / ".popdex-agent-backups"
 _ENV_LOCK = threading.Lock()
+_MANAGEMENT_LOCK = threading.Lock()
+
+POPDEX_AGENT_ENV_KEYS = (
+    "POPDEX_ACCOUNT_ADDRESS",
+    "POPDEX_AGENT_PRIVATE_KEY",
+    "POPDEX_NETWORK",
+    "POPDEX_BASE_URL",
+    "POPDEX_RPC_URL",
+    "POPDEX_WS_URL",
+    "POPDEX_CHAIN_ID",
+)
 
 # web/server.py can be started directly, without importing the root config module.
 # Load the project environment here so the onboarding status remains accurate.
@@ -311,6 +327,280 @@ def prepare_agent_setup(
         "expires_at": expires_at,
         "global_scope": bool(global_scope),
     }
+
+
+def prepare_agent_management(
+    action: str,
+    main_address: str,
+    network: Optional[str] = None,
+    expires_in_days: int = 90,
+) -> Dict[str, Any]:
+    """Back up the current Agent, then build an unsigned revoke/replace call."""
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action not in {"revoke", "replace"}:
+        raise ValueError("Agent 管理動作必須是 revoke 或 replace")
+
+    with _MANAGEMENT_LOCK:
+        context = _get_managed_agent_context(main_address, network)
+        network_config = context["network_config"]
+        old_agent = context["agent_address"]
+        backup_file = _backup_agent_environment(normalized_action, old_agent)
+        operation_id = secrets.token_hex(16)
+        pending: Dict[str, Any] = {
+            "operation_id": operation_id,
+            "action": normalized_action,
+            "created_at": int(time.time() * 1000),
+            "backup_file": backup_file,
+            "account_address": context["main_address"],
+            "old_agent_address": old_agent,
+            "network": network_config["network"],
+        }
+
+        if normalized_action == "replace":
+            expires_in_days = _validate_expiry_days(expires_in_days)
+            new_agent_account = Account.create(secrets.token_bytes(32))
+            new_private_key = "0x" + new_agent_account.key.hex().removeprefix("0x")
+            now_ms = int(time.time() * 1000)
+            expires_at = (
+                0
+                if expires_in_days == 0
+                else now_ms + expires_in_days * 86_400_000
+            )
+            call_data = keccak(text=REPLACE_AGENT_SIGNATURE)[:4] + abi_encode(
+                ["address", "address", "uint64", "uint64"],
+                [old_agent, new_agent_account.address, expires_at, now_ms],
+            )
+            pending.update(
+                {
+                    "new_agent_address": new_agent_account.address,
+                    "new_private_key": new_private_key,
+                    "expires_at": expires_at,
+                }
+            )
+        else:
+            call_data = keccak(text=REVOKE_AGENT_SIGNATURE)[:4] + abi_encode(
+                ["address"], [old_agent]
+            )
+
+        _write_pending_operation(pending)
+        result = {
+            "success": True,
+            "action": normalized_action,
+            "operation_id": operation_id,
+            "backup_file": backup_file,
+            "account_address": context["main_address"],
+            "old_agent_address": old_agent,
+            "network": network_config["network"],
+            "chain_id": network_config["chain_id"],
+            "chain": _chain_payload(network_config),
+            "transaction": _transaction_payload(call_data),
+        }
+        if normalized_action == "replace":
+            result.update(
+                {
+                    "new_agent_address": pending["new_agent_address"],
+                    "expires_at": pending["expires_at"],
+                }
+            )
+        return result
+
+
+def finalize_agent_management(operation_id: str) -> Dict[str, Any]:
+    """Persist local state only after the wallet transaction is confirmed on-chain."""
+    with _MANAGEMENT_LOCK:
+        pending = _read_pending_operation(operation_id)
+        network = pending["network"]
+        action = pending["action"]
+        target_agent = (
+            pending["new_agent_address"]
+            if action == "replace"
+            else pending["old_agent_address"]
+        )
+        info = get_agent_account_info(target_agent, network)
+        if not info.get("available"):
+            raise ValueError(
+                "鏈上交易已送出，但目前無法確認 Agent 狀態；請稍後重試完成作業"
+            )
+
+        if action == "replace":
+            expected_delegator = str(pending["account_address"]).lower()
+            if not (
+                info.get("exists")
+                and info.get("account_type") == 1
+                and not info.get("is_expired")
+                and str(info.get("delegator") or "").lower() == expected_delegator
+            ):
+                raise ValueError("尚未讀到新的 POPDEX Agent 鏈上授權，請稍後重試")
+            _save_agent_environment(
+                pending["account_address"],
+                pending["new_private_key"],
+                get_network(network),
+            )
+        else:
+            if info.get("exists"):
+                raise ValueError("尚未讀到 POPDEX Agent 撤銷結果，請稍後重試")
+            # Keep the main account and network settings for a future fresh setup,
+            # but make the revoked key impossible for the bot to keep using.
+            _write_env_values({"POPDEX_AGENT_PRIVATE_KEY": ""})
+
+        _pending_operation_path(operation_id).unlink(missing_ok=True)
+        status = get_agent_setup_status(network)
+        status.update(
+            {
+                "action": action,
+                "backup_file": pending["backup_file"],
+            }
+        )
+        return status
+
+
+def abort_agent_management(operation_id: str) -> Dict[str, Any]:
+    """Discard a staged new key after a rejected or reverted wallet transaction."""
+    with _MANAGEMENT_LOCK:
+        pending = _read_pending_operation(operation_id)
+        _pending_operation_path(operation_id).unlink(missing_ok=True)
+        return {
+            "success": True,
+            "action": pending["action"],
+            "backup_file": pending["backup_file"],
+        }
+
+
+def _get_managed_agent_context(
+    main_address: str, network: Optional[str]
+) -> Dict[str, Any]:
+    if not is_address(main_address):
+        raise ValueError("連接的 EVM 錢包地址無效")
+    main_address = to_checksum_address(main_address)
+    configured_main = str(os.getenv("POPDEX_ACCOUNT_ADDRESS") or "").strip()
+    private_key = str(os.getenv("POPDEX_AGENT_PRIVATE_KEY") or "").strip()
+    agent_address = derive_agent_address(private_key)
+    if not configured_main or not agent_address:
+        raise ValueError("目前沒有可管理的 POPDEX Agent 設定")
+    if not is_address(configured_main) or configured_main.lower() != main_address.lower():
+        raise ValueError("請連接原本授權此 Agent 的 POPDEX 主錢包")
+
+    network_config = get_network(network)
+    configured_network = get_network(os.getenv("POPDEX_NETWORK"))["network"]
+    if network_config["network"] != configured_network:
+        raise ValueError("選擇的 POPDEX 網路與目前 Agent 設定不一致")
+
+    info = get_agent_account_info(agent_address, network_config["network"])
+    if not info.get("available"):
+        raise ValueError("目前無法確認 POPDEX Agent 鏈上狀態，未執行管理操作")
+    if not info.get("exists") or info.get("account_type") != 1:
+        raise ValueError("目前 Agent 已不在鏈上授權清單，請重新檢查狀態")
+    if str(info.get("delegator") or "").lower() != main_address.lower():
+        raise ValueError("目前 Agent 的鏈上授權帳戶與連接錢包不一致")
+    return {
+        "main_address": main_address,
+        "agent_address": agent_address,
+        "agent_info": info,
+        "network_config": network_config,
+    }
+
+
+def _validate_expiry_days(value: Any) -> int:
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Agent 有效天數必須是整數")
+    if days < 0 or days > 3650:
+        raise ValueError("Agent 有效天數必須介於 0 到 3650 天")
+    return days
+
+
+def _chain_payload(network_config: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "chainId": hex(network_config["chain_id"]),
+        "chainName": network_config["chain_name"],
+        "nativeCurrency": network_config["native_currency"],
+        "rpcUrls": [network_config["rpc_url"]],
+    }
+
+
+def _transaction_payload(call_data: bytes) -> Dict[str, str]:
+    return {
+        "to": ACCOUNT_CONTRACT,
+        "data": "0x" + call_data.hex(),
+        "gas": hex(1_000_000),
+        "gasPrice": "0x0",
+    }
+
+
+def _ensure_backup_dir() -> None:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(BACKUP_DIR, 0o700)
+    except OSError:
+        pass
+
+
+def _backup_agent_environment(action: str, agent_address: str) -> str:
+    _ensure_backup_dir()
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    backup_path = BACKUP_DIR / (
+        f"popdex-agent-{action}-{stamp}-{agent_address[-6:].lower()}-"
+        f"{secrets.token_hex(3)}.env"
+    )
+    lines = [
+        "# POPDEX Agent backup created before on-chain management",
+        f"# action={action}",
+        f"# agent_address={agent_address}",
+    ]
+    for key in POPDEX_AGENT_ENV_KEYS:
+        value = str(os.getenv(key) or "").replace("\r", "").replace("\n", "")
+        lines.append(f"{key}={value}")
+    with backup_path.open("x", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(lines) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.chmod(backup_path, 0o600)
+    except OSError:
+        pass
+    return _display_path(backup_path)
+
+
+def _pending_operation_path(operation_id: str) -> Path:
+    normalized = str(operation_id or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{32}", normalized):
+        raise ValueError("Agent 管理作業識別碼無效")
+    return BACKUP_DIR / f".pending-{normalized}.json"
+
+
+def _write_pending_operation(pending: Dict[str, Any]) -> None:
+    _ensure_backup_dir()
+    path = _pending_operation_path(pending["operation_id"])
+    with path.open("x", encoding="utf-8", newline="\n") as handle:
+        json.dump(pending, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _read_pending_operation(operation_id: str) -> Dict[str, Any]:
+    path = _pending_operation_path(operation_id)
+    if not path.is_file():
+        raise ValueError("找不到待完成的 Agent 管理作業，請重新開始")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"無法讀取 Agent 管理作業：{exc}")
+    if payload.get("operation_id") != str(operation_id).strip().lower():
+        raise ValueError("Agent 管理作業內容不一致")
+    return payload
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def _save_agent_environment(

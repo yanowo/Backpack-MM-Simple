@@ -24,8 +24,33 @@ class PopdexWebUiTest(unittest.TestCase):
         self.assertIn('aria-controls="popdexAgentModal"', html)
         self.assertIn('id="popdexAgentModal" class="agent-modal" hidden role="dialog"', html)
         self.assertIn('id="closePopdexAgentModal"', html)
+        self.assertIn('id="replacePopdexAgentBtn"', html)
+        self.assertIn('id="revokePopdexAgentBtn"', html)
+        self.assertIn('id="agentManagementActions"', html)
         self.assertLess(html.index("基本設置"), html.index('id="popdexAgentLauncher"'))
         self.assertLess(html.index('id="popdexAgentLauncher"'), html.index('id="exchange"'))
+
+    def test_agent_status_is_preloaded_without_selecting_popdex(self):
+        app_js = APP_JS.read_text(encoding="utf-8")
+        init_start = app_js.index("function initPopdexAgentSetup()")
+        toggle_start = app_js.index("function togglePopdexAgentPanel()")
+        init_body = app_js[init_start:toggle_start]
+
+        self.assertIn("togglePopdexAgentPanel();", init_body)
+        self.assertIn("loadPopdexAgentStatus();", init_body)
+        self.assertNotIn(
+            "exchangeSelect.value !== 'popdex'",
+            app_js[app_js.index("async function loadPopdexAgentStatus()"):app_js.index("function applyPopdexAgentStatus")],
+        )
+
+    def test_author_contact_links_are_present_in_header_and_footer(self):
+        from web.server import app
+
+        html = app.test_client().get("/").get_data(as_text=True)
+        self.assertGreaterEqual(html.count("https://x.com/practice_y11"), 2)
+        self.assertIn("https://t.me/crypto_practice", html)
+        self.assertIn("https://github.com/yanowo/Backpack-MM-Simple", html)
+        self.assertIn("YanOwO", html)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the JavaScript regression test")
     def test_wallet_discovery_merges_eip6963_and_legacy_duplicates(self):

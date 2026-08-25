@@ -110,6 +110,7 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: var(--spacing-lg);
 }
 
 .navbar-brand {
@@ -144,6 +145,51 @@ body {
     color: var(--text-muted);
     letter-spacing: 0.05em;
     text-transform: uppercase;
+}
+
+.navbar-contact-links {
+    display: flex;
+    min-width: 0;
+    align-items: stretch;
+    justify-content: center;
+    gap: 0.45rem;
+    margin-left: auto;
+}
+
+.navbar-contact-link {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.08rem;
+    padding: 0.42rem 0.58rem;
+    border: 1px solid transparent;
+    border-left-color: var(--border-secondary);
+    color: var(--text-secondary);
+    text-decoration: none;
+    transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.navbar-contact-link span,
+.footer-author span {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 0.55rem;
+    letter-spacing: 0.12em;
+}
+
+.navbar-contact-link strong {
+    overflow: hidden;
+    max-width: 145px;
+    font-size: 0.68rem;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.navbar-contact-link:hover {
+    border-color: var(--primary-line);
+    background: var(--primary-soft);
+    color: var(--primary-light);
 }
 
 .navbar-status {
@@ -854,6 +900,8 @@ body.agent-modal-open {
 }
 
 .popdex-agent-launcher:focus-visible,
+.navbar-contact-link:focus-visible,
+.footer-author:focus-visible,
 .agent-modal-close:focus-visible,
 .wallet-refresh-btn:focus-visible,
 .wallet-provider-card:focus-visible,
@@ -1237,6 +1285,50 @@ body.agent-modal-open {
     margin-top: 0.75rem;
 }
 
+.agent-management-actions {
+    display: grid;
+    grid-template-columns: minmax(240px, 1fr) minmax(190px, 0.65fr) minmax(190px, 0.65fr);
+    align-items: stretch;
+    gap: 0.65rem;
+    margin-top: 0.65rem;
+    padding: 0.65rem;
+    border: 1px solid var(--warning-line);
+    border-left-width: 3px;
+    border-radius: var(--radius-md);
+    background: linear-gradient(90deg, var(--warning-soft), transparent 68%);
+}
+
+.agent-management-actions[hidden] {
+    display: none;
+}
+
+.agent-management-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.12rem;
+    padding: 0.2rem 0.35rem;
+}
+
+.agent-management-copy span {
+    color: var(--warning);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    letter-spacing: 0.11em;
+}
+
+.agent-management-copy strong {
+    color: var(--text-primary);
+    font-size: 0.78rem;
+}
+
+.agent-management-copy small {
+    color: var(--text-muted);
+    font-size: 0.66rem;
+    line-height: 1.45;
+}
+
 .agent-action-btn {
     display: flex;
     align-items: center;
@@ -1280,6 +1372,18 @@ body.agent-modal-open {
     border-color: var(--success-line);
     background: var(--success-soft);
     color: var(--success-light);
+}
+
+.agent-action-btn.replace-action {
+    border-color: var(--primary-line);
+    background: var(--primary-soft);
+    color: var(--primary-light);
+}
+
+.agent-action-btn.revoke-action {
+    border-color: var(--danger-line);
+    background: var(--danger-soft);
+    color: var(--danger-light);
 }
 
 .agent-message {
@@ -1418,7 +1522,13 @@ body.agent-modal-open {
     padding: 0 var(--spacing-xl);
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: space-between;
+    gap: var(--spacing-md);
+}
+
+.footer-product {
+    display: flex;
+    align-items: center;
     gap: var(--spacing-md);
 }
 
@@ -1435,6 +1545,24 @@ body.agent-modal-open {
 .footer-meta {
     font-size: 0.75rem;
     color: var(--text-muted);
+}
+
+.footer-author {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    color: var(--text-secondary);
+    text-decoration: none;
+    transition: color var(--transition-fast);
+}
+
+.footer-author strong {
+    font-size: 0.78rem;
+    letter-spacing: 0.03em;
+}
+
+.footer-author:hover {
+    color: var(--primary-light);
 }
 
 /* ==================== Loading Animation ==================== */
@@ -1457,6 +1585,10 @@ body.agent-modal-open {
     .metrics-grid-primary {
         grid-template-columns: repeat(2, 1fr);
     }
+
+    .navbar-contact-link strong {
+        max-width: 105px;
+    }
 }
 
 @media (max-width: 768px) {
@@ -1473,6 +1605,22 @@ body.agent-modal-open {
 
     .navbar-status {
         justify-content: center;
+    }
+
+    .navbar-contact-links {
+        width: 100%;
+        margin-left: 0;
+        justify-content: stretch;
+    }
+
+    .navbar-contact-link {
+        flex: 1 1 0;
+        border-color: var(--border-primary);
+        border-left-color: var(--primary-line);
+    }
+
+    .navbar-contact-link strong {
+        max-width: 100%;
     }
 
     section {
@@ -1521,8 +1669,15 @@ body.agent-modal-open {
 
     .agent-step-grid,
     .agent-settings-grid,
-    .agent-actions {
+    .agent-actions,
+    .agent-management-actions {
         grid-template-columns: 1fr;
+    }
+
+    .footer-content,
+    .footer-product {
+        flex-wrap: wrap;
+        justify-content: center;
     }
 
     .agent-step {

@@ -7,6 +7,8 @@ let activeEvmProvider = null;
 let activeEvmWallet = null;
 let activeEvmAccount = null;
 let preparedPopdexAgent = null;
+let currentPopdexAgentStatus = null;
+let popdexAgentStatusRequest = null;
 let popdexAgentNetworkInitialized = false;
 let lastAgentModalFocus = null;
 let anonymousEvmWalletId = 0;
@@ -73,6 +75,9 @@ const evmWalletList = document.getElementById('evmWalletList');
 const connectEvmWalletBtn = document.getElementById('connectEvmWalletBtn');
 const preparePopdexAgentBtn = document.getElementById('preparePopdexAgentBtn');
 const authorizePopdexAgentBtn = document.getElementById('authorizePopdexAgentBtn');
+const agentManagementActions = document.getElementById('agentManagementActions');
+const replacePopdexAgentBtn = document.getElementById('replacePopdexAgentBtn');
+const revokePopdexAgentBtn = document.getElementById('revokePopdexAgentBtn');
 const refreshWalletsBtn = document.getElementById('refreshWalletsBtn');
 const agentWalletLabel = document.getElementById('agentWalletLabel');
 const agentWalletAddress = document.getElementById('agentWalletAddress');
@@ -225,6 +230,8 @@ function initPopdexAgentSetup() {
     refreshWalletsBtn.addEventListener('click', () => requestEvmWalletDiscovery(true, true));
     preparePopdexAgentBtn.addEventListener('click', preparePopdexAgent);
     authorizePopdexAgentBtn.addEventListener('click', authorizePopdexAgent);
+    replacePopdexAgentBtn.addEventListener('click', () => managePopdexAgent('replace'));
+    revokePopdexAgentBtn.addEventListener('click', () => managePopdexAgent('revoke'));
 
     popdexAgentNetwork.addEventListener('change', () => {
         popdexAgentNetworkInitialized = true;
@@ -235,6 +242,9 @@ function initPopdexAgentSetup() {
     popdexAgentGlobal.addEventListener('change', clearPreparedAgent);
 
     togglePopdexAgentPanel();
+    // Warm the Agent state as soon as the dashboard opens. The launcher remains
+    // conditional on the selected exchange, but its state is already accurate.
+    loadPopdexAgentStatus();
 }
 
 function togglePopdexAgentPanel() {
@@ -604,6 +614,7 @@ function updateActiveEvmAccount(account) {
         authorizePopdexAgentBtn.disabled = true;
         connectEvmWalletBtn.querySelector('span').textContent = '連接 EVM 錢包';
     }
+    syncAgentActionAvailability();
 }
 
 function clearPreparedAgent() {
@@ -616,12 +627,25 @@ function clearPreparedAgent() {
         setAgentStep(agentStepAuthorize, 'idle');
         agentApprovalState.textContent = '等待建立授權資料';
     }
+    syncAgentActionAvailability();
 }
 
 async function loadPopdexAgentStatus() {
-    if (!popdexAgentPanel || exchangeSelect.value !== 'popdex') {
+    if (!popdexAgentPanel) {
         return null;
     }
+    if (popdexAgentStatusRequest) {
+        return popdexAgentStatusRequest;
+    }
+    popdexAgentStatusRequest = fetchPopdexAgentStatus();
+    try {
+        return await popdexAgentStatusRequest;
+    } finally {
+        popdexAgentStatusRequest = null;
+    }
+}
+
+async function fetchPopdexAgentStatus() {
     try {
         const statusUrl = popdexAgentNetworkInitialized
             ? `/api/popdex-agent/status?network=${encodeURIComponent(popdexAgentNetwork.value)}`
@@ -638,6 +662,9 @@ async function loadPopdexAgentStatus() {
         applyPopdexAgentStatus(result);
         return result;
     } catch (error) {
+        currentPopdexAgentStatus = null;
+        agentManagementActions.hidden = true;
+        syncAgentActionAvailability();
         setAgentBadge('error', '狀態不可用');
         setAgentMessage(`Agent 狀態查詢失敗：${error.message || error}`, 'error');
         return null;
@@ -645,6 +672,10 @@ async function loadPopdexAgentStatus() {
 }
 
 function applyPopdexAgentStatus(status) {
+    currentPopdexAgentStatus = status;
+    const manageable = Boolean(status.authorized && status.agent_address);
+    agentManagementActions.hidden = !manageable;
+
     if (status.agent_address) {
         agentPublicAddress.textContent = status.agent_address;
         agentPublicAddress.title = status.agent_address;
@@ -678,6 +709,20 @@ function applyPopdexAgentStatus(status) {
         setAgentStep(agentStepAuthorize, 'idle');
         agentApprovalState.textContent = '等待前兩步';
         setAgentBadge('idle', '尚未設定');
+    }
+    syncAgentActionAvailability();
+}
+
+function syncAgentActionAvailability() {
+    const authorized = Boolean(currentPopdexAgentStatus && currentPopdexAgentStatus.authorized);
+    if (preparePopdexAgentBtn) {
+        preparePopdexAgentBtn.disabled = !activeEvmAccount || authorized;
+    }
+    if (replacePopdexAgentBtn) {
+        replacePopdexAgentBtn.disabled = !authorized;
+    }
+    if (revokePopdexAgentBtn) {
+        revokePopdexAgentBtn.disabled = !authorized;
     }
 }
 
@@ -786,6 +831,162 @@ async function authorizePopdexAgent() {
     } finally {
         setButtonBusy(authorizePopdexAgentBtn, false, '簽署鏈上授權');
         authorizePopdexAgentBtn.disabled = agentStepAuthorize.classList.contains('is-complete');
+    }
+}
+
+async function managePopdexAgent(action) {
+    const isReplace = action === 'replace';
+    const actionLabel = isReplace ? '更換授權' : '取消授權';
+    const idleLabel = isReplace ? '備份並更換授權' : '備份並取消授權';
+    const actionButton = isReplace ? replacePopdexAgentBtn : revokePopdexAgentBtn;
+
+    if (!activeEvmProvider || !activeEvmAccount) {
+        showEvmWalletPicker();
+        setAgentMessage(`請先連接原本授權 Agent 的主錢包，再執行${actionLabel}。`, 'error');
+        return;
+    }
+    if (!currentPopdexAgentStatus || !currentPopdexAgentStatus.authorized) {
+        const refreshed = await loadPopdexAgentStatus();
+        if (!refreshed || !refreshed.authorized) {
+            setAgentMessage('目前沒有可管理的有效 POPDEX Agent 授權。', 'error');
+            return;
+        }
+    }
+    if (
+        currentPopdexAgentStatus.account_address
+        && currentPopdexAgentStatus.account_address.toLowerCase() !== activeEvmAccount.toLowerCase()
+    ) {
+        setAgentMessage('請切換到原本授權此 Agent 的 POPDEX 主錢包。', 'error');
+        return;
+    }
+
+    const confirmation = isReplace
+        ? '即將先備份目前 Agent，再以 POPDEX replaceAgent 原子更換為全新金鑰。是否繼續？'
+        : '即將先備份目前 Agent，再從鏈上立即取消交易授權。策略將無法繼續下單。是否繼續？';
+    if (!window.confirm(confirmation)) {
+        return;
+    }
+
+    let preparedOperation = null;
+    let txHash = null;
+    let preservePendingOperation = false;
+    replacePopdexAgentBtn.disabled = true;
+    revokePopdexAgentBtn.disabled = true;
+    setButtonBusy(actionButton, true, isReplace ? '準備新 Agent…' : '準備撤銷…');
+    setAgentBadge('pending', isReplace ? '更換中' : '撤銷中');
+    setAgentMessage(`正在備份目前 Agent 並準備${actionLabel}交易…`);
+
+    try {
+        const prepareResponse = await fetch('/api/popdex-agent/manage', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                action,
+                account_address: activeEvmAccount,
+                network: popdexAgentNetwork.value,
+                expires_in_days: Number(popdexAgentExpiry.value),
+            }),
+        });
+        preparedOperation = await prepareResponse.json();
+        if (!prepareResponse.ok || !preparedOperation.success) {
+            throw new Error(preparedOperation.message || `${actionLabel}準備失敗`);
+        }
+
+        setAgentMessage(`本機備份已建立：${preparedOperation.backup_file}。正在等待錢包確認…`, 'success');
+        addLog(`POPDEX Agent ${actionLabel}前備份完成: ${preparedOperation.backup_file}`, 'success');
+        await ensureEvmWalletChain(activeEvmProvider, preparedOperation.chain);
+        const accounts = await activeEvmProvider.request({method: 'eth_accounts'});
+        const currentAccount = Array.isArray(accounts) ? accounts[0] : null;
+        if (!currentAccount || currentAccount.toLowerCase() !== activeEvmAccount.toLowerCase()) {
+            throw new Error('錢包目前選擇的帳戶已改變，未送出管理交易');
+        }
+
+        const transaction = {
+            from: activeEvmAccount,
+            to: preparedOperation.transaction.to,
+            data: preparedOperation.transaction.data,
+            gas: preparedOperation.transaction.gas,
+            gasPrice: preparedOperation.transaction.gasPrice,
+            value: '0x0',
+        };
+        txHash = await activeEvmProvider.request({
+            method: 'eth_sendTransaction',
+            params: [transaction],
+        });
+        preservePendingOperation = true;
+        agentApprovalState.textContent = `交易 ${shortAddress(txHash)}`;
+        setAgentMessage(`${actionLabel}交易已送出：${txHash}。正在等待鏈上確認…`);
+        addLog(`POPDEX Agent ${actionLabel}交易已送出: ${txHash}`, 'info');
+
+        const receipt = await waitForEvmReceipt(activeEvmProvider, txHash);
+        if (receipt && receipt.status && BigInt(receipt.status) === 0n) {
+            preservePendingOperation = false;
+            throw new Error(`${actionLabel}交易已上鏈但執行失敗`);
+        }
+
+        const result = await finalizePopdexAgentManagement(preparedOperation);
+        preparedPopdexAgent = null;
+        applyPopdexAgentStatus(result);
+        if (isReplace) {
+            setAgentMessage(`Agent 已更換為 ${shortAddress(result.agent_address)}；舊設定備份於 ${result.backup_file}。`, 'success');
+            addLog(`POPDEX Agent 已更換: ${shortAddress(result.agent_address)}`, 'success');
+        } else {
+            setAgentMessage(`Agent 鏈上授權已取消；原設定備份於 ${result.backup_file}。`, 'success');
+            addLog('POPDEX Agent 鏈上授權已取消', 'success');
+        }
+    } catch (error) {
+        if (preparedOperation && !preservePendingOperation) {
+            await abortPopdexAgentManagement(preparedOperation.operation_id);
+        }
+        const rejected = Number(error && error.code) === 4001;
+        setAgentBadge('error', rejected ? '已取消' : `${actionLabel}失敗`);
+        setAgentMessage(
+            rejected
+                ? `使用者取消了${actionLabel}；已建立的備份仍保留在本機。`
+                : `${actionLabel}失敗：${error.message || error}`,
+            'error'
+        );
+        addLog(`POPDEX Agent ${actionLabel}失敗: ${error.message || error}`, 'error');
+    } finally {
+        setButtonBusy(actionButton, false, idleLabel);
+        syncAgentActionAvailability();
+    }
+}
+
+async function finalizePopdexAgentManagement(operation) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+        try {
+            const response = await fetch('/api/popdex-agent/manage/finalize', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({operation_id: operation.operation_id}),
+            });
+            const result = await response.json();
+            if (response.ok && result.success) {
+                return result;
+            }
+            lastError = new Error(result.message || '本機 Agent 狀態更新失敗');
+            if (response.status !== 409) {
+                break;
+            }
+        } catch (error) {
+            lastError = error;
+        }
+        await delay(1000);
+    }
+    throw lastError || new Error('無法完成 Agent 本機狀態更新');
+}
+
+async function abortPopdexAgentManagement(operationId) {
+    try {
+        await fetch('/api/popdex-agent/manage/abort', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({operation_id: operationId}),
+        });
+    } catch (error) {
+        console.warn('Unable to discard staged POPDEX Agent operation', error);
     }
 }
 

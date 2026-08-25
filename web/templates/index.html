@@ -21,6 +21,20 @@
                     </div>
                     <span class="brand-subtitle">專業交易儀錶板</span>
                 </div>
+                <div class="navbar-contact-links" aria-label="專案聯絡資訊">
+                    <a class="navbar-contact-link" href="https://x.com/practice_y11" target="_blank" rel="noopener noreferrer">
+                        <span>AUTHOR</span>
+                        <strong>YanOwO</strong>
+                    </a>
+                    <a class="navbar-contact-link" href="https://t.me/crypto_practice" target="_blank" rel="noopener noreferrer">
+                        <span>TELEGRAM</span>
+                        <strong>crypto_practice</strong>
+                    </a>
+                    <a class="navbar-contact-link" href="https://github.com/yanowo/Backpack-MM-Simple" target="_blank" rel="noopener noreferrer">
+                        <span>GITHUB</span>
+                        <strong>Backpack-MM-Simple</strong>
+                    </a>
+                </div>
                 <div class="navbar-status">
                     <div class="connection-badge" id="connectionBadge">
                         <span class="badge-dot" id="statusDot"></span>
@@ -561,13 +575,35 @@
                     </button>
                 </div>
 
+                <div id="agentManagementActions" class="agent-management-actions" hidden>
+                    <div class="agent-management-copy">
+                        <span>AUTHORIZED AGENT CONTROL</span>
+                        <strong>鏈上權限管理</strong>
+                        <small>執行前會先把目前的 POPDEX Agent 設定備份至本機。</small>
+                    </div>
+                    <button type="button" id="replacePopdexAgentBtn" class="agent-action-btn replace-action">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                            <path d="M20 7h-7a5 5 0 0 0-5 5v1"/>
+                            <path d="m17 4 3 3-3 3M4 17h7a5 5 0 0 0 5-5v-1"/>
+                            <path d="m7 20-3-3 3-3"/>
+                        </svg>
+                        <span>備份並更換授權</span>
+                    </button>
+                    <button type="button" id="revokePopdexAgentBtn" class="agent-action-btn revoke-action">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                            <path d="M5 5l14 14M9 9a4 4 0 0 0 6 6M12 3a9 9 0 0 1 9 9c0 1.8-.53 3.48-1.45 4.89M6.1 6.1A9 9 0 0 0 17.9 17.9"/>
+                        </svg>
+                        <span>備份並取消授權</span>
+                    </button>
+                </div>
+
                 <div id="popdexAgentMessage" class="agent-message" aria-live="polite">
-                    選擇 POPDEX 後，可從這裡完成 Agent 建立與授權。
+                    系統會在頁面開啟時預先檢查本機與鏈上的 Agent 授權狀態。
                 </div>
 
                 <div class="agent-footnote">
                     <span>LOCAL ONLY</span>
-                    私鑰只會寫入本機 <code>.env</code>，API 不會回傳或顯示私鑰。Agent 僅可交易，不能提款。
+                    私鑰只會寫入本機 <code>.env</code>；管理備份位於 <code>.popdex-agent-backups/</code>。兩者皆不會由 API 顯示。
                 </div>
                 </section>
             </div>
@@ -584,9 +620,15 @@
         <!-- Footer -->
         <footer class="dashboard-footer">
             <div class="footer-content">
-                <span class="footer-text">Backpack 做市交易儀錶板</span>
-                <span class="footer-divider">|</span>
-                <span class="footer-meta">實時 WebSocket 連接</span>
+                <div class="footer-product">
+                    <span class="footer-text">Backpack 做市交易儀錶板</span>
+                    <span class="footer-divider">/</span>
+                    <span class="footer-meta">實時 WebSocket 連接</span>
+                </div>
+                <a class="footer-author" href="https://x.com/practice_y11" target="_blank" rel="noopener noreferrer">
+                    <span>BUILT BY</span>
+                    <strong>YanOwO</strong>
+                </a>
             </div>
         </footer>
     </div>
