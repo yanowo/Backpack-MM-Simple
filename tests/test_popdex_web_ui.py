@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_JS = ROOT / "web" / "static" / "js" / "app.js"
+WALLET_ASSETS = ROOT / "web" / "static" / "images" / "wallets"
 
 
 class PopdexWebUiTest(unittest.TestCase):
@@ -73,6 +74,12 @@ vm.runInContext(`
     if (discoveredEvmWallets.size !== 3) {
         throw new Error('expected 3 unique wallets, received ' + discoveredEvmWallets.size);
     }
+    if (!getWalletFallbackLogo('wallet:phantom').endsWith('/phantom.svg')) {
+        throw new Error('Phantom fallback logo is missing');
+    }
+    if (!getWalletFallbackLogo('wallet:metamask').endsWith('/metamask.svg')) {
+        throw new Error('MetaMask fallback logo is missing');
+    }
 `, sandbox);
 """
         result = subprocess.run(
@@ -83,6 +90,15 @@ vm.runInContext(`
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    def test_phantom_and_metamask_have_local_fallback_logos(self):
+        app_js = APP_JS.read_text(encoding="utf-8")
+
+        for wallet in ("phantom", "metamask"):
+            asset = WALLET_ASSETS / f"{wallet}.svg"
+            self.assertTrue(asset.is_file())
+            self.assertIn(f"/static/images/wallets/{wallet}.svg", app_js)
+            self.assertIn("<svg", asset.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

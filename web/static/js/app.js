@@ -14,6 +14,12 @@ let evmWalletProviderKeys = new WeakMap();
 let walletRenderScheduled = false;
 const discoveredEvmWallets = new Map();
 const boundEvmProviders = new WeakSet();
+// Official wallet integration assets are kept local so legacy providers that
+// omit EIP-6963 icon metadata still render a recognizable brand mark.
+const walletFallbackLogos = Object.freeze({
+    phantom: '/static/images/wallets/phantom.svg',
+    metamask: '/static/images/wallets/metamask.svg',
+});
 
 // EIP-6963 allows multiple injected EVM wallets to coexist without every
 // extension competing for window.ethereum.
@@ -474,18 +480,7 @@ function renderEvmWalletList() {
         button.className = 'wallet-provider-card';
         button.addEventListener('click', () => connectEvmWallet(key));
 
-        if (entry.info.icon && entry.info.icon.startsWith('data:image/')) {
-            const icon = document.createElement('img');
-            icon.className = 'wallet-provider-icon';
-            icon.alt = '';
-            icon.src = entry.info.icon;
-            button.appendChild(icon);
-        } else {
-            const monogram = document.createElement('span');
-            monogram.className = 'wallet-provider-monogram';
-            monogram.textContent = (entry.info.name || 'E').charAt(0).toUpperCase();
-            button.appendChild(monogram);
-        }
+        button.appendChild(createWalletVisual(entry.info, key));
 
         const meta = document.createElement('span');
         meta.className = 'wallet-provider-meta';
@@ -497,6 +492,42 @@ function renderEvmWalletList() {
         button.appendChild(meta);
         evmWalletList.appendChild(button);
     });
+}
+
+function getWalletFallbackLogo(key) {
+    const brand = String(key || '').replace(/^wallet:/, '').toLowerCase();
+    return walletFallbackLogos[brand] || null;
+}
+
+function createWalletVisual(info, key) {
+    const fallbackLogo = getWalletFallbackLogo(key);
+    const announcedIcon = info.icon && info.icon.startsWith('data:image/') ? info.icon : null;
+    const source = announcedIcon || fallbackLogo;
+    if (!source) {
+        return createWalletMonogram(info.name);
+    }
+
+    const icon = document.createElement('img');
+    icon.className = `wallet-provider-icon${fallbackLogo ? ' wallet-provider-brand-icon' : ''}`;
+    icon.alt = '';
+    let usingFallback = source === fallbackLogo;
+    icon.addEventListener('error', () => {
+        if (fallbackLogo && !usingFallback) {
+            usingFallback = true;
+            icon.src = fallbackLogo;
+            return;
+        }
+        icon.replaceWith(createWalletMonogram(info.name));
+    });
+    icon.src = source;
+    return icon;
+}
+
+function createWalletMonogram(name) {
+    const monogram = document.createElement('span');
+    monogram.className = 'wallet-provider-monogram';
+    monogram.textContent = (name || 'E').charAt(0).toUpperCase();
+    return monogram;
 }
 
 async function connectEvmWallet(key) {
