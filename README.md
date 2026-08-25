@@ -15,7 +15,7 @@
 | **Lighter Robinhood** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://robinhoodchain.lighter.xyz/?referral=YANOWO) |
 | **APEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://join.omni.apex.exchange/yanowo) |
 | **StandX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://standx.com/referral?code=yanowo) |
-| **POPDEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [官方網站](https://popdex.xyz/) |
+| **POPDEX** | ❌ | ✅ | ✅ | ❌ | ✅ | [註冊連結](https://app.popdex.xyz/zh-TC/referral?referralCode=YANOWO) |
 
 Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 
