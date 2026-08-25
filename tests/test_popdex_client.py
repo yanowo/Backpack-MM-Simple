@@ -253,6 +253,49 @@ class PopdexClientTest(unittest.TestCase):
         self.assertIn("code 15003", response.error_message)
         self.assertIn("one-way position mode", response.error_message)
 
+    def test_successful_order_event_does_not_treat_client_id_as_error(self):
+        client = self.make_client(wait_for_receipt=True)
+        client._market_cache["BTCUSDT"] = {"symbol": "BTCUSDT", "symbolId": "20000"}
+        client._send_contract_call = Mock(return_value=("0xdeadbeef", None, {}))
+        client._wait_receipt = Mock(
+            return_value={
+                "status": "0x1",
+                "logs": [
+                    {
+                        "topics": ["0x" + client.ORDER_CREATE_EVENT],
+                        "data": "0x"
+                        + abi_encode(
+                            ["uint128", "bytes32", "int256", "int256", "int256", "uint8", "bool", "uint32"],
+                            [
+                                284797862720569344,
+                                b"pdx-success".ljust(32, b"\0"),
+                                80000 * 10**18,
+                                2 * 10**14,
+                                0,
+                                0,
+                                True,
+                                0,
+                            ],
+                        ).hex(),
+                    }
+                ],
+            }
+        )
+        response = client.execute_order(
+            {
+                "symbol": "BTCUSDT",
+                "orderType": "Limit",
+                "side": "Bid",
+                "price": "80000",
+                "quantity": "0.0002",
+                "postOnly": True,
+                "clientId": "pdx-success",
+            }
+        )
+        self.assertTrue(response.success, response.error_message)
+        self.assertEqual(response.data.order_id, "284797862720569344")
+        self.assertEqual(response.data.client_order_id, "pdx-success")
+
     def test_fill_mapping_uses_popdex_exec_fields(self):
         client = self.make_client()
         client.make_request = Mock(

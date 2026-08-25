@@ -420,13 +420,14 @@ class PopdexClient(BaseExchangeClient):
                     bytes.fromhex(str(log.get("data") or "0x")[2:]),
                 )
                 order_id = str(decoded[0])
-                client_id = bytes(decoded[1]).rstrip(b"\x00").decode("utf-8", errors="ignore") or None
                 if not bool(decoded[6]) or int(decoded[7]) != 0:
                     code = int(decoded[7])
                     description = self.ORDER_ERROR_MESSAGES.get(code)
                     suffix = f": {description}" if description else ""
                     return None, f"POPDEX OrderCreate rejected with code {code}{suffix}"
-                return order_id, client_id
+                # The second tuple member is an error slot, not the event's
+                # clientOrderId. execute_order already owns the submitted ID.
+                return order_id, None
             except Exception:
                 continue
         return None, None
