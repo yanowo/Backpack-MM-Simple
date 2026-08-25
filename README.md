@@ -22,6 +22,7 @@ Twitter：[Yan Practice ⭕散修](https://x.com/practice_y11)
 ## 功能特點
 
 - **Web 控制枱**：直觀的圖形化界面，實時監控交易狀態和策略表現
+- **POPDEX Agent 精靈**：Web 端可連接 OKX Wallet、MetaMask、Rabby、Coinbase Wallet 等通用 EVM provider，在本機產生 Agent Key 並完成鏈上授權
 - **多交易所架構**：支援 Backpack、Aster、Paradex、Lighter、Lighter Robinhood Chain、APEX、StandX、POPDEX，可擴展至其他交易所
 - **四種策略模式**：
   - [現貨做市](docs/SPOT_MARKET_MAKING.md)：多層訂單 + 智能重平衡

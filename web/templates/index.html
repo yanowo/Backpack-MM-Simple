@@ -420,6 +420,131 @@
                 </form>
             </section>
 
+            <!-- POPDEX Agent Setup -->
+            <section id="popdexAgentPanel" class="agent-panel" hidden>
+                <div class="agent-panel-glow" aria-hidden="true"></div>
+                <div class="section-header-bar agent-header">
+                    <div class="header-left">
+                        <div class="agent-eyebrow">POPDEX / LOCAL SECURITY MODULE</div>
+                        <h2 class="section-title">Agent 授權精靈</h2>
+                        <span class="section-subtitle">連接任一 EVM 錢包，建立不具提款權限的交易 Agent</span>
+                    </div>
+                    <div id="popdexAgentBadge" class="agent-status-badge is-idle">
+                        <span class="agent-status-dot"></span>
+                        <span id="popdexAgentBadgeText">尚未設定</span>
+                    </div>
+                </div>
+
+                <div class="agent-security-banner">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                        <path d="m9 12 2 2 4-4"/>
+                    </svg>
+                    <div>
+                        <strong>主錢包私鑰永遠留在錢包內</strong>
+                        <span>本機只保存新產生的 Agent Key；鏈上僅送出 Agent 公開地址與授權範圍。</span>
+                    </div>
+                </div>
+
+                <div class="agent-step-grid">
+                    <article id="agentStepWallet" class="agent-step is-current">
+                        <span class="agent-step-index">01</span>
+                        <div>
+                            <span class="agent-step-label">MAIN WALLET</span>
+                            <strong id="agentWalletLabel">連接 EVM 錢包</strong>
+                            <code id="agentWalletAddress">等待連接</code>
+                        </div>
+                    </article>
+                    <article id="agentStepKey" class="agent-step">
+                        <span class="agent-step-index">02</span>
+                        <div>
+                            <span class="agent-step-label">LOCAL AGENT</span>
+                            <strong>產生並保存交易金鑰</strong>
+                            <code id="agentPublicAddress">尚未產生</code>
+                        </div>
+                    </article>
+                    <article id="agentStepAuthorize" class="agent-step">
+                        <span class="agent-step-index">03</span>
+                        <div>
+                            <span class="agent-step-label">ON-CHAIN APPROVAL</span>
+                            <strong>由錢包確認授權</strong>
+                            <code id="agentApprovalState">等待前兩步</code>
+                        </div>
+                    </article>
+                </div>
+
+                <div class="agent-settings-grid">
+                    <div class="form-field">
+                        <label class="field-label" for="popdexAgentNetwork">POPDEX 網路</label>
+                        <select id="popdexAgentNetwork" class="field-input">
+                            <option value="mainnet">Mainnet · Chain 2184</option>
+                            <option value="testnet">Testnet · Chain 34952</option>
+                        </select>
+                    </div>
+                    <div class="form-field">
+                        <label class="field-label" for="popdexAgentExpiry">授權期限</label>
+                        <select id="popdexAgentExpiry" class="field-input">
+                            <option value="30">30 天</option>
+                            <option value="90" selected>90 天（建議）</option>
+                            <option value="365">1 年</option>
+                            <option value="0">永不過期</option>
+                        </select>
+                    </div>
+                    <div class="form-field checkbox-field agent-scope-field">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="popdexAgentGlobal" class="field-checkbox">
+                            <span>
+                                <span class="checkbox-text">涵蓋所有子帳戶</span>
+                                <small>預設只授權目前主帳戶</small>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
+                <div id="evmWalletPicker" class="wallet-picker" hidden>
+                    <div class="wallet-picker-heading">
+                        <div>
+                            <span>選擇錢包</span>
+                            <small>支援 EIP-6963／EIP-1193 瀏覽器錢包</small>
+                        </div>
+                        <button type="button" id="refreshWalletsBtn" class="wallet-refresh-btn" aria-label="重新偵測錢包">重新偵測</button>
+                    </div>
+                    <div id="evmWalletList" class="wallet-provider-list"></div>
+                </div>
+
+                <div class="agent-actions">
+                    <button type="button" id="connectEvmWalletBtn" class="agent-action-btn wallet-action">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                            <rect x="3" y="5" width="18" height="14" rx="3"/>
+                            <path d="M16 12h5M7 9h5"/>
+                        </svg>
+                        <span>連接 EVM 錢包</span>
+                    </button>
+                    <button type="button" id="preparePopdexAgentBtn" class="agent-action-btn key-action" disabled>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                            <circle cx="8" cy="15" r="4"/>
+                            <path d="m11 12 8-8m-3 3 3 3m-6 0 2 2"/>
+                        </svg>
+                        <span>建立本機 Agent</span>
+                    </button>
+                    <button type="button" id="authorizePopdexAgentBtn" class="agent-action-btn approve-action" disabled>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                            <path d="M20 6 9 17l-5-5"/>
+                        </svg>
+                        <span>簽署鏈上授權</span>
+                    </button>
+                </div>
+
+                <div id="popdexAgentMessage" class="agent-message" aria-live="polite">
+                    選擇 POPDEX 後，可從這裡完成 Agent 建立與授權。
+                </div>
+
+                <div class="agent-footnote">
+                    <span>LOCAL ONLY</span>
+                    私鑰只會寫入本機 <code>.env</code>，API 不會回傳或顯示私鑰。Agent 僅可交易，不能提款。
+                </div>
+            </section>
+
             <!-- Activity Log -->
             <section class="log-panel">
                 <div class="section-header-bar">

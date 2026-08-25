@@ -10,6 +10,7 @@ import sys
 import traceback
 import time
 import socket
+import ipaddress
 from typing import Optional, Dict, Any
 from datetime import datetime
 
@@ -23,6 +24,7 @@ from utils.lighter_config import (
     is_lighter_exchange,
 )
 from utils.popdex_config import build_popdex_config_from_env
+from utils.popdex_agent_setup import get_agent_setup_status, prepare_agent_setup
 
 logger = setup_logger("web_server")
 
@@ -80,6 +82,61 @@ def index():
 def get_status():
     """獲取機器人狀態"""
     return jsonify(bot_status)
+
+
+def _is_local_request() -> bool:
+    """Agent key creation is intentionally restricted to the local machine."""
+    remote_address = str(request.remote_addr or "").split("%", 1)[0]
+    try:
+        return ipaddress.ip_address(remote_address).is_loopback
+    except ValueError:
+        return False
+
+
+@app.route('/api/popdex-agent/status', methods=['GET'])
+def popdex_agent_status():
+    """Return public Agent setup state; never return the private key."""
+    if not _is_local_request():
+        return jsonify({
+            'success': False,
+            'message': 'POPDEX Agent 設定只允許從本機存取',
+        }), 403
+    try:
+        return jsonify(get_agent_setup_status(request.args.get('network')))
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    except Exception as exc:
+        logger.error("讀取 POPDEX Agent 狀態失敗: %s", exc)
+        return jsonify({'success': False, 'message': '無法讀取 POPDEX Agent 狀態'}), 500
+
+
+@app.route('/api/popdex-agent/prepare', methods=['POST'])
+def popdex_agent_prepare():
+    """Generate/reuse a local key and return unsigned wallet authorization data."""
+    if not _is_local_request():
+        return jsonify({
+            'success': False,
+            'message': 'POPDEX Agent 設定只允許從本機存取',
+        }), 403
+    try:
+        data = request.get_json(silent=True) or {}
+        result = prepare_agent_setup(
+            main_address=str(data.get('account_address') or ''),
+            network=data.get('network'),
+            expires_in_days=data.get('expires_in_days', 90),
+            global_scope=bool(data.get('global_scope', False)),
+        )
+        logger.info(
+            "POPDEX Agent 授權資料已準備完成（network=%s, generated=%s）",
+            result.get('network'),
+            result.get('generated'),
+        )
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    except Exception as exc:
+        logger.error("準備 POPDEX Agent 失敗: %s", exc)
+        return jsonify({'success': False, 'message': '無法準備 POPDEX Agent 設定'}), 500
 
 
 @app.route('/api/start', methods=['POST'])

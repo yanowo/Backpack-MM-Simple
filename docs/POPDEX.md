@@ -9,6 +9,18 @@ POPDEX 在本專案中支援永續做市、Maker-Taker 對沖與永續網格。�
 3. `POPDEX_AGENT_PRIVATE_KEY` 只填已授權的 Agent Key 私鑰。不要填入存放資金的主錢包私鑰。
 4. `.env` 已被 Git 忽略；不要把 Agent Key 寫進程式碼、日誌或 commit。
 
+### Web 控制台快速設定
+
+啟動 `python run.py --web`，在控制台選擇 `POPDEX` 後，可直接使用「POPDEX AGENT SETUP」精靈：
+
+1. 連接任一支援 EIP-1193 / EIP-6963 的 EVM 瀏覽器錢包，例如 OKX Wallet、MetaMask、Rabby 或 Coinbase Wallet。
+2. 按「建立本機 Agent」；程式會在本機產生獨立 Agent Key，寫入 `.env`，Web API 不會回傳或顯示私鑰。
+3. 以剛連接的主錢包確認 `approveAgent` 鏈上交易；確認後頁面會查詢 Account 合約並顯示授權完成。
+
+這個設定 API 僅接受 loopback（`127.0.0.1` / `::1`）請求。OKX 等錢包只要在目前瀏覽器注入 EVM provider，或在其行動版 DApp 瀏覽器開啟控制台，即可被偵測；純行動版的 WalletConnect QR 流程需要另外配置 WalletConnect Project ID，目前沒有內建。
+
+主錢包只負責簽署 Agent 授權，策略執行時只使用 Agent Key。已撤銷、過期或綁定其他帳戶的 Agent 不會被自動覆寫或重複授權，需在 POPDEX 依官方流程輪換成新的 Agent。
+
 ```dotenv
 POPDEX_ACCOUNT_ADDRESS=0xyour_popdex_wallet_address
 POPDEX_AGENT_PRIVATE_KEY=0xyour_authorized_agent_private_key
