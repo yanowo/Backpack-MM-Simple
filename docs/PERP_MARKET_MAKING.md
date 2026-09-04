@@ -18,6 +18,9 @@
 # Backpack 永續做市
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 3600 --interval 10
 
+# Backpack TradFi 永續做市（簡寫會解析成 SNDK.US_USDC_PERP）
+python run.py --exchange backpack --market-type perp --symbol SNDK-PERP --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 0.1 --position-threshold 0.01 --duration 3600 --interval 10
+
 # Aster 永續做市
 python run.py --exchange aster --market-type perp --symbol SOLUSDT --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 3600 --interval 10
 
@@ -108,6 +111,7 @@ python run.py --exchange standx --market-type perp --symbol BTC-USD --spread 0.0
 | 交易所 | 特殊處理 | 說明 |
 |--------|---------|------|
 | Backpack | `autoLendRedeem=true` | 自動借貸贖回 |
+| Backpack TradFi 永續 | 動態解析官方 symbol | 支援 `SNDK-PERP` 等簡寫，價格與數量精度取自 `/markets` |
 | Aster | 移除 `postOnly` | 永續合約不支持 postOnly |
 | Paradex | JWT 自動刷新 | 保持認證狀態 |
 | Lighter | 簽名並獲取 index | zkLighter 鎖上簽名 |

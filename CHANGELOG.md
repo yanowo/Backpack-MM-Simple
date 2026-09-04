@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### 新增
+- **Backpack TradFi 永續合約支援**：從官方市場清單動態解析 `STOCK`／`INDEX` 永續商品，支援以 `SNDK-PERP` 等簡寫啟動做市、對沖與網格策略
+- REST 下單、撤單、行情、訂單簿、持倉、成交與 WebSocket 頻道統一使用 Backpack 官方完整市場代號
+
+### 修復
+- Backpack 市場資訊改讀官方 `marketType`、`orderBookState` 與 quantity `stepSize`，正確辨識永續市場及交易精度
+
 ## [2.10.0] - 2026-08-25
 
 ### 新增

@@ -34,7 +34,7 @@ def parse_arguments():
     parser.add_argument('--secret-key', type=str, help='Secret Key (可選，默認使用環境變數或配置文件)')
     
     # 做市參數
-    parser.add_argument('--symbol', type=str, help='交易對 (例如: SOL_USDC)')
+    parser.add_argument('--symbol', type=str, help='交易對 (例如: SOL_USDC；Backpack TradFi 永續可用 SNDK-PERP)')
     parser.add_argument('--spread', type=float, help='價差百分比 (例如: 0.5)')
     parser.add_argument('--quantity', type=float, help='訂單數量 (可選)')
     parser.add_argument('--max-orders', type=int, default=3, help='每側最大訂單數量 (默認: 3)')

@@ -594,13 +594,21 @@ def get_markets_command():
         markets_info = []
     
     spot_markets = [m for m in markets_info if m.get('marketType') == 'SPOT']
-    print(f"\n找到 {len(spot_markets)} 個現貨市場:")
-    for i, market in enumerate(spot_markets):
-        symbol = market.get('symbol')
-        base = market.get('baseSymbol')
-        quote = market.get('quoteSymbol')
-        market_type = market.get('marketType')
-        print(f"{i+1}. {symbol} ({base}/{quote}) - {market_type}")
+    perp_markets = [m for m in markets_info if m.get('marketType') == 'PERP']
+    tradfi_perps = [
+        m for m in perp_markets
+        if str(m.get('rwaMarketType') or '').upper() in ('STOCK', 'INDEX')
+    ]
+
+    print(f"\n找到 {len(spot_markets)} 個現貨、{len(perp_markets)} 個永續市場")
+    if tradfi_perps:
+        print(f"\nBackpack TradFi 永續市場 ({len(tradfi_perps)}):")
+        for i, market in enumerate(tradfi_perps):
+            symbol = market.get('symbol')
+            base = market.get('baseSymbol')
+            rwa_type = market.get('rwaMarketType')
+            short_symbol = f"{str(base).split('.', 1)[0]}-PERP"
+            print(f"{i+1}. {short_symbol} -> {symbol} ({rwa_type})")
 
 def get_orderbook_command(api_key, secret_key):
     """獲取市場深度命令"""

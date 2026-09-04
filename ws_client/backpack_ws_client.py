@@ -67,6 +67,14 @@ class BackpackWebSocket(BaseWebSocketClient):
         self.api_key = api_key or BACKPACK_API_KEY
         self.secret_key = secret_key or BACKPACK_SECRET_KEY
         self.default_window = BACKPACK_DEFAULT_WINDOW
+
+        # Resolve Backpack UI aliases before building stream names. Public market
+        # discovery does not require credentials and is reused by REST fallbacks.
+        rest_client = BPClient({
+            "api_key": self.api_key,
+            "secret_key": self.secret_key,
+        })
+        resolved_symbol = rest_client.resolve_market_symbol(symbol)
         
         config = WSConnectionConfig(
             ws_url=ws_url or BACKPACK_WS_URL,
@@ -84,12 +92,12 @@ class BackpackWebSocket(BaseWebSocketClient):
         
         super().__init__(
             config=config,
-            symbol=symbol,
+            symbol=resolved_symbol,
             on_message_callback=on_message_callback,
         )
         
         # Backpack 特有的客戶端緩存
-        self._client_cache: Dict[str, BPClient] = {}
+        self._client_cache: Dict[str, BPClient] = {"bp_client": rest_client}
     
     # ==================== 實現抽象方法 ====================
     

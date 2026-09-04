@@ -46,6 +46,8 @@ python run.py --exchange backpack --symbol SOL_USDC --strategy grid --auto-price
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.1 --max-position 2.0 --duration 3600 --interval 60
 ```
 
+Backpack TradFi 永續也支援相同策略，例如將 `--symbol` 改為 `SNDK-PERP`；程式會自動轉換為官方 `SNDK.US_USDC_PERP`。
+
 #### 做多網格（單向做多）
 ```bash
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --strategy perp_grid --grid-type long --grid-lower 140 --grid-upper 150 --grid-num 15 --quantity 0.1 --max-position 2.0 --duration 3600 --interval 60
@@ -68,7 +70,7 @@ python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --st
 | 參數 | 説明 | 默認值 | 示例 |
 |------|------|--------|------|
 | `--exchange` | 交易所選擇 | - | `backpack`, `aster`, `paradex`, `lighter`, `lighter_robinhood`, `apex`, `standx` |
-| `--symbol` | 交易對 | - | `SOL_USDC`、`SOL_USDC_PERP` 或 `BTC-USD` |
+| `--symbol` | 交易對 | - | `SOL_USDC`、`SOL_USDC_PERP`、`SNDK-PERP` 或 `BTC-USD` |
 | `--strategy` | 策略類型 | `standard` | `grid` 或 `perp_grid` |
 | `--market-type` | 市場類型（永續合約必填） | `spot` | `perp` |
 | `--grid-upper` | 網格上限價格 | - | `160` |

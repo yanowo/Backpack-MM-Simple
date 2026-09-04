@@ -123,6 +123,11 @@ class MarketMaker:
         if not hasattr(market_info, 'base_asset'):
             raise ValueError(f"市場限制返回非標準 MarketInfo: {type(market_info)}")
 
+        # Backpack TradFi perpetuals use full API symbols such as
+        # SNDK.US_USDC_PERP even when the user enters the UI alias SNDK-PERP.
+        if exchange == 'backpack' and market_info.symbol:
+            self.symbol = market_info.symbol
+
         # 保存原始數據供後續使用（MarketInfo.raw 或基於 dataclass 的字典）
         self.market_limits = market_info.raw or {
             'base_asset': market_info.base_asset,
@@ -180,7 +185,7 @@ class MarketMaker:
         self.ws = None
         self.private_ws = None
         if exchange == 'backpack':
-            self.ws = BackpackWebSocket(api_key, secret_key, symbol, self.on_ws_message, auto_reconnect=True)
+            self.ws = BackpackWebSocket(api_key, secret_key, self.symbol, self.on_ws_message, auto_reconnect=True)
         elif exchange == 'aster':
             # 公共行情使用 public WS，私有成交使用 listenKey WS
             self.ws = AsterWebSocket(
@@ -284,7 +289,7 @@ class MarketMaker:
         if (self.exchange in ('aster', 'apex', 'standx', 'popdex') or is_lighter_exchange(self.exchange)) and self.ws is None:
             self._bootstrap_fill_history()
         
-        logger.info(f"初始化做市商: {symbol}")
+        logger.info(f"初始化做市商: {self.symbol}")
         logger.info(f"基礎資產: {self.base_asset}, 報價資產: {self.quote_asset}")
         logger.info(f"基礎精度: {self.base_precision}, 報價精度: {self.quote_precision}")
         logger.info(f"最小訂單大小: {self.min_order_size}, 價格步長: {self.tick_size}")

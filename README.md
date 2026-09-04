@@ -327,6 +327,9 @@ python run.py --exchange backpack --symbol SOL_USDC --spread 0.01 --strategy mak
 # BackPack 永續做市
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --max-orders 2 --target-position 0 --max-position 5 --position-threshold 2 --inventory-skew 0 --stop-loss -1 --take-profit 5 --duration 3600 --interval 10
 
+# BackPack TradFi 永續做市（會自動解析成官方 SNDK.US_USDC_PERP）
+python run.py --exchange backpack --market-type perp --symbol SNDK-PERP --spread 0.01 --quantity 0.001 --max-orders 2 --target-position 0 --max-position 0.1 --position-threshold 0.01 --inventory-skew 0 --duration 3600 --interval 10
+
 # BackPack Maker-Taker 永續對沖
 python run.py --exchange backpack --market-type perp --symbol SOL_USDC_PERP --spread 0.01 --quantity 0.1 --strategy maker_hedge --target-position 0 --max-position 5 --position-threshold 2 --duration 3600 --interval 8
 
@@ -396,6 +399,10 @@ python run.py --exchange standx --market-type perp --symbol BTC-USD --strategy p
 # POPDEX 永續合約網格交易（自動價格範圍）
 python run.py --exchange popdex --market-type perp --symbol BTCUSDT --strategy perp_grid --grid-type neutral --auto-price --price-range 5 --grid-num 10 --quantity 0.001 --max-position 1.0 --duration 3600 --interval 60
 ```
+
+### Backpack TradFi 永續合約代號
+
+Backpack API 使用完整市場代號，例如 `SNDK.US_USDC_PERP`。本程式會從官方市場清單動態辨識 `rwaMarketType=STOCK` 或 `INDEX` 的永續商品，因此可直接輸入較短的 `SNDK-PERP`、`MU-PERP`、`SPY-PERP`；新上市商品不需要另外硬編碼。實際下單、撤單、行情、訂單簿、持倉、成交與 WebSocket 訂閱都會統一使用官方完整代號。
 
 > **適合場景**：自動化部署、定時任務、批量運行  
 > **完整示例和參數説明請查看**：[策略文檔](#-策略文檔)

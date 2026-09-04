@@ -2,6 +2,7 @@
 API請求客户端模塊
 """
 import json
+import re
 import time
 import requests
 from decimal import Decimal
@@ -43,6 +44,7 @@ class BPClient(BaseExchangeClient):
         super().__init__(config)
         self.api_key = config.get("api_key")
         self.secret_key = config.get("secret_key")
+        self._market_aliases: Dict[str, str] = {}
 
         # 從環境變量讀取代理配置
         self.proxies = get_proxy_config()
@@ -57,6 +59,75 @@ class BPClient(BaseExchangeClient):
 
     async def disconnect(self) -> None:
         logger.info("Backpack 客户端已斷開連接")
+
+    @staticmethod
+    def _symbol_lookup_key(symbol: str) -> str:
+        """Return a separator-insensitive key used for Backpack market aliases."""
+        return re.sub(r"[^A-Z0-9]", "", str(symbol or "").strip().upper())
+
+    @staticmethod
+    def _decimal_places(value: Any) -> int:
+        try:
+            return max(0, -Decimal(str(value)).normalize().as_tuple().exponent)
+        except Exception:
+            return 0
+
+    @classmethod
+    def _market_alias_candidates(cls, market: MarketInfo) -> List[str]:
+        """Build user-facing aliases for an official Backpack market symbol."""
+        aliases = [market.symbol]
+        raw = market.raw if isinstance(market.raw, dict) else {}
+        rwa_market_type = str(raw.get("rwaMarketType") or "").upper()
+        if market.market_type != "PERP" or rwa_market_type not in {"STOCK", "INDEX"}:
+            return aliases
+
+        base_symbol = str(market.base_asset or "").upper()
+        ticker = base_symbol.split(".", 1)[0]
+        if ticker:
+            aliases.extend((
+                f"{ticker}-PERP",
+                f"{ticker}_PERP",
+                f"{ticker}_USDC_PERP",
+            ))
+        if base_symbol:
+            aliases.extend((f"{base_symbol}-PERP", f"{base_symbol}_PERP"))
+        return aliases
+
+    def _cache_market_aliases(self, markets: List[MarketInfo]) -> None:
+        # Register official symbols first so a shorthand can never shadow a real market.
+        aliases: Dict[str, str] = {
+            self._symbol_lookup_key(market.symbol): market.symbol
+            for market in markets
+            if market.symbol
+        }
+        for market in markets:
+            for alias in self._market_alias_candidates(market):
+                key = self._symbol_lookup_key(alias)
+                if key:
+                    aliases.setdefault(key, market.symbol)
+        self._market_aliases = aliases
+
+    def resolve_market_symbol(self, symbol: str) -> str:
+        """Resolve UI-style aliases such as ``SNDK-PERP`` to Backpack API symbols."""
+        requested = str(symbol or "").strip().upper()
+        if not requested:
+            return requested
+
+        if not self._market_aliases:
+            markets_response = self.get_markets()
+            if not markets_response.success:
+                return requested
+
+        resolved = self._market_aliases.get(self._symbol_lookup_key(requested), requested)
+        if resolved != requested:
+            logger.info("Backpack 市場代號已解析: %s -> %s", requested, resolved)
+        return resolved
+
+    def _resolve_order_symbol(self, order: Dict[str, Any]) -> Dict[str, Any]:
+        resolved_order = dict(order)
+        if resolved_order.get("symbol"):
+            resolved_order["symbol"] = self.resolve_market_symbol(resolved_order["symbol"])
+        return resolved_order
 
     def make_request(self, method: str, endpoint: str, api_key=None, secret_key=None, instruction=None, 
                     params=None, data=None, retry_count=3) -> Dict:
@@ -256,6 +327,7 @@ class BPClient(BaseExchangeClient):
         """
         endpoint = f"/api/{API_VERSION}/order"
         instruction = "orderExecute"
+        order_details = self._resolve_order_symbol(order_details)
       
         # 根據實際請求體產生簽名參數，確保完全一致
         # 同時預處理 order_details，確保數值格式統一
@@ -318,6 +390,8 @@ class BPClient(BaseExchangeClient):
         Returns:
             ApiResponse with data: BatchOrderResult
         """
+        orders_list = [self._resolve_order_symbol(order) for order in orders_list]
+
         # 如果訂單數量超過限制，分批處理
         if len(orders_list) > max_batch_size:
             logger.info(f"訂單數量 {len(orders_list)} 超過單次限制 {max_batch_size}，將分批下單")
@@ -517,7 +591,7 @@ class BPClient(BaseExchangeClient):
         instruction = "orderQueryAll"
         params = {}
         if symbol:
-            params["symbol"] = symbol
+            params["symbol"] = self.resolve_market_symbol(symbol)
         raw = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
         
         error = self._check_raw_error(raw)
@@ -554,6 +628,7 @@ class BPClient(BaseExchangeClient):
         """
         endpoint = f"/api/{API_VERSION}/orders"
         instruction = "orderCancelAll"
+        symbol = self.resolve_market_symbol(symbol)
         params = {"symbol": symbol}
         data = {"symbol": symbol}
         raw = self.make_request("DELETE", endpoint, self.api_key, self.secret_key, instruction, params, data)
@@ -578,6 +653,7 @@ class BPClient(BaseExchangeClient):
         """
         endpoint = f"/api/{API_VERSION}/order"
         instruction = "orderCancel"
+        symbol = self.resolve_market_symbol(symbol)
         params = {"orderId": order_id, "symbol": symbol}
         data = {"orderId": order_id, "symbol": symbol}
         raw = self.make_request("DELETE", endpoint, self.api_key, self.secret_key, instruction, params, data)
@@ -599,6 +675,7 @@ class BPClient(BaseExchangeClient):
         Returns:
             ApiResponse with data: TickerInfo
         """
+        symbol = self.resolve_market_symbol(symbol)
         endpoint = f"/api/{API_VERSION}/ticker"
         params = {"symbol": symbol}
         raw = self.make_request("GET", endpoint, params=params)
@@ -639,28 +716,39 @@ class BPClient(BaseExchangeClient):
         markets = []
         raw_list = raw if isinstance(raw, list) else []
         for item in raw_list:
-            filters = item.get("filters", {})
+            filters = item.get("filters") or {}
             tick_size = "0.00000001"
             min_order_size = "0"
-            
-            if "price" in filters:
-                tick_size = filters["price"].get("tickSize", tick_size)
-            if "quantity" in filters:
-                min_order_size = filters["quantity"].get("minQuantity", min_order_size)
+            max_order_size = None
+            step_size = None
+
+            price_filter = filters.get("price") or {}
+            quantity_filter = filters.get("quantity") or {}
+            tick_size = price_filter.get("tickSize") or tick_size
+            min_order_size = quantity_filter.get("minQuantity") or min_order_size
+            max_order_size = quantity_filter.get("maxQuantity")
+            step_size = quantity_filter.get("stepSize")
+
+            raw_market_type = str(item.get("marketType") or item.get("type") or "SPOT").upper()
+            market_type = "PERP" if raw_market_type in {"PERP", "PERPETUAL"} else raw_market_type
+            precision_source = str(step_size or min_order_size)
             
             markets.append(MarketInfo(
                 symbol=item.get("symbol"),
                 base_asset=item.get("baseSymbol"),
                 quote_asset=item.get("quoteSymbol"),
-                market_type="PERP" if item.get("type") == "perpetual" else "SPOT",
-                status=item.get("status", "ACTIVE"),
+                market_type=market_type,
+                status=str(item.get("orderBookState") or item.get("status") or "ACTIVE").upper(),
                 min_order_size=self.safe_decimal(min_order_size, Decimal("0")),
+                max_order_size=self.safe_decimal(max_order_size) if max_order_size is not None else None,
                 tick_size=self.safe_decimal(tick_size, Decimal("0.00000001")),
-                base_precision=len(min_order_size.split(".")[-1]) if "." in min_order_size else 0,
-                quote_precision=len(tick_size.split(".")[-1]) if "." in tick_size else 0,
+                step_size=self.safe_decimal(step_size) if step_size is not None else None,
+                base_precision=self._decimal_places(precision_source),
+                quote_precision=self._decimal_places(tick_size),
                 raw=item
             ))
-        
+
+        self._cache_market_aliases(markets)
         return ApiResponse.ok(markets, raw=raw)
 
     def get_order_book(self, symbol: str, limit: Optional[int] = None) -> ApiResponse:
@@ -669,6 +757,7 @@ class BPClient(BaseExchangeClient):
         Returns:
             ApiResponse with data: OrderBookInfo
         """
+        symbol = self.resolve_market_symbol(symbol)
         endpoint = f"/api/{API_VERSION}/depth"
         params = {"symbol": symbol}
         if limit is not None:
@@ -790,7 +879,7 @@ class BPClient(BaseExchangeClient):
         instruction = "fillHistoryQueryAll"
         params = {"limit": str(limit)}
         if symbol:
-            params["symbol"] = symbol
+            params["symbol"] = self.resolve_market_symbol(symbol)
         raw = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params)
         
         error = self._check_raw_error(raw)
@@ -822,6 +911,7 @@ class BPClient(BaseExchangeClient):
         Returns:
             ApiResponse with data: List[KlineInfo]
         """
+        symbol = self.resolve_market_symbol(symbol)
         endpoint = f"/api/{API_VERSION}/klines"
         
         # 計算起始時間 (秒)
@@ -893,8 +983,9 @@ class BPClient(BaseExchangeClient):
             return markets_response
         
         markets_list = markets_response.data
+        resolved_symbol = self._market_aliases.get(self._symbol_lookup_key(symbol), str(symbol).strip().upper())
         for market_info in markets_list:
-            if market_info.symbol == symbol:
+            if market_info.symbol == resolved_symbol:
                 return ApiResponse.ok(market_info, raw=market_info.raw)
         
         return ApiResponse.error(f"找不到交易對 {symbol} 的信息")
@@ -909,7 +1000,7 @@ class BPClient(BaseExchangeClient):
         instruction = "positionQuery"
         params = {}
         if symbol:
-            params["symbol"] = symbol
+            params["symbol"] = self.resolve_market_symbol(symbol)
         
         # 對於倉位查詢，404是正常情況（表示沒有倉位），所以只重試1次
         raw = self.make_request("GET", endpoint, self.api_key, self.secret_key, instruction, params, retry_count=1)
